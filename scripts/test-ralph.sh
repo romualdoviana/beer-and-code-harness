@@ -33,12 +33,12 @@ assert_eq() {
 
 assert_contains() {
   local haystack_file="$1" needle="$2" msg="$3"
-  if grep -qF "$needle" "$haystack_file"; then ok "$msg"; else bad "$msg (nao achou '$needle')"; fi
+  if grep -qF -- "$needle" "$haystack_file"; then ok "$msg"; else bad "$msg (nao achou '$needle')"; fi
 }
 
 assert_not_contains() {
   local haystack_file="$1" needle="$2" msg="$3"
-  if grep -qF "$needle" "$haystack_file"; then bad "$msg (achou '$needle')"; else ok "$msg"; fi
+  if grep -qF -- "$needle" "$haystack_file"; then bad "$msg (achou '$needle')"; else ok "$msg"; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -95,6 +95,11 @@ fi
 
 grep -q '^RALPH_VERIFY' <<< "$prompt" && verify=1
 
+# Progresso/telemetria SEMPRE no stderr, como as CLIs reais. Se o ralph unir os
+# streams, esse ruido vaza para o log parseado pelos gates.
+echo "[mock] progresso: lendo o prompt" >&2
+echo "[mock] progresso: 100%" >&2
+
 # Grava o modelo pedido para a sessao verificadora (assert do teste de modelo).
 if [ "$verify" -eq 1 ] && [ -n "$model" ]; then
   echo "$model" > "$state/verify_model"
@@ -114,6 +119,38 @@ if [ "$verify" -eq 1 ]; then
     for i in $(seq 1 "$tasks"); do echo "TASK $i: INCOMPLETE — nenhum codigo encontrado"; done
     exit 0
   fi
+
+  # Cenarios de duplicacao da resposta final do verificador.
+  case "$scenario" in
+    verify-echo-both)
+      # codex 0.145: a resposta final sai no stdout E no stderr. Com 2>&1 o
+      # parser via 4 linhas para 2 tasks e acusava cobertura incompleta.
+      for i in $(seq 1 "$tasks"); do
+        echo "TASK $i: DONE"
+        echo "TASK $i: DONE" >&2
+      done
+      exit 0
+      ;;
+    verify-dup-stdout)
+      # O modelo repete o bloco como resumo, no mesmo stream.
+      for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE"; done
+      echo "Resumo final:"
+      for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE"; done
+      exit 0
+      ;;
+    verify-dup-hides-gap)
+      # 2 linhas para 2 tasks, mas so a task 1 foi julgada: contar linhas daria
+      # verde com metade da fase sem veredito.
+      echo "TASK 1: DONE"
+      echo "TASK 1: DONE"
+      exit 0
+      ;;
+    verify-index-out-of-range)
+      for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE"; done
+      echo "TASK 9: DONE"
+      exit 0
+      ;;
+  esac
 
   if [ "$scenario" = "verify-incomplete-once" ] && [ "$n" -eq 1 ]; then
     echo "TASK 1: INCOMPLETE — o arquivo nao foi criado"
@@ -292,14 +329,37 @@ run_ralph() {
     MOCK_TEST_CMD="$dir/test.sh" \
     RALPH_LIMIT_WAIT_DEFAULT=1 \
     RALPH_LIMIT_BUFFER=1 \
+    RALPH_VERBOSE="${CASE_VERBOSE:-0}" \
+    RALPH_HEARTBEAT="${CASE_HEARTBEAT:-0}" \
     RALPH_VERIFY="${CASE_VERIFY:-}" \
     RALPH_VERIFY_MODEL="${CASE_VERIFY_MODEL:-}" \
+    RALPH_NOTIFY_CMD="${CASE_NOTIFY_CMD:-}" \
       bash "$RALPH" "$@" > "$dir/out.log" 2>&1
   ) || rc=$?
   echo "$rc"
 }
 
 commits() { git -C "$1/repo" rev-list --count HEAD; }
+
+# make_notify_recorder <script_path> <events_file> [exit_code]
+#
+# Adaptador de notificacao fake: grava "<evento>|<projeto>|<fase>|<mensagem>"
+# por linha. exit_code != 0 simula adaptador quebrado (rede fora, token errado),
+# que o ralph precisa ignorar.
+make_notify_recorder() {
+  local script="$1" events="$2" rc="${3:-0}"
+  cat > "$script" <<RECORDER
+#!/usr/bin/env bash
+printf '%s|%s|%s|%s\n' "\$1" "\${RALPH_PROJECT:-}" "\${RALPH_PHASE_NUM:-}" "\${2:-}" >> "$events"
+exit $rc
+RECORDER
+  chmod +x "$script"
+  : > "$events"
+}
+
+events_of() { grep -oE '^[a-z_]+' "$1" | tr '\n' ' '; }
+
+count_event() { grep -cE "^$2\|" "$1" || true; }
 
 case_enabled() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 
@@ -649,6 +709,900 @@ if case_enabled laravel-no-sail; then
   run_ralph "$d" empty-diff --engine claude --max-cycles 1 > /dev/null
   assert_contains "$d/out.log" "comando de teste (detectado): composer test" "sem sail -> composer test"
   assert_not_contains "$d/out.log" "Sail" "nao mencionou Sail"
+fi
+
+# ---------------------------------------------------------------------------
+# 22. RALPH_NOTIFY_CMD — run verde emite phase_done por fase + run_done
+# ---------------------------------------------------------------------------
+if case_enabled notify-green; then
+  header "22. notify — run verde"
+  d=$(new_case notify-green)
+  make_notify_recorder "$d/notify.sh" "$d/events.txt"
+  CASE_NOTIFY_CMD="$d/notify.sh" \
+    rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 1 "$(count_event "$d/events.txt" run_start)" "1 run_start no inicio"
+  assert_eq run_start "$(head -1 "$d/events.txt" | cut -d'|' -f1)" "run_start e o primeiro evento"
+  assert_contains "$d/events.txt" "2 de 2 fase(s)" "run_start conta as fases pendentes"
+  assert_eq 2 "$(count_event "$d/events.txt" phase_done)" "1 phase_done por fase"
+  assert_eq 1 "$(count_event "$d/events.txt" run_done)" "1 run_done no fim"
+  assert_eq 0 "$(count_event "$d/events.txt" phase_failed)" "nenhum phase_failed"
+  assert_contains "$d/events.txt" "|repo|1|" "RALPH_PROJECT e RALPH_PHASE_NUM chegam ao adaptador"
+  assert_contains "$d/events.txt" "run_done|" "run_done carrega o resumo"
+  assert_contains "$d/events.txt" "completa(s)" "resumo do run tem a contagem"
+fi
+
+# ---------------------------------------------------------------------------
+# 23. RALPH_NOTIFY_CMD — limite de uso emite limit_hit e limit_over
+# ---------------------------------------------------------------------------
+if case_enabled notify-limit; then
+  header "23. notify — limite de uso"
+  d=$(new_case notify-limit)
+  make_notify_recorder "$d/notify.sh" "$d/events.txt"
+  CASE_NOTIFY_CMD="$d/notify.sh" \
+    rc=$(run_ralph "$d" limit-epoch --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0 (retomou depois do reset)"
+  assert_eq 1 "$(count_event "$d/events.txt" limit_hit)" "limit_hit emitido"
+  assert_eq 1 "$(count_event "$d/events.txt" limit_over)" "limit_over emitido na retomada"
+  assert_contains "$d/events.txt" "Nenhuma acao necessaria" "limit_hit diz que nao precisa intervir"
+  assert_eq 2 "$(count_event "$d/events.txt" phase_done)" "as 2 fases seguiram verdes"
+fi
+
+# ---------------------------------------------------------------------------
+# 24. RALPH_NOTIFY_CMD — fase reprovada emite phase_failed com a causa
+# ---------------------------------------------------------------------------
+if case_enabled notify-failed; then
+  header "24. notify — fase reprovada"
+  d=$(new_case notify-failed)
+  make_notify_recorder "$d/notify.sh" "$d/events.txt"
+  CASE_NOTIFY_CMD="$d/notify.sh" \
+    rc=$(run_ralph "$d" empty-diff --engine claude --max-cycles 1 --test-cmd "$d/test.sh")
+  assert_eq 1 "$rc" "exit 1"
+  assert_eq 1 "$(count_event "$d/events.txt" phase_failed)" "phase_failed emitido"
+  assert_contains "$d/events.txt" "Ultimo gate:" "phase_failed nomeia o gate"
+  assert_eq 1 "$(count_event "$d/events.txt" run_done)" "run_done emitido mesmo com falha"
+fi
+
+# ---------------------------------------------------------------------------
+# 25. Notificacao e efeito colateral: adaptador quebrado nao altera o run
+# ---------------------------------------------------------------------------
+if case_enabled notify-broken; then
+  header "25. notify — adaptador quebrado nao derruba o run"
+  d=$(new_case notify-broken)
+  make_notify_recorder "$d/notify.sh" "$d/events.txt" 1   # exit 1 sempre
+  CASE_NOTIFY_CMD="$d/notify.sh" \
+    rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0 apesar do adaptador falhar"
+  assert_eq 3 "$(commits "$d")" "fases commitadas normalmente"
+
+  # comando inexistente: nem `timeout` resolvendo o binario pode vazar erro
+  d2=$(new_case notify-missing)
+  CASE_NOTIFY_CMD="$d2/nao-existe.sh" \
+    rc=$(run_ralph "$d2" ok --engine claude --test-cmd "$d2/test.sh")
+  assert_eq 0 "$rc" "exit 0 com RALPH_NOTIFY_CMD inexistente"
+  assert_eq 3 "$(commits "$d2")" "fases commitadas normalmente"
+  assert_not_contains "$d2/out.log" "nao-existe.sh" "nenhum erro do adaptador no log do run"
+fi
+
+# ---------------------------------------------------------------------------
+# 26. run_start conta o que FALTA, nao o total: no resume as fases feitas ficam
+#     de fora, senao a notificacao de inicio mente sobre o tamanho do run.
+# ---------------------------------------------------------------------------
+if case_enabled notify-resume; then
+  header "26. notify — run_start conta so as fases pendentes"
+  d=$(new_case notify-resume)
+  make_notify_recorder "$d/notify.sh" "$d/events.txt"
+
+  CASE_NOTIFY_CMD="$d/notify.sh" \
+    rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "1a execucao: exit 0"
+  assert_contains "$d/events.txt" "2 de 2 fase(s)" "1a execucao: 2 pendentes"
+
+  : > "$d/events.txt"
+  CASE_NOTIFY_CMD="$d/notify.sh" \
+    rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "2a execucao: exit 0"
+  assert_contains "$d/events.txt" "0 de 2 fase(s)" "2a execucao: nada pendente"
+  assert_eq 0 "$(count_event "$d/events.txt" phase_done)" "nenhuma fase reexecutada"
+
+  # --from tambem nao deve inflar a contagem
+  d2=$(new_case notify-from)
+  make_notify_recorder "$d2/notify.sh" "$d2/events.txt"
+  CASE_NOTIFY_CMD="$d2/notify.sh" \
+    rc=$(run_ralph "$d2" ok --engine claude --from 2 --test-cmd "$d2/test.sh")
+  assert_eq 0 "$rc" "--from 2: exit 0"
+  assert_contains "$d2/events.txt" "1 de 2 fase(s)" "--from 2: so 1 pendente"
+fi
+
+# ---------------------------------------------------------------------------
+# 27. Streams separados: o log parseado pelos gates so tem a resposta final;
+#     o progresso do engine vive no .stderr.log.
+# ---------------------------------------------------------------------------
+if case_enabled split-streams; then
+  header "27. stdout e stderr do engine em arquivos separados"
+  # Os dois caminhos de run_split: quiet (redirect direto) e verbose (FIFO).
+  for eng in claude codex; do
+    for verb in 0 1; do
+      d=$(new_case "split-streams-$eng-$verb")
+      # O prefixo vai DENTRO da substituicao: `VAR=x rc=$(cmd)` nao tem palavra
+      # de comando, entao bash trata os dois como atribuicao ao shell corrente
+      # e CASE_VERBOSE=1 vaza para todos os casos seguintes.
+      rc=$(CASE_VERBOSE="$verb" run_ralph "$d" ok --engine "$eng" --test-cmd "$d/test.sh")
+      tag="$eng verbose=$verb"
+      assert_eq 0 "$rc" "$tag: exit 0"
+
+      logs="$d/repo/.phases/logs"
+      assert_not_contains "$logs/phase-01.cycle-1.log" "[mock] progresso" \
+        "$tag: stdout da implementacao sem progresso do engine"
+      assert_contains "$logs/phase-01.cycle-1.stderr.log" "[mock] progresso" \
+        "$tag: progresso da implementacao no .stderr.log"
+      assert_not_contains "$logs/phase-01.verify-1.log" "[mock] progresso" \
+        "$tag: stdout do verificador sem progresso do engine"
+      assert_contains "$logs/phase-01.verify-1.stderr.log" "[mock] progresso" \
+        "$tag: progresso do verificador no .stderr.log"
+    done
+  done
+fi
+
+# ---------------------------------------------------------------------------
+# 28. REGRESSAO do falso gate 3 vermelho: o codex ecoa a resposta final no
+#     stdout E no stderr. Com 2>&1 o parser contava 4 TASK para 2 tasks e
+#     reprovava uma fase inteiramente implementada.
+# ---------------------------------------------------------------------------
+if case_enabled verify-echo-both; then
+  header "28. resposta final ecoada nos dois streams -> gate 3 verde"
+  d=$(new_case verify-echo-both)
+  rc=$(run_ralph "$d" verify-echo-both --engine codex --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0 (eco no stderr nao conta como cobertura)"
+  assert_eq 3 "$(commits "$d")" "2 commits de fase (1 fixture + 2)"
+  assert_contains "$d/out.log" "2/2 tasks confirmadas" "gate 3 contou 2 de 2, nao 4 de 2"
+  assert_not_contains "$d/out.log" "cobertura incompleta" "sem falso vermelho de cobertura"
+  assert_contains "$d/repo/.phases/logs/phase-01.verify-1.stderr.log" "TASK 1: DONE" \
+    "o eco ficou no .stderr.log"
+fi
+
+# ---------------------------------------------------------------------------
+# 29. Duplicata no MESMO stream (modelo repete o bloco como resumo): cobertura
+#     se mede em indices unicos, nao em linhas.
+# ---------------------------------------------------------------------------
+if case_enabled verify-dup-stdout; then
+  header "29. bloco TASK repetido no stdout -> indices unicos"
+  d=$(new_case verify-dup-stdout)
+  rc=$(run_ralph "$d" verify-dup-stdout --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  assert_contains "$d/out.log" "2/2 tasks confirmadas" "gate 3 verde com 2 indices unicos"
+  assert_contains "$d/out.log" "duplicatas ignoradas" "ralph reporta a deduplicacao"
+fi
+
+# ---------------------------------------------------------------------------
+# 30. O reverso: duplicata NAO pode esconder buraco. 'TASK 1' duas vezes e
+#     nenhum 'TASK 2' da 2 linhas para 2 tasks — contar linhas daria verde com
+#     metade da fase sem veredito.
+# ---------------------------------------------------------------------------
+if case_enabled verify-dup-hides-gap; then
+  header "30. duplicata escondendo task sem veredito -> gate 3 vermelho"
+  d=$(new_case verify-dup-hides-gap)
+  rc=$(run_ralph "$d" verify-dup-hides-gap --engine claude --test-cmd "$d/test.sh")
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "faltou veredito para a(s) task(s): 2" "aponta a task nao coberta"
+  assert_eq 1 "$(commits "$d")" "nenhum commit de fase"
+fi
+
+# ---------------------------------------------------------------------------
+# 31. Indice fora de 1..N: numeracao desalinhada nao vira cobertura.
+# ---------------------------------------------------------------------------
+if case_enabled verify-index-out-of-range; then
+  header "31. indice de task fora do intervalo -> gate 3 vermelho"
+  d=$(new_case verify-index-out-of-range)
+  rc=$(run_ralph "$d" verify-index-out-of-range --engine claude --test-cmd "$d/test.sh")
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "fora do intervalo 1..2: 9" "nomeia o indice invalido"
+  assert_eq 1 "$(commits "$d")" "nenhum commit de fase"
+fi
+
+# ---------------------------------------------------------------------------
+# 32. Terminal silencioso por default: o progresso do engine (48KB de stderr por
+#     sessao no codex 0.146) fica so no log. --verbose devolve o stream ao vivo.
+# ---------------------------------------------------------------------------
+if case_enabled quiet-terminal; then
+  header "32. quiet e o default; --verbose streama o progresso"
+  d=$(new_case quiet-default)
+  rc=$(run_ralph "$d" ok --engine codex --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "quiet: exit 0"
+  assert_not_contains "$d/out.log" "[mock] progresso" "quiet: progresso fora do terminal"
+  assert_contains "$d/out.log" "Phase 1: Foundation" "quiet: placar do ralph preservado"
+  assert_contains "$d/out.log" "2/2 tasks confirmadas" "quiet: veredito dos gates preservado"
+  assert_contains "$d/repo/.phases/logs/phase-01.cycle-1.stderr.log" "[mock] progresso" \
+    "quiet: progresso integral no log"
+
+  d2=$(new_case verbose-flag)
+  rc=$(run_ralph "$d2" ok --engine codex --verbose --test-cmd "$d2/test.sh")
+  assert_eq 0 "$rc" "--verbose: exit 0"
+  assert_contains "$d2/out.log" "[mock] progresso" "--verbose: progresso no terminal"
+
+  # Gate vermelho no modo quiet precisa dizer onde esta o progresso escondido.
+  d3=$(new_case quiet-red)
+  rc=$(run_ralph "$d3" empty-diff --engine codex --test-cmd "$d3/test.sh")
+  assert_eq 1 "$rc" "gate vermelho: exit 1"
+  assert_contains "$d3/out.log" "Progresso do engine: .phases/logs/phase-01.cycle-1.stderr.log" \
+    "gate vermelho: aponta o log de progresso"
+fi
+
+# ---------------------------------------------------------------------------
+# 33. RALPH_HEARTBEAT invalido aborta no preflight (nao vira sleep infinito).
+# ---------------------------------------------------------------------------
+if case_enabled bad-heartbeat; then
+  header "33. RALPH_HEARTBEAT invalido -> abort no preflight"
+  d=$(new_case bad-heartbeat)
+  rc=$(CASE_HEARTBEAT="abc" run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "Valor invalido para RALPH_HEARTBEAT" "mensagem de preflight"
+  assert_eq 1 "$(commits "$d")" "nenhuma fase executada"
+fi
+
+# ---------------------------------------------------------------------------
+# 34. Estado estruturado: state.json valido + events.jsonl com os gates.
+# ---------------------------------------------------------------------------
+if case_enabled state-files; then
+  header "34. .phases/state.json + .phases/events.jsonl"
+  d=$(new_case state-files)
+  rc=$(run_ralph "$d" ok --engine codex --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+
+  st="$d/repo/.phases/state.json"
+  ev="$d/repo/.phases/events.jsonl"
+
+  if [ -f "$st" ]; then ok "state.json existe"; else bad "state.json existe"; fi
+  if [ -f "$ev" ]; then ok "events.jsonl existe"; else bad "events.jsonl existe"; fi
+
+  # JSON valido de verdade, nao "parece JSON": um snapshot quebrado derruba o
+  # dashboard sem derrubar o run, e o bug so aparece no navegador.
+  if python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$st" 2> /dev/null; then
+    ok "state.json e JSON valido"
+  else
+    bad "state.json e JSON valido"
+  fi
+
+  if python3 - "$ev" <<'PY' 2> /dev/null
+import json, sys
+for line in open(sys.argv[1]):
+    if line.strip():
+        json.loads(line)
+PY
+  then ok "toda linha do events.jsonl e JSON valido"
+  else bad "toda linha do events.jsonl e JSON valido"; fi
+
+  assert_contains "$st" '"run_status": "done"' "state final marca o run como done"
+  assert_contains "$st" '"status": "done"' "fases concluidas marcadas no snapshot"
+
+  # Os 4 gates precisam de veredito em toda fase executada: sem isso o painel
+  # mostra gate parado e a timeline do dashboard fica com buraco.
+  for g in 0 1 2 3; do
+    if grep -E '"event": "gate_end"' "$ev" | grep -q "\"gate\": $g,"; then
+      ok "gate $g emitiu gate_end"
+    else
+      bad "gate $g emitiu gate_end"
+    fi
+  done
+  assert_contains "$ev" '"event": "gate_start"' "gate_start registrado"
+  assert_contains "$ev" '"duration":' "gate_end carrega duracao"
+
+  # Os 7 eventos do notify tambem entram na corrente, com os mesmos nomes.
+  assert_contains "$ev" '"event": "run_start"' "run_start no events.jsonl"
+  assert_contains "$ev" '"event": "phase_done"' "phase_done no events.jsonl"
+  assert_contains "$ev" '"event": "run_done"' "run_done no events.jsonl"
+fi
+
+# ---------------------------------------------------------------------------
+# 35. Painel: sem TTY nenhuma sequencia de escape pode sair — nem com
+#     RALPH_UI=panel. Redirecionar um painel para arquivo produz lixo.
+# ---------------------------------------------------------------------------
+if case_enabled ui-non-tty; then
+  header "35. sem TTY o painel nunca desenha"
+  d=$(new_case ui-non-tty)
+  rc=$(run_ralph "$d" ok --engine codex --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "auto: exit 0"
+  assert_not_contains "$d/out.log" $'\033[?25l' "auto: nao esconde o cursor"
+  assert_not_contains "$d/out.log" "┌─ ralph" "auto: nenhum quadro desenhado"
+  assert_contains "$d/out.log" "Phase 1: Foundation" "auto: placar em linha corrida preservado"
+
+  d2=$(new_case ui-forced)
+  rc=$(RALPH_UI=panel run_ralph "$d2" ok --engine codex --test-cmd "$d2/test.sh")
+  assert_eq 0 "$rc" "RALPH_UI=panel: exit 0"
+  assert_not_contains "$d2/out.log" $'\033[?25l' "RALPH_UI=panel sem TTY: nao esconde o cursor"
+  assert_not_contains "$d2/out.log" "┌─ ralph" "RALPH_UI=panel sem TTY: nenhum quadro"
+  assert_contains "$d2/out.log" "2/2 tasks confirmadas" "RALPH_UI=panel sem TTY: veredito preservado"
+
+  # O placar do modo plain e o contrato de compatibilidade: quem roda em
+  # nohup/CI nao pode ver diferenca nenhuma entre auto e plain.
+  d3=$(new_case ui-plain)
+  rc=$(RALPH_UI=plain run_ralph "$d3" ok --engine codex --test-cmd "$d3/test.sh")
+  assert_eq 0 "$rc" "RALPH_UI=plain: exit 0"
+  # Normaliza o que muda entre duas execucoes quaisquer: relogio, caminho do
+  # caso e duracao. O que sobra e o placar em si — o contrato de compatibilidade.
+  norm() { sed -E 's/[0-9]{2}:[0-9]{2}:[0-9]{2}//g; s#/tmp/[^ ]*##g; s/[0-9]+(h|m|s)\b/N\1/g' "$1"; }
+  if diff <(norm "$d/out.log") <(norm "$d3/out.log") > /dev/null; then
+    ok "auto sem TTY produz a mesma saida que plain"
+  else
+    bad "auto sem TTY produz a mesma saida que plain"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 36. RALPH_UI invalido aborta no preflight (antes de gastar token).
+# ---------------------------------------------------------------------------
+if case_enabled bad-ui; then
+  header "36. RALPH_UI invalido -> abort no preflight"
+  d=$(new_case bad-ui)
+  rc=$(RALPH_UI=fancy run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "Valor invalido para RALPH_UI" "mensagem de preflight"
+  assert_eq 1 "$(commits "$d")" "nenhuma fase executada"
+fi
+
+# ---------------------------------------------------------------------------
+# 37. --serve: sem python3 avisa e o run segue; com python3 sobe, imprime a URL
+#     e nao deixa servidor vivo no fim.
+# ---------------------------------------------------------------------------
+if case_enabled serve; then
+  header "37. --serve"
+
+  # PATH espelhado por symlink, menos python*: `command -v python3` precisa
+  # falhar de verdade. Um stub que sai 127 nao serve — o ralph checa presenca,
+  # nao exit code.
+  d=$(new_case serve-no-python)
+  mkdir -p "$d/nopy"
+  for p in /usr/bin/* /bin/*; do
+    b=$(basename "$p")
+    case "$b" in python|python3|python3.*) continue ;; esac
+    ln -sf "$p" "$d/nopy/$b" 2> /dev/null || true
+  done
+
+  rc=0
+  (
+    cd "$d/repo" || exit 1
+    PATH="$d/bin:$d/nopy" \
+    MOCK_STATE="$d/state" MOCK_SCENARIO=ok MOCK_TEST_CMD="$d/test.sh" \
+    RALPH_HEARTBEAT=0 \
+      bash "$RALPH" --serve --engine codex --test-cmd "$d/test.sh" > "$d/out.log" 2>&1
+  ) || rc=$?
+  assert_eq 0 "$rc" "sem python3: run completa normalmente"
+  assert_contains "$d/out.log" "python3 nao esta no PATH" "sem python3: aviso alto"
+  assert_not_contains "$d/out.log" "Dashboard web: http" "sem python3: nenhuma URL prometida"
+  assert_contains "$d/out.log" "2/2 tasks confirmadas" "sem python3: gates seguem valendo"
+
+  if command -v python3 > /dev/null 2>&1; then
+    d2=$(new_case serve-up)
+    rc=$(run_ralph "$d2" ok --engine codex --serve --test-cmd "$d2/test.sh")
+    assert_eq 0 "$rc" "com python3: exit 0 (o dashboard nunca muda o veredito)"
+    assert_contains "$d2/out.log" "Dashboard web: http://127.0.0.1:" "URL impressa no topo"
+
+    if [ -f "$d2/repo/.phases/ui/index.html" ]; then
+      ok "index.html escrito"
+    else
+      bad "index.html escrito"
+    fi
+    # Auto-contido: uma referencia externa quebra a pagina em maquina sem rede.
+    assert_not_contains "$d2/repo/.phases/ui/index.html" "https://" "html sem referencia externa"
+
+    port=$(grep -oE '127\.0\.0\.1:[0-9]+' "$d2/out.log" | head -1 | cut -d: -f2)
+    if [ -n "$port" ] && ! (exec 3<> "/dev/tcp/127.0.0.1/$port") 2> /dev/null; then
+      ok "servidor morto no fim do run (porta $port livre)"
+    else
+      bad "servidor morto no fim do run (porta ${port:-?} ainda ocupada)"
+    fi
+  else
+    echo "  (python3 ausente: casos de servidor ativo pulados)"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 38. Com TTY o painel desenha, e desmonta antes do relatorio final.
+#     `script` da um pty de verdade — sem isso o caminho do painel nunca roda
+#     em teste, porque a suite escreve em arquivo.
+# ---------------------------------------------------------------------------
+if case_enabled ui-tty; then
+  header "38. com TTY o painel desenha e desmonta"
+  if ! command -v script > /dev/null 2>&1; then
+    echo "  (util-linux 'script' ausente: caso do painel pulado)"
+  else
+    d=$(new_case ui-tty)
+    rc=0
+    (
+      cd "$d/repo" || exit 1
+      PATH="$d/bin:$PATH" \
+      MOCK_STATE="$d/state" MOCK_SCENARIO=ok MOCK_TEST_CMD="$d/test.sh" \
+      RALPH_HEARTBEAT=0 \
+        script -qec "bash '$RALPH' --engine codex --test-cmd '$d/test.sh'" /dev/null
+    ) > "$d/out.log" 2>&1 || rc=$?
+
+    assert_eq 0 "$rc" "exit 0"
+    assert_contains "$d/out.log" "RALPH" "cabecalho do painel desenhado"
+    assert_contains "$d/out.log" "FASES E TASKS" "tabela de fases e tasks desenhada"
+    assert_contains "$d/out.log" "PROGRESSO" "painel de progresso desenhado"
+    # Buffer alternado: sem o par 1049h/1049l o scrollback do dev e destruido.
+    assert_contains "$d/out.log" $'\033[?1049h' "entrou no buffer alternado"
+    assert_contains "$d/out.log" $'\033[?1049l' "saiu do buffer alternado"
+    assert_contains "$d/out.log" $'\033[?25l' "cursor escondido durante o painel"
+    # Cursor nao restaurado deixa o terminal do dev inutilizavel depois do run.
+    assert_contains "$d/out.log" $'\033[?25h' "cursor restaurado no fim"
+    assert_contains "$d/out.log" "AO VIVO" "secao de atividade ao vivo desenhada"
+    # Prova de vida medida pelo pintor: sem isso a tela fica estatica durante a
+    # sessao do engine, que e justamente a etapa mais longa do run.
+    assert_contains "$d/out.log" "Saída do engine:" "taxa de saida do engine no painel"
+    assert_contains "$d/out.log" "Etapa:" "etapa corrente com tempo proprio"
+    assert_contains "$d/out.log" "RELATORIO FINAL" "relatorio final impresso apos desmontar"
+    # O painel viveu numa tela descartada: sem reimprimir, o placar do run some.
+    assert_contains "$d/out.log" "Commit criado: feat(phase-1)" "placar reimpresso na tela normal"
+    assert_contains "$d/repo/.phases/ui/messages.log" "Gate 3" \
+      "placar desviado para o messages.log"
+    if python3 -c "import json,sys; json.load(open(sys.argv[1]))" \
+        "$d/repo/.phases/state.json" 2> /dev/null; then
+      ok "state.json valido tambem no modo painel"
+    else
+      bad "state.json valido tambem no modo painel"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 39. Painel AO VIVO durante a sessao do engine.
+#     O mock dos outros casos responde instantaneamente, entao nenhum frame cai
+#     no meio da implementacao. Aqui o engine demora de proposito: e a unica
+#     forma de provar que o painel nao congela na etapa mais longa do run.
+# ---------------------------------------------------------------------------
+if case_enabled ui-live; then
+  header "39. painel ao vivo durante a sessao do engine"
+  if ! command -v script > /dev/null 2>&1; then
+    echo "  (util-linux 'script' ausente: caso do painel ao vivo pulado)"
+  else
+    d=$(new_case ui-live)
+
+    # Engine lento que escreve progresso no stderr aos poucos e cria arquivos:
+    # alimenta as tres fontes que a secao AO VIVO mede (bytes, tail, arvore).
+    cat > "$d/bin/codex" <<'SLOWMOCK'
+#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+verify=0
+grep -q '^RALPH_VERIFY' <<< "$prompt" && verify=1
+for i in 1 2 3 4 5 6; do
+  echo "[mock] lendo app/Services/Arquivo$i.php" >&2
+  sleep 0.4
+done
+if [ "$verify" -eq 1 ]; then
+  n=$(grep -cE '^[[:space:]]*- \[[ x]\]' <<< "$prompt")
+  for i in $(seq 1 "$n"); do echo "TASK $i: DONE"; done
+  exit 0
+fi
+mkdir -p src app/Services
+echo impl > app/Services/Novo.php
+echo impl > "src/impl-1.txt"
+echo "Done."
+SLOWMOCK
+    chmod +x "$d/bin/codex"
+
+    rc=0
+    (
+      cd "$d/repo" || exit 1
+      PATH="$d/bin:$PATH" \
+      MOCK_STATE="$d/state" MOCK_SCENARIO=ok MOCK_TEST_CMD="$d/test.sh" \
+      RALPH_HEARTBEAT=0 RALPH_UI_FPS=2 \
+        script -qec "stty rows 40 cols 130; bash '$RALPH' --engine codex --test-cmd '$d/test.sh'" /dev/null
+    ) > "$d/out.log" 2>&1 || rc=$?
+
+    assert_eq 0 "$rc" "exit 0"
+    # A etapa muda durante a fase: sem state_sync a cada troca, o painel
+    # congelava em "preparando" pelo run inteiro — foi o bug reportado.
+    assert_contains "$d/out.log" "implementando a fase" \
+      "atividade republicada durante a sessao do engine"
+    assert_contains "$d/out.log" "verificacao independente" \
+      "atividade muda de novo no gate 3"
+    assert_not_contains "$d/repo/.phases/ui/state.env" "activity=preparando" \
+      "estado final nao ficou preso em 'preparando'"
+    # Tail do stderr lido pelo PINTOR, nao publicado pelo processo principal:
+    # durante run_split o principal esta bloqueado e nao republica nada.
+    assert_contains "$d/out.log" "[mock] lendo app/Services/Arquivo" \
+      "tail do stderr do engine aparece no painel"
+    assert_contains "$d/out.log" "arquivo(s) tocado(s)" "contagem da arvore no painel"
+    assert_contains "$d/out.log" "Etapa:" "etapa com tempo proprio"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 40. Inferencia de task: qual task esta sendo trabalhada e quanto dela apareceu.
+#     Precisa de um documento cujas tasks NOMEIEM identificadores de codigo — e
+#     o unico elo entre o texto da task e a arvore. Task sem ancora nao gera
+#     palpite nenhum, e isso tambem e verificado.
+# ---------------------------------------------------------------------------
+if case_enabled ui-task-infer; then
+  header "40. inferencia de task pela arvore de trabalho"
+  if ! command -v script > /dev/null 2>&1; then
+    echo "  (util-linux 'script' ausente: caso de inferencia pulado)"
+  else
+    d=$(new_case ui-task-infer)
+
+    cat > "$d/repo/.spec/init/project-phases.md" <<'PHASES'
+# Fases
+
+## Phase 1: Import de templates
+
+- [ ] **Task:** Job assincrono de import, `ImportWhatsappTemplatesJob`
+  - **Acceptance criteria:**
+    - o job existe
+- [ ] **Task:** Migration aditiva em `meta_official_template_origins`
+  - **Acceptance criteria:**
+    - a migration existe
+- [ ] **Task:** Passo sem identificador nenhum no texto
+  - **Acceptance criteria:**
+    - nada a casar
+PHASES
+    (cd "$d/repo" && git add -A && git commit -q -m "fixture ancoras")
+
+    # Cria os artefatos das duas primeiras tasks, em ordem e com pausa: a task
+    # ativa e decidida pelo arquivo de mtime mais recente.
+    cat > "$d/bin/codex" <<'ANCHORMOCK'
+#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+verify=0
+grep -q '^RALPH_VERIFY' <<< "$prompt" && verify=1
+if [ "$verify" -eq 1 ]; then
+  n=$(grep -cE '^[[:space:]]*- \[[ x]\]' <<< "$prompt")
+  for i in $(seq 1 "$n"); do echo "TASK $i: DONE"; done
+  exit 0
+fi
+mkdir -p app/Jobs database/migrations
+sleep 1; echo x > app/Jobs/ImportWhatsappTemplatesJob.php
+sleep 2; echo x > database/migrations/2026_01_01_add_meta_official_template_origins.php
+sleep 2; echo "Done."
+ANCHORMOCK
+    chmod +x "$d/bin/codex"
+
+    rc=0
+    (
+      cd "$d/repo" || exit 1
+      PATH="$d/bin:$PATH" \
+      MOCK_STATE="$d/state" MOCK_SCENARIO=ok MOCK_TEST_CMD="$d/test.sh" \
+      RALPH_HEARTBEAT=0 RALPH_UI_FPS=2 \
+        script -qec "stty rows 42 cols 132; bash '$RALPH' --engine codex --test-cmd '$d/test.sh'" /dev/null
+    ) > "$d/out.log" 2>&1 || rc=$?
+
+    assert_eq 0 "$rc" "exit 0"
+
+    tp="$d/repo/.phases/ui/taskprog.txt"
+    if [ -f "$tp" ]; then ok "taskprog.txt gerado"; else bad "taskprog.txt gerado"; fi
+    assert_contains "$tp" "1|100|" "task 1 casou a ancora ImportWhatsappTemplatesJob"
+    assert_contains "$tp" "2|100|" "task 2 casou a ancora meta_official_template_origins"
+    # Task sem identificador no texto nao produz ancora: 0%, nunca um palpite
+    # inventado a partir de arquivo alheio.
+    assert_not_contains "$tp" "3|" "task sem ancora nao entra no palpite"
+
+    # O `~` e o contrato visual: distingue palpite de veredito do gate 3.
+    assert_contains "$d/out.log" "~100%" "percentual inferido marcado com ~"
+    assert_contains "$d/out.log" "Task ativa" "task ativa nomeada no painel"
+    # Fechada a fase, o veredito do gate 3 substitui a inferencia.
+    assert_contains "$d/out.log" "Concluída" "gate 3 sobrepoe o palpite no fim"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 41. Checkbox marcado pelo engine aparece como Declarada DURANTE a sessao.
+#     Era a janela cega: os gates so falam no fim da fase, entao a tabela
+#     ficava Pendente do inicio ao fim enquanto o run trabalhava.
+# ---------------------------------------------------------------------------
+if case_enabled ui-task-declared; then
+  header "41. checkbox do engine vira 'Declarada' durante a sessao"
+  if ! command -v script > /dev/null 2>&1; then
+    echo "  (util-linux 'script' ausente: caso pulado)"
+  else
+    d=$(new_case ui-task-declared)
+
+    # Marca a primeira task de cada fase e SEGUE trabalhando: o painel tem que
+    # mostrar o progresso antes do gate 3 existir.
+    cat > "$d/bin/codex" <<'DECLMOCK'
+#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+if grep -q '^RALPH_VERIFY' <<< "$prompt"; then
+  n=$(grep -cE '^[[:space:]]*- \[[ xX]\]' <<< "$prompt")
+  for i in $(seq 1 "$n"); do echo "TASK $i: DONE"; done
+  exit 0
+fi
+mkdir -p src
+echo a > src/a.txt
+for f in .phases/phase-*.md; do
+  awk 'BEGIN { hit = 0 }
+       { if (!hit && $0 ~ /^[[:space:]]*- \[ \]/) { sub(/\[ \]/, "[x]"); hit = 1 } print }' \
+    "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+done
+sleep 5
+echo b > src/b.txt
+echo "Done."
+DECLMOCK
+    chmod +x "$d/bin/codex"
+
+    rc=0
+    (
+      cd "$d/repo" || exit 1
+      PATH="$d/bin:$PATH" \
+      MOCK_STATE="$d/state" MOCK_SCENARIO=ok MOCK_TEST_CMD="$d/test.sh" \
+      RALPH_HEARTBEAT=0 RALPH_UI_FPS=2 \
+        script -qec "stty rows 42 cols 132; bash '$RALPH' --engine codex --test-cmd '$d/test.sh'" /dev/null
+    ) > "$d/out.log" 2>&1 || rc=$?
+
+    assert_eq 0 "$rc" "exit 0"
+    assert_contains "$d/out.log" "Declarada" "task marcada pelo engine aparece na tabela durante a sessao"
+    assert_contains "$d/out.log" "Concluída" "no fim o veredito do gate 3 assume"
+    # Marcar checkbox mexe so em .phases/ (que esta em .git/info/exclude): nao
+    # pode virar prova de que a sessao escreveu codigo.
+    assert_not_contains "$d/repo/.phases/phase-01.md" "- [ ] **Task:** cria o arquivo A" \
+      "o engine realmente marcou o checkbox no arquivo da fase"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 42. Checkbox NAO e veredito: task marcada e reprovada pelo gate 3 aparece
+#     Incompleta, nunca verde.
+# ---------------------------------------------------------------------------
+if case_enabled ui-declared-not-verdict; then
+  header "42. veredito do gate 3 sobrescreve o checkbox"
+  if ! command -v script > /dev/null 2>&1; then
+    echo "  (util-linux 'script' ausente: caso pulado)"
+  else
+    d=$(new_case ui-declared-not-verdict)
+
+    cat > "$d/bin/codex" <<'LIARMOCK'
+#!/usr/bin/env bash
+set -uo pipefail
+state="${MOCK_STATE:?}"
+prompt=$(cat)
+if grep -q '^RALPH_VERIFY' <<< "$prompt"; then
+  f="$state/verify_n"; n=0
+  [ -f "$f" ] && n=$(cat "$f")
+  n=$((n + 1)); echo "$n" > "$f"
+  total=$(grep -cE '^[[:space:]]*- \[[ xX]\]' <<< "$prompt")
+  if [ "$n" -eq 1 ]; then
+    echo "TASK 1: INCOMPLETE — o arquivo A nao existe"
+    for i in $(seq 2 "$total"); do echo "TASK $i: DONE"; done
+    exit 0
+  fi
+  for i in $(seq 1 "$total"); do echo "TASK $i: DONE"; done
+  exit 0
+fi
+mkdir -p src
+echo a > "src/impl-$RANDOM.txt"
+for f in .phases/phase-*.md; do
+  sed -i 's/- \[ \]/- [x]/g' "$f"
+done
+sleep 4
+echo "Done."
+LIARMOCK
+    chmod +x "$d/bin/codex"
+
+    rc=0
+    (
+      cd "$d/repo" || exit 1
+      PATH="$d/bin:$PATH" \
+      MOCK_STATE="$d/state" MOCK_SCENARIO=ok MOCK_TEST_CMD="$d/test.sh" \
+      RALPH_HEARTBEAT=0 RALPH_UI_FPS=2 \
+        script -qec "stty rows 42 cols 132; bash '$RALPH' --engine codex --test-cmd '$d/test.sh' --max-cycles 2" /dev/null
+    ) > "$d/out.log" 2>&1 || rc=$?
+
+    assert_eq 0 "$rc" "exit 0"
+    assert_contains "$d/out.log" "Gate 3 vermelho" "gate 3 reprovou a fase mesmo com tudo marcado"
+    assert_contains "$d/out.log" "Incompleta" "task marcada e reprovada aparece Incompleta"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 43. --attach: acompanha um run existente sem escrever nada dele.
+#     Tambem cobre a regressao do awk de duas passadas — fase sem ancora
+#     nenhuma nao pode produzir taskprog com o universo de caminhos dentro.
+# ---------------------------------------------------------------------------
+if case_enabled attach-readonly; then
+  header "43. --attach republica sem tocar no run"
+  d=$(new_case attach-readonly)
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "run base terminou verde"
+
+  ui="$d/repo/.phases/ui"
+  before_state=$(sha256sum "$ui/state.env" | cut -d' ' -f1)
+  before_msgs=$(sha256sum "$ui/messages.log" | cut -d' ' -f1)
+  before_commits=$(commits "$d")
+
+  arc=0
+  (
+    cd "$d/repo" || exit 1
+    PATH="$d/bin:$PATH" MOCK_STATE="$d/state" MOCK_SCENARIO=ok \
+      bash "$RALPH" --attach --no-ui > "$d/attach.log" 2>&1
+  ) || arc=$?
+
+  assert_eq 0 "$arc" "attach sai 0 quando o run ja terminou"
+  assert_contains "$d/attach.log" "attach: run" "attach identificou o run"
+  assert_eq "$before_state" "$(sha256sum "$ui/state.env" | cut -d' ' -f1)" "attach nao reescreveu state.env"
+  assert_eq "$before_msgs" "$(sha256sum "$ui/messages.log" | cut -d' ' -f1)" "attach nao truncou messages.log"
+  assert_eq "$before_commits" "$(commits "$d")" "attach nao criou commit"
+
+  # Arquivo proprio: o pintor do run original continua dono do taskprog.txt.
+  test -f "$ui/taskprog.attach.txt" && ok "attach usa taskprog proprio" \
+    || bad "attach usa taskprog proprio"
+  # As tasks do fixture nao nomeiam artefato nenhum. Com o awk quebrado o
+  # universo de caminhos vazava para dentro do taskprog (60 KB de `caminho|0|0`
+  # num run real) e a tabela ficava Pendente para sempre.
+  assert_eq 0 "$(grep -c . "$ui/taskprog.attach.txt" || true)" \
+    "fase sem ancora gera taskprog VAZIO (regressao do awk de duas passadas)"
+  assert_not_contains "$ui/taskprog.attach.txt" ".spec/init" "nenhum caminho do repo vazou para o taskprog"
+fi
+
+# ---------------------------------------------------------------------------
+# 44. --attach sem run neste diretorio: erro claro, exit 1, nada criado.
+# ---------------------------------------------------------------------------
+if case_enabled attach-no-run; then
+  header "44. --attach sem run existente"
+  d=$(new_case attach-no-run)
+  arc=0
+  (
+    cd "$d/repo" || exit 1
+    bash "$RALPH" --attach --no-ui > "$d/attach.log" 2>&1
+  ) || arc=$?
+  assert_eq 1 "$arc" "exit 1 sem run para acompanhar"
+  assert_contains "$d/attach.log" "nao ha run neste diretorio" "mensagem aponta a causa"
+  test -d "$d/repo/.phases" && bad "attach nao pode criar .phases" || ok "attach nao criou .phases"
+fi
+
+# ---------------------------------------------------------------------------
+# 45. Navegacao por teclado na tabela do painel.
+#
+# Precisa de TTY: sem ele o painel nem ativa (ui_should_activate) e nada disso
+# existe. `script` da o pty; sem `script` no PATH o caso e pulado, nunca falha.
+#
+# Fixture de --attach, e nao run completo: o painel so precisa de manifest,
+# fases e state.env: assim o caso mede a rolagem, e nao o mock do engine.
+# ---------------------------------------------------------------------------
+if case_enabled ui-keys; then
+  header "45. navegacao por teclado na tabela do painel"
+  if ! command -v script > /dev/null 2>&1; then
+    echo "  (pulado: 'script' nao esta no PATH, sem pty para simular o terminal)"
+  else
+    d=$(new_case ui-keys)
+    mkdir -p "$d/repo/.phases/ui"
+    # 8 fases x 3 tasks = 32 linhas, muito acima do orcamento de um terminal de
+    # 30 linhas: sem isso nao ha o que rolar e o caso passaria por vacuidade.
+    for n in 1 2 3 4 5 6 7 8; do
+      printf 'phase-0%s.md|%s|Fase numero %s\n' "$n" "$n" "$n" >> "$d/repo/.phases/manifest.txt"
+      {
+        echo "## Fase $n"
+        echo "- [ ] T1 — task um da fase $n"
+        echo "- [ ] T2 — task dois da fase $n"
+        echo "- [ ] T3 — task tres da fase $n"
+      } > "$d/repo/.phases/phase-0$n.md"
+      st=pending; [ "$n" -lt 5 ] && st=done; [ "$n" = 5 ] && st=running
+      printf '%s|%s|Fase numero %s\n' "$n" "$st" "$n" >> "$d/repo/.phases/ui/phases.txt"
+    done
+    # PID vivo: o attach encerra sozinho quando o processo do run some, e sao
+    # varias sessoes de pty em sequencia — a ancora tem que durar todas elas.
+    sleep 600 & keeper=$!
+    cat > "$d/repo/.phases/ui/state.env" <<UISTATE
+run_status=running
+phase_num=5
+phase_seq=5
+phase_total=8
+phase_title=Fase numero 5
+phase_status=running
+cycle=1
+gate0=pending
+gate1=pending
+gate2=pending
+gate3=pending
+activity=teste
+stage_start=$(date +%s)
+limit_waiting=0
+stderr_log=
+stdout_log=
+pid=$keeper
+run_id=uikeys
+started=$(date +%s)
+engine=claude
+project=uikeys
+UISTATE
+
+    # ui_keys_run <arquivo-de-saida> <teclas> [env...]
+    ui_keys_run() {
+      local out="$1" keys="$2"; shift 2
+      ( sleep 2; printf '%b' "$keys"; sleep 2 ) \
+        | timeout 15 script -qec \
+          "cd '$d/repo' && stty rows 30 cols 150 && $* RALPH_ATTACH_INTERVAL=1 RALPH_UI=panel bash '$RALPH' --attach" \
+          /dev/null > "$out" 2>&1 || true
+    }
+    # A janela desenhada em cada frame, sem os escapes de cor.
+    ui_keys_windows() {
+      sed -r 's/\x1B\[[0-9;?]*[A-Za-z]//g' "$1" \
+        | grep -oE 'mostrando [0-9]+–[0-9]+' | uniq | tr '\n' ' ' | sed 's/ *$//'
+    }
+
+    ui_keys_run "$d/down.raw" '\033[B\033[B\033[B'
+    assert_eq "mostrando 14–19 mostrando 15–20 mostrando 16–21 mostrando 17–22" \
+      "$(ui_keys_windows "$d/down.raw")" \
+      "cada seta para baixo anda UMA linha (rajada de CSI nao pode virar uma tecla so)"
+
+    ui_keys_run "$d/end.raw" 'G'
+    assert_eq "mostrando 14–19 mostrando 27–32" "$(ui_keys_windows "$d/end.raw")" \
+      "G vai para o fim e para na ultima linha (sem linha vazia no rodape)"
+
+    # `uniq` colapsa frames iguais: subir no topo NAO pode gerar janela nova.
+    ui_keys_run "$d/top.raw" 'gk'
+    assert_eq "mostrando 14–19 mostrando 1–6" "$(ui_keys_windows "$d/top.raw")" \
+      "g vai para o topo e subir dali nao move a janela"
+
+    ui_keys_run "$d/auto.raw" 'Ga'
+    assert_eq "mostrando 14–19 mostrando 27–32 mostrando 14–19" "$(ui_keys_windows "$d/auto.raw")" \
+      "'a' devolve a janela ao modo automatico, centrada na fase corrente"
+
+    assert_contains "$d/end.raw" "manual" "rodape avisa que a janela esta no modo manual"
+
+    ui_keys_run "$d/off.raw" 'jjjG' RALPH_UI_KEYS=0
+    assert_eq "mostrando 14–19" "$(ui_keys_windows "$d/off.raw")" \
+      "RALPH_UI_KEYS=0 desliga a rolagem"
+    assert_not_contains "$d/off.raw" "↑↓ rolar" "sem teclado o rodape nao promete navegacao"
+
+    # O painel desliga o eco para ler tecla; sair tem que devolver o terminal.
+    ( sleep 2; printf 'jj'; sleep 1; printf '\003'; sleep 3 ) \
+      | timeout 15 script -qec \
+        "cd '$d/repo' && stty rows 30 cols 150 && RALPH_ATTACH_INTERVAL=1 RALPH_UI=panel bash '$RALPH' --attach; stty -a | tr ' ,' '\n\n' | grep -cx echo > '$d/echo.txt'" \
+        /dev/null > "$d/int.raw" 2>&1 || true
+    assert_eq "1" "$(cat "$d/echo.txt" 2> /dev/null || echo 0)" \
+      "Ctrl-C durante o painel devolve o eco do terminal"
+
+    kill "$keeper" 2> /dev/null || true
+    wait "$keeper" 2> /dev/null || true
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 46. O pintor morre no ui_stop: nenhum frame depois do fim do run.
+#     Regressao real: ui_painter_loop abria um `( )` DENTRO da funcao, que ja
+#     rodava com `&`. Dois forks: `$!` guardava o wrapper, nao o laco. ui_stop
+#     matava o wrapper, o laco virava orfao e seguia repintando por cima da
+#     tela normal ja restaurada — o run terminava, o relatorio final era
+#     apagado a cada frame e o painel ficava congelado na tela do dev.
+#
+#     O `sleep` depois do ralph e o microscopio: da ao orfao (se existir) tempo
+#     de pintar mais frames no MESMO pty, com o run ja encerrado.
+# ---------------------------------------------------------------------------
+if case_enabled ui-painter-exit; then
+  header "46. pintor morre no ui_stop (nenhum frame depois do run)"
+  if ! command -v script > /dev/null 2>&1; then
+    echo "  (util-linux 'script' ausente: caso do pintor orfao pulado)"
+  else
+    d=$(new_case ui-painter-exit)
+    painter_probe="ralph.sh --engine codex --test-cmd $d/test.sh"
+    (
+      cd "$d/repo" || exit 1
+      PATH="$d/bin:$PATH" \
+      MOCK_STATE="$d/state" MOCK_SCENARIO=ok MOCK_TEST_CMD="$d/test.sh" \
+      RALPH_HEARTBEAT=0 \
+        timeout 120 script -qec \
+          "bash '$RALPH' --engine codex --test-cmd '$d/test.sh'; echo RALPH_SAIU; sleep 2" \
+          /dev/null
+    ) > "$d/out.log" 2>&1 || true
+
+    assert_contains "$d/out.log" "RALPH_SAIU" "o run terminou dentro do pty"
+    assert_contains "$d/out.log" "FASES E TASKS" "o painel chegou a desenhar"
+
+    # Tudo que saiu DEPOIS do marcador. Com pintor orfao, mais frames caem aqui.
+    sed -n '/RALPH_SAIU/,$p' "$d/out.log" > "$d/depois.log"
+    assert_not_contains "$d/depois.log" "FASES E TASKS" \
+      "nenhuma tabela repintada depois do fim do run"
+    assert_not_contains "$d/depois.log" "PROGRESSO" \
+      "nenhuma barra de progresso repintada depois do fim do run"
+
+    # Varredura de seguranca, nao assert: sob `script` o pty morre junto com o
+    # run e leva o orfao a tiracolo, entao a checagem de processo nunca ficaria
+    # vermelha aqui — no terminal do dev, que segue aberto, o orfao vive para
+    # sempre. Se sobrou algo desta suite, mata antes de seguir.
+    pkill -f "$painter_probe" 2> /dev/null || true
+  fi
 fi
 
 # ---------------------------------------------------------------------------

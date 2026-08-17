@@ -23,16 +23,21 @@ The harness is **stack-agnostic**: language, framework, commands, and convention
  project-phases.md  or  PHASES.md ────────► scripts/ralph.sh
                                             (autonomous execution
                                              with 4 gates)
-
+   ▲                                                 │
+   │            /bugfix "<bug report>"               │
+   │            light  ─► inline fix, no commit  ────┤
+   └──────────  high   ─► .spec/bugfixes/<slug>/     │
+                                                     │
  /ai-context ─► AGENTS.md + docs/agents/*  (documents the ALREADY implemented
-                                            code; feeds /plan and ralph)
+                                            code; feeds /plan, /bugfix, ralph)
 ```
 
-Three independent pipelines that fit together:
+Four independent pipelines that fit together:
 
 1. **`/init`** — from zero to a project build plan (description → user stories → schema → phases).
 2. **`/plan`** — from a feature description to a formal SPEC + phased plan, ready for execution.
-3. **`ralph.sh`** — executes any phase document autonomously, one fresh agent session per phase, with mechanical gates and one commit per completed phase.
+3. **`/bugfix`** — from a bug report to a proved root cause and a fix: inline when the defect is small, phased when it is systemic.
+4. **`ralph.sh`** — executes any phase document autonomously, one fresh agent session per phase, with mechanical gates and one commit per completed phase.
 
 Cross-cutting: **`/ai-context`** keeps the context tree (`AGENTS.md`, `CLAUDE.md`, `docs/agents/*.md`) in sync with the real code.
 
@@ -103,6 +108,40 @@ Key characteristics:
 
 ```bash
 ./ralph.sh .spec/features/<slug>/PHASES.md
+```
+
+### `/bugfix` — defect pipeline
+
+```
+/bugfix "<bug report or path to a report file>"
+```
+
+`/plan` specifies something that does not exist yet. A defect is different in two ways that change the whole pipeline: it carries **evidence** (stack trace, log, observed behavior) that can be reproduced and proved, and it carries **non-regression** as a mandatory criterion. Forcing a defect through `/plan` produces a specification for code that already exists and is broken.
+
+The pipeline reproduces the bug, traces the root cause, then takes the cheapest route that still proves the fix:
+
+| Tier | Signals | Route |
+|---|---|---|
+| `light` | root cause identified AND ≤ 2 files AND single layer AND no migration AND no public contract change | fixed inline: failing test → patch → full suite, **no commit** |
+| `standard` | 3+ files OR 2+ layers OR requires a migration OR alters an API/event contract | `.spec/bugfixes/<slug>/BUGFIX.md` + `PHASES.md` |
+| `complete` | multi-repo OR systemic root cause OR cascading regression risk | same as `standard` |
+
+Signals straddle tiers → the higher tier wins. The tier is presented **with the signals that produced it** and confirmed by the developer before anything is written.
+
+Key characteristics:
+
+- **Root cause, never symptom.** No root cause → no patch and no `PHASES.md`. The command reports the hypotheses and what data is missing.
+- **Red test first.** The test command is resolved with the exact same rules `ralph.sh` uses, so what the fix runs and what gate 2 runs are the same command. No test runner in the project → loud warning and manually verifiable ACs instead.
+- **The red test and the fix live in the same phase.** `ralph.sh` gate 2 runs the whole suite; a phase ending red would burn all its fix cycles and abort the run. Phase 1 is `reproduce and fix`; phase 2+ cover regression and edge cases. No phase ever ends with a red suite.
+- **Unreproduced bug stops at a checkpoint.** The developer chooses: stop and gather data, or proceed speculatively — in which case every artifact carries the `[NAO REPRODUZIDO]` marker and the ACs are explicitly not backed by a failing test.
+- **Non-blocking architecture gate**, unlike `/plan`: a defect is reactive and often urgent, so a missing `AGENTS.md` produces a warning and an `architecture_reference_status: missing` flag, never a block.
+- **Closes by registering the learning.** The root cause is classified one level above this instance, scoped (global vs `-project`), and proposed as a single `| bug | root cause | prevention |` line in English for the right agent file — written only after explicit confirmation.
+- **No git writes, any tier.** The developer reviews with `git diff` and commits.
+
+High tier closes with the execution handoff:
+
+```bash
+./ralph.sh .spec/bugfixes/<slug>/PHASES.md
 ```
 
 ### `/ai-context` — canonical context tree
@@ -183,6 +222,8 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `--max-cycles N` | Fix cycles per phase (default: 3) |
 | `--test-cmd "<cmd>"` | Project test command (gate 2) |
 | `--no-verify` | Disables gate 3 |
+| `--ui` / `--no-ui` | Forces the ANSI panel on / off (see below) |
+| `--serve[=PORT]` | Local web dashboard over the same state |
 
 | Variable | Effect |
 |---|---|
@@ -193,12 +234,137 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `RALPH_MAX_LIMIT_WAITS` | Consecutive usage-limit waits, per phase (default: 20) |
 | `RALPH_LIMIT_WAIT_DEFAULT` | Fallback wait in seconds (default: 1800) |
 | `RALPH_LIMIT_BUFFER` | Extra seconds after the reset (default: 60) |
+| `RALPH_NOTIFY_CMD` | Notification command (empty = disabled) |
+| `RALPH_NOTIFY_TIMEOUT` | Notification command timeout in seconds (default: 20) |
+| `RALPH_UI` | Panel: `auto` (default) \| `panel` \| `plain` |
+| `RALPH_UI_FPS` | Panel repaints per second (default: 2) |
+| `RALPH_UI_KEYS` | Keyboard navigation in the panel table: `1` (default) \| `0` disables |
+| `RALPH_SERVE_PORT` | First port `--serve` tries (default: 7433) |
 
-During each session, ralph exports `RALPH_ENGINE`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, and `RALPH_PHASE_MAX_ATTEMPTS` — useful for notification hooks (e.g. n8n).
+During each session, ralph exports `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, and `RALPH_PHASE_MAX_ATTEMPTS`.
+
+### Visual panel and web dashboard
+
+A run is watched, not read. ralph draws a full-screen panel while the run happens:
+
+```
+RALPH
+Projeto: beer-and-code-harness   Engine: claude       Status: ▶ Em execução
+Duração: 12m 04s                 Run:    run-48213    PID:    48213
+
+┌─────────── PROGRESSO ────────────┐  ┌────────── TRABALHO ATUAL ──────────┐
+│ Fases  2/9     [██████░░░░  22%] │  │ Fase:  3 · Autenticação JWT        │
+│ Tasks  7/31    [████░░░░░░  22%] │  │ Ciclo: 1/3   Gate: G2              │
+└──────────────────────────────────┘  │ Atividade: executando a suite      │
+                                      │ Último erro: —                     │
+                                      └────────────────────────────────────┘
+┌──────────────────────── FASES E TASKS ─────────────────────────┐
+│ ID   Fase / Task              Status         Tentativa  Gates  │
+├────────────────────────────────────────────────────────────────┤
+│ F1   Setup                    ✓ Concluída    1          G0 ✓ … │
+│ F2   Migrations               ✓ Concluída    1          G0 ✓ … │
+│ F3   Autenticação JWT         ▶ Em execução  1          G2 ⣾ … │
+│ T1     ↳ Middleware de guard  ✓ Concluída    -          -      │
+│ T2     ↳ Refresh token        ! Incompleta   -          -      │
+│ F4   Policies                 · Pendente     -          G0 · … │
+└────────────────────────────────────────────────────────────────┘
+· reading app/Http/Middleware/Authenticate.php
+14:22:07 Gate 2 — rodando a suite do projeto: vendor/bin/sail test
+```
+
+The panel runs in the terminal's **alternate screen buffer** (like `vim` or `less`): it owns the screen during the run and, on exit, gives the terminal back with the previous scrollback intact. That is what allows a variable-height layout — the table grows with the number of phases and tasks in the document.
+
+Sections: header (project, engine, status, duration, run id, pid), **PROGRESSO** (phase and task completion bars), **TRABALHO ATUAL** (current phase, cycle, active gate, activity, last error), **FASES E TASKS** (one row per phase and per task, per-gate verdict on the current phase, sliding window when it does not fit), and a footer with the engine's last progress line plus the latest messages.
+
+The layout adapts: the two top boxes stack below 100 columns, the `Gates` column drops below 96, `Tentativa` below 74. Task rows come from the `- [ ]` items of each phase, and their individual verdict comes from gate 3 — `✓ Concluída` / `! Incompleta` per task, so you can see *which* task blocked the phase.
+
+When the table does not fit on screen, you can **walk through the rows** without stopping the run:
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓`, `k` / `j` | One row up / down |
+| `PgUp` / `PgDn`, space | One screen up / down |
+| `g` / `Home`, `G` / `End` | First / last row |
+| `a` | Back to automatic mode (the window follows the current phase) |
+
+The table footer shows the visible range and the current mode (`↑↓ rolar` = automatic, `manual` = top pinned by you). Reading a key **blocks nothing**: it replaces the wait between repaints, so the run keeps moving through the gates regardless of what is typed — the "zero questions" invariant still holds. With no readable `/dev/tty`, or with `RALPH_UI_KEYS=0`, the panel falls back to the previous behavior (always-automatic window).
+
+An engine session runs for minutes and the CLI may emit nothing readable in that time. The **AO VIVO** section answers one question: *is it stuck or working?* Everything in it is measured **by the process painting the screen**, not published by the orchestrator — during `run_split` the main process is blocked waiting on the engine and could not republish anything:
+
+| Signal | Source | Why it moves on its own |
+|---|---|---|
+| Stage + its own elapsed | `stage_start`, rewritten on every stage change | separates "3m in this phase" from "3m in this gate" |
+| Engine output + rate | `wc -c` on both session logs, delta between frames | a live engine writes; a stuck one does not |
+| Files touched | `git status --porcelain`, recomputed every ~3s | shows the work landing in the tree |
+| Last progress line | `tail` of the `.stderr.log`, read every frame | when the CLI streams, this is what it is doing |
+
+When the CLI does not stream progress (`claude -p --output-format json` writes nothing to stderr), the line becomes `engine em silêncio há Xs` instead of repeating "waiting" — the output rate and the file count stay as the proof of life.
+
+### Which task is being worked on
+
+The engine runs in an **opaque** session: no event says which task it is on. What does exist is (a) the task text, which names code identifiers, and (b) the working tree changing. The panel matches one against the other.
+
+From each task ralph extracts **anchors** — backticked content, `CamelCase`, `snake_case`, paths and file names, discarding anything that does not look like an identifier. Every ~3s it checks which anchors already appear in some repository path (tracked or freshly created):
+
+- **`▶ ~67%`** — active task: one of its anchors matches the **most recently modified** file
+- **`◐ ~100%`** — the task's artifacts already showed up, but another one is being touched right now
+- **`· Pendente`** — no anchor matched, or the task names no identifier at all
+
+The **`~` is deliberate**: it is a guess grounded in a real file, not a verdict. A file existing does not prove a correct implementation — gate 3 still judges the task, and its verdict (`✓ Concluída` / `! Incompleta`) **always** replaces the inference once it arrives. A task whose text cites no identifier produces no guess at all, rather than an invented one.
+
+
+Status marks: `✓ Concluída`, `▶ Em execução`, `! Incompleta`, `✗ Falhou`, `» Pulada`, `· Pendente`. Gate marks: `·` not run, `⣾` running (spinner), `✓` green, `✗` red, `⊘` skipped. While waiting on a usage limit, the header status becomes a countdown to the reset.
+
+`RALPH_UI=auto` (the default) draws the panel **only** when stdout is a TTY. Under `nohup`, in CI, or through a pipe the output is the line-by-line scoreboard, byte for byte identical to a ralph without the panel — that compatibility is asserted by the suite. `--verbose` always wins: the two engine streams need the terminal. With the panel active the scoreboard is diverted to `.phases/ui/messages.log`, shows in the footer, and is **reprinted in full on the normal screen** when the panel exits — otherwise it would live only in the file. Long output (a red gate's cause, the final report) always comes after the panel is torn down. **A failure to draw degrades to the scoreboard: the panel never changes a gate verdict or the exit code.**
+
+`--serve` additionally writes a self-contained `.phases/ui/index.html` (no CDN, no remote font, no external fetch) and starts `python3 -m http.server` bound to `127.0.0.1`, on the first free port from 7433. The URL is printed once at the top; the browser is **not** opened. The page shows the current phase, every gate's verdict, the phase list, and a timeline with per-gate duration. The exit trap kills the server; the state stays on disk for later inspection. No `python3` in `PATH` → loud warning and the run proceeds with the panel only.
+
+### Structured state
+
+The panel, the dashboard, and any external tool read the same two files. None of them parses the human scoreboard — that is the point.
+
+| File | Shape | Role |
+|---|---|---|
+| `.phases/state.json` | JSON snapshot | The now: current phase, cycle, each gate's verdict, phase list with status, usage-limit wait, last engine progress line |
+| `.phases/events.jsonl` | append-only JSON Lines | The history: one line per transition |
+
+`state.json` is rewritten atomically (`tmp` + `mv`), so a concurrent reader sees the old version or the new one, never half a file. `events.jsonl` carries `gate_start` / `gate_end` — with verdict and duration — for all 4 gates on every phase, plus the same 7 events the notification hook receives, under the same names. Per-gate timing exists nowhere else in the harness.
+
+### Progress notifications
+
+A long run does not need an open terminal. With `RALPH_NOTIFY_CMD` set, ralph calls `$RALPH_NOTIFY_CMD <event> <message>` on every relevant event:
+
+| Event | When |
+|---|---|
+| `run_start` | Run started — pending phase count, engine, and input file |
+| `phase_done` | Phase passed the gates (committed, or already implemented at HEAD) |
+| `phase_failed` | Phase rejected after `RALPH_MAX_CYCLES`, or the commit failed |
+| `limit_hit` | Usage limit reached — includes the predicted reset time |
+| `limit_over` | Limit lifted, resuming the same phase |
+| `limit_abort` | Aborted after `RALPH_MAX_LIMIT_WAITS` waits on the same phase |
+| `run_done` | Final report: completed, failed, skipped, and total duration |
+
+The command runs under `timeout` with stdin closed and every error is swallowed — **notifying never changes the run's outcome**. `RALPH_PROJECT` reaches the command's environment, which tells parallel runs of different projects apart.
+
+Ready-made Telegram adapter at `scripts/notify-telegram.sh` (credentials via env or `~/.config/ralph-notify/telegram.env` only, never in the script):
+
+```bash
+export RALPH_NOTIFY_CMD="$HOME/.claude/scripts/notify-telegram.sh"
+./ralph.sh .spec/features/<slug>/PHASES.md
+```
 
 ### State and progress
 
-Internal work lives in `.phases/` (registered in `.git/info/exclude`, without touching the project's `.gitignore`): split phases, prompts, logs, manifest, and `.progress`. Progress survives across runs, but only for the **same input** (sha256 stamp) — a changed phase document resets progress.
+Internal work lives in `.phases/` (registered in `.git/info/exclude`, without touching the project's `.gitignore`): split phases, prompts, logs, manifest, `.progress`, the structured state (`state.json`, `events.jsonl`) and the panel/dashboard assets (`ui/`). Progress survives across runs, but only for the **same input** (sha256 stamp) — a changed phase document resets progress.
+
+Every engine session writes **two** logs, never merged:
+
+| File | Stream | Role |
+|---|---|---|
+| `.phases/logs/<phase>.<step>.log` | stdout | Engine's final response — the **only** source gates read a verdict from |
+| `.phases/logs/<phase>.<step>.stderr.log` | stderr | Progress/telemetry — diagnostics only |
+
+Both go whole to the logs; `--verbose` also streams them live. Merging them (`2>&1`) made Codex echo the final response into both streams, so gate 3 counted every task twice and failed a fully implemented phase for "incomplete coverage". Gate 3 therefore measures coverage in **unique task indices**: a duplicated echo neither inflates nor hides coverage, `INCOMPLETE` beats `DONE` on the same index, and an index outside `1..N` or a task with no verdict keeps the gate red.
 
 Exit code: `0` = all phases green; `1` = some phase failed or aborted.
 
@@ -219,7 +385,8 @@ Commands are **thin routers** — all template knowledge lives in the agents:
 |---|---|---|
 | `specifier` | `/plan` §5 | Confirmed description + ACs → formal SPEC.md (GEARS, RIGID/FLEXIBLE) |
 | `clarifier` | `/plan` §6 | Adversarial requirements QA: finds ambiguities, resolves them with the developer's answers |
-| `planner` | `/plan` §7 | SPEC → PLAN.md + PHASES.md + contracts; read-only over the code |
+| `planner` | `/plan` §7, `/bugfix` §7b | SPEC (or BUGFIX) → PLAN.md + PHASES.md + contracts; read-only over the code |
+| `bug-analyst` | `/bugfix` §4 and §7b | `investigate`: reproduce, trace the root cause, classify the tier. `author`: write BUGFIX.md. Never writes application code |
 | `ai-context-inspector` | `/ai-context` §3 | Read-only repo sweep → structured digest |
 | `ai-context-core` | `/ai-context` §4 | Digest → `AGENTS.md` + `CLAUDE.md` |
 | `ai-context-docs` | `/ai-context` §4 | Digest → the 8 `docs/agents/*.md` files |
@@ -235,12 +402,14 @@ commands/
   init/                        /init:project-description, user-stories,
                                database-schema, project-phases
   plan.md                      /plan (planning pipeline router)
+  bugfix.md                    /bugfix (defect pipeline router)
   ai-context.md                /ai-context (context tree router)
-agents/                        specifier, clarifier, planner,
+agents/                        specifier, clarifier, planner, bug-analyst,
                                ai-context-{inspector,core,docs}
 scripts/
   ralph.sh                     phase-by-phase execution orchestrator
   test-ralph.sh                red/green suite for ralph with a mock engine
+  notify-telegram.sh           RALPH_NOTIFY_CMD adapter for Telegram
   check-init-drift.sh          guards against textual drift of the rules
                                duplicated across the init commands
   check-shell.sh               bash -n + shellcheck over scripts/*.sh

@@ -24,7 +24,7 @@ Any check fails → halt with `precondition_failed: <reason>` — never plan aga
 
 1. Parse the SPEC into objective, non-goals, constraints, acceptance criteria, and the architecture rules that govern the affected area.
 2. Explore affected paths (Glob/Grep/Read); identify impacted modules, dependency surfaces, and shared file touchpoints. Capture the **AS IS — Componentes impactados** diagram (verified nodes; `?` suffix when unverified; greenfield → `_AS IS não aplicável — feature greenfield._`) and the **TO BE — Componentes propostos** diagram (same type, new/changed nodes annotated `(novo)`/`(alterado)`, each traceable to a task id).
-3. Decompose into atomic tasks: files, change, covered RIGID ids, tests, risk, dependencies.
+3. Decompose into atomic tasks: files, change, covered RIGID ids, tests (apply the test triage in Decision Rules — most tasks carry `none`), risk, dependencies.
 4. Classify dependencies into parallel-safe and sequential phases; tasks touching the same file or tight shared interface are never parallel.
 5. Add risks (blast radius, mitigation, rollback) and rollout guidance.
 6. **Contract emission (conditional)** — see below.
@@ -65,10 +65,11 @@ Format constraints (ralph's `split_phases` dictates them):
         Mudança: <what to do>
         Cobre: RF-XX, UI-XX
         Acceptance criteria: <condição verificável contra o código>
-        Testes: `path/to/test.ext` — <test case>
+        Testes: `path/to/test.ext` — <test case>   |   none — <motivo>
   ```
 
   Sub-lines indented under the checkbox (no leading `-`), so the checkbox count equals the task count. Content copied from the PLAN task, condensed — never diverging. `Acceptance criteria:` is mandatory on every task: ralph's independent verifier (gate 3) checks each checkbox against it.
+- `Testes:` is mandatory as a FIELD, not as a test. Emit `Testes: none — <motivo>` whenever the task fails the test triage below; gate 3 then verifies that task by code inspection against its acceptance criteria instead of demanding a test file. A test listed here is a commitment ralph will enforce — never list one to look thorough.
 - Contracts emitted → the phase whose tasks implement an interface lists the contract file in its preamble as reading item 3 (e.g. `.spec/features/[slug]/openapi.yaml`).
 - Self-check before returning: `grep -Ec '^## Phase [0-9]+: '` equals the Execution Phases row count (or 1 for light); `grep -E '^## ' | grep -Ev '^## Phase [0-9]+: '` returns nothing; `grep -c '^- \[ \]'` equals the PLAN task count.
 
@@ -77,7 +78,8 @@ Format constraints (ralph's `split_phases` dictates them):
 - Prefer smaller, testable phases over broad refactors when scope is uncertain.
 - Prioritize risk control for auth, data, infrastructure, and migration changes.
 - Distinguish confirmed facts from assumptions (`[UNVERIFIED]` marker) and inferred behavior.
-- Tests absent for changed behavior → dedicated testing task.
+- **Test triage — a test is planned per BEHAVIOR, never per task.** Kill criterion: name, in one sentence, the code change that would turn the test red. Can't name it → don't plan it. Plan a test only for: business rule with a branch (calculation, value, state transition, eligibility); authorization (who may and who may **not**); edge contract (endpoint request → status + payload, job/queue, webhook, command, broadcast event); data invariant or destructive migration; a fixed bug (regression test — always mandatory); ONE happy-path E2E per feature. Never plan a test for: getters/setters, casts, declared ORM relations, enums, "class/file/route exists", implementation mirrors with everything mocked, cosmetic label/copy substrings, config defaults, or the same branch re-asserted in a second layer with no new risk. Mechanical tasks (wiring, config, rename, view, DI binding) → `Testes: none — <motivo>`, which is a correct outcome, not a gap.
+- New test files planned in a phase must not exceed the number of new behaviors it introduces. Uncovered behavior that already ships in the codebase → dedicated testing task; task that merely changes plumbing → no test.
 - **Architecture is source of truth over description text**: when SPEC/task intent contradicts the resolved architecture (code + AGENTS tree), plan toward the architecture and raise a QUESTION under `## Open Questions` naming both sides — never plan the contradicting version silently.
 - Architecture references provided → PLAN MUST name the source files and preserve the documented layering/delegation rules inside task descriptions. Missing → explicit warning in `## Open Questions`; never present the plan as architecture-validated.
 - One targeted question max when a blocking ambiguity prevents a reliable plan — return it instead of a partial plan.
@@ -125,7 +127,7 @@ flowchart LR
 - **Files**: `path/to/file.ext`
 - **Change**: what to do
 - **Covers**: RF-XX, UI-XX
-- **Tests**: `path/to/test.ext` — test case
+- **Tests**: `path/to/test.ext` — test case | none — reason (test triage)
 - **Risk**: Low | Medium | High — reason
 - **Dependencies**: none | T0N
 
@@ -169,7 +171,7 @@ Antes de implementar, leia:
       Mudança: <what to do>
       Cobre: RF-XX
       Acceptance criteria: <condição verificável>
-      Testes: `path/to/test.ext` — <test case>
+      Testes: `path/to/test.ext` — <test case>   |   none — <motivo>
 - [ ] T02 — <task title>
       ...
 
