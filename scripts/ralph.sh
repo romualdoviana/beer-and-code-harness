@@ -2738,13 +2738,27 @@ wait_for_reset() {
   notify_and_record limit_hit \
     "Limite de uso atingido. $reset_note Dormindo $(format_duration "$wait_secs") e retomando a MESMA fase (espera $LIMIT_WAITS/$MAX_LIMIT_WAITS). Nenhuma acao necessaria."
 
+  # Progresso so em marcos (4h/3h/2h/1h/30m/15m/5m/1m). Com o painel ativo,
+  # a contagem ja aparece no cabecalho — nao polui o log com uma linha por minuto.
+  local -a marks=(14400 10800 7200 3600 1800 900 300 60)
+  local mi=0
+  while [ "$mi" -lt "${#marks[@]}" ] && [ "$wait_secs" -le "${marks[$mi]}" ]; do
+    mi=$((mi + 1))
+  done
+
   local remaining=$wait_secs chunk
   while [ "$remaining" -gt 0 ]; do
     chunk=60
     [ "$remaining" -lt 60 ] && chunk=$remaining
     sleep "$chunk"
     remaining=$((remaining - chunk))
-    [ "$remaining" -gt 0 ] && log "Retomando em $(format_duration "$remaining")..."
+    [ "$remaining" -le 0 ] && break
+    if [ "$mi" -lt "${#marks[@]}" ] && [ "$remaining" -le "${marks[$mi]}" ]; then
+      while [ "$mi" -lt "${#marks[@]}" ] && [ "$remaining" -le "${marks[$mi]}" ]; do
+        mi=$((mi + 1))
+      done
+      $UI_ACTIVE || log "Retomando em $(format_duration "$remaining")..."
+    fi
   done
 
   ST_LIMIT_WAITING=0
