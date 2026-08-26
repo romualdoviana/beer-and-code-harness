@@ -48,6 +48,10 @@ Any check fails → halt with `precondition_failed: <reason>` instead of produci
 - **Verify code-shaped literals before freezing them in RIGID** — endpoint paths, queue/topic names, env vars, file paths, class names: Grep/Glob first. Found → append `(verified at <file>:<line>)`. Not found → `[NEEDS CLARIFICATION]` with the candidate string and sources checked. Applies only to literals RIGID freezes; illustrative strings belong in FLEXIBLE.
 - Init chain artifacts conflict with the confirmed ACs → the ACs win; flag the conflict as `[NEEDS CLARIFICATION]`.
 
+- **Front-load reversibility.** Before emitting RIGID, list every decision that would invalidate written requirements if reversed later (scope boundary, exclusivity rule, fail-open vs fail-closed, default screen state). Each one is either backed by a confirmed AC or gets a `[NEEDS CLARIFICATION]` — never an implicit default. This is what turns a v1.1→v1.4 rewrite cascade into a single write.
+- RIGID never mandates a database, ORM, or persistent store unless a confirmed AC demands persistence. Storage mechanism is FLEXIBLE by default.
+- A decision that changes after the SPEC is frozen is an amendment, not a silent edit: name the affected requirement IDs so the blast radius reaches PLAN and PHASES.
+
 ## Constraints
 
 - Never use vague terms: "fast", "good", "adequate", "efficient", "etc.", "when possible", "ideally".

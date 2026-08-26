@@ -96,12 +96,14 @@ The agent reproduces, traces the root cause, classifies the tier, and returns st
 
 Present, in this order: `reproduced`, the symptom, the root cause with `file:line`, the chain, the red output, the tier **and the signals that produced it**.
 
-**`reproduced: no`** → AskUserQuestion, and do not proceed on your own:
+**`reproduced: no`** → AskUserQuestion, and do not proceed on your own. State first, in plain prose, what was tried, what the output was, and exactly which piece of data is missing (an env var, a fixture, a real payload, a version). Then:
 
-- *Stop here* — report the hypotheses and the missing data. Write nothing. This is the default.
-- *Proceed speculatively* — every artifact produced carries the `[NAO REPRODUZIDO]` marker, and the acceptance criteria are explicitly not backed by a failing test.
+- *Parar aqui (Recomendado)* — report the hypotheses and the missing data. Writes nothing, costs nothing, and is the only route where the fix ends up backed by a red test.
+- *Seguir especulativamente* — every artifact produced carries the `[NAO REPRODUZIDO]` marker, the acceptance criteria are explicitly not backed by a failing test, and gate 2 cannot prove the bug is gone.
 
-**`reproduced: yes`** → present the tier and let the developer confirm or correct it. The tier decides the route, so it is confirmed before anything is written.
+**`reproduced: yes`** → present the tier **with the signals that produced it** and let the developer confirm or correct it, with each tier option saying what route it triggers (inline fix vs. full spec + phases). The tier decides the route, so it is confirmed before anything is written.
+
+Every question in this pipeline is answered in a terminal with nothing else on screen: say what is being decided in plain words, quote the evidence (the failing output, the offending line) or name the gap, say why you are asking, and say what changes downstream. Internal ids and `file:line` refs go in trailing parentheses as provenance, never as the subject. Options are real routes with their consequence spelled out in the description; recommended one first, marked `(Recomendado)`.
 
 ### 6 — Route by tier
 

@@ -94,7 +94,7 @@ Derive as much of the plan as you can directly from the docs, then ask the devel
 - **Ambiguous scope** — flows implied but not fully specified in the stories.
 - **Design coverage** — screens with no design reference: build to a sensible default, or wait for design?
 
-Use `AskUserQuestion` for discrete decisions with clear options. Ask real open questions in plain text when the answer is not a menu. Batch related questions; don't drip one at a time. When something stays undecided, mark it as an open question rather than inventing scope.
+Use `AskUserQuestion` for discrete decisions with clear options. The developer answers in a terminal with nothing else on screen, so every question stands alone: say **what is being decided** in plain words (never an id or a doc key as the subject), **quote the evidence** you are working from (or name the gap when nothing is written), say **why you are asking**, and say **what changes** depending on the answer. Give 2–4 options that are real answers, never a bare yes/no: `label` ≤ 5 words naming the choice, `description` spelling out its consequence — what gets written into the document, what it costs, what it rules out. Recommended option first, marked `(Recomendado)`, with the reason in its description; never add an “Other” option, the harness supplies it. Ask real open questions in plain text when the answer is not a menu, with the same structure plus one worked example of a valid answer. Batch related questions (≤ 4 per call); don't drip one at a time. When something stays undecided, mark it as an open question rather than inventing scope.
 
 ## Rules for phasing
 

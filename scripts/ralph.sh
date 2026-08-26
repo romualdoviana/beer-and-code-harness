@@ -174,6 +174,8 @@
 #   RALPH_MAX_LIMIT_WAITS    esperas consecutivas por limite, por fase (default: 20)
 #   RALPH_LIMIT_WAIT_DEFAULT fallback de espera em segundos (default: 1800)
 #   RALPH_LIMIT_BUFFER       segundos extras apos o reset (default: 60)
+#   RALPH_WEEKLY_THRESHOLD   reset mais distante que isso e limite semanal:
+#                            encerra o run em vez de dormir (default: 21600 = 6h)
 #   RALPH_NOTIFY_CMD         comando de notificacao (opcional, vazio = desligado)
 #   RALPH_UI                 painel: auto (default) | panel | plain
 #   RALPH_UI_FPS             repinturas por segundo do painel (default: 2)
@@ -279,6 +281,11 @@ UI_HTML="$UI_DIR/index.html"
 MAX_LIMIT_WAITS="${RALPH_MAX_LIMIT_WAITS:-20}"
 LIMIT_WAIT_DEFAULT="${RALPH_LIMIT_WAIT_DEFAULT:-1800}"
 LIMIT_BUFFER="${RALPH_LIMIT_BUFFER:-60}"
+# O limite de sessao reseta em <= 5h; o semanal, em dias. O horizonte do reset e
+# a unica pista no output da CLI para separar os dois. Acima do limiar dormir
+# seria segurar o terminal por dias — o run encerra e devolve o comando de
+# retomada em vez disso.
+WEEKLY_THRESHOLD="${RALPH_WEEKLY_THRESHOLD:-21600}"
 
 NOTIFY_CMD="${RALPH_NOTIFY_CMD:-}"
 NOTIFY_TIMEOUT="${RALPH_NOTIFY_TIMEOUT:-20}"
@@ -2718,6 +2725,24 @@ wait_for_reset() {
     if [ "${#epoch}" -ge 13 ]; then
       epoch=$((epoch / 1000))
     fi
+
+    # Limite semanal: reset a dias de distancia. MAX_LIMIT_WAITS conta esperas,
+    # nunca a duracao de cada uma — sem este corte o run dormiria ate o reset.
+    local horizon=$((epoch - now))
+    if [ "$WEEKLY_THRESHOLD" -gt 0 ] && [ "$horizon" -gt "$WEEKLY_THRESHOLD" ]; then
+      ST_RUN_STATUS="aborted"
+      ST_LIMIT_WAITING=0
+      ST_LIMIT_UNTIL="$epoch"
+      state_sync
+      fail "Limite semanal de uso: reset so em $(date -d "@$epoch" '+%d/%m %H:%M') ($(format_duration "$horizon"))."
+      fail "Acima do limiar de $(format_duration "$WEEKLY_THRESHOLD") (RALPH_WEEKLY_THRESHOLD) — encerrando em vez de dormir."
+      fail "Progresso preservado. Retome depois com: ./ralph.sh $INPUT_FILE --from $ST_PHASE_NUM"
+      notify_and_record limit_abort \
+        "Run encerrado: limite semanal. Reset em $(date -d "@$epoch" '+%d/%m %H:%M'). Retome com: ./ralph.sh $INPUT_FILE --from $ST_PHASE_NUM"
+      ui_stop
+      exit 1
+    fi
+
     wait_secs=$((epoch - now + LIMIT_BUFFER))
     if [ "$wait_secs" -lt "$LIMIT_BUFFER" ]; then
       wait_secs=$LIMIT_BUFFER

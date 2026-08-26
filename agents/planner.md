@@ -85,6 +85,11 @@ Format constraints (ralph's `split_phases` dictates them):
 - One targeted question max when a blocking ambiguity prevents a reliable plan — return it instead of a partial plan.
 - **AS IS mandatory unless greenfield; TO BE always mandatory.** Same diagram-type pair, annotations, task-id traceability, and Mermaid hygiene as in SPEC: `<br/>` for line breaks (never `\n`); quote labels containing `|`, `(`, `)`, `<`, `>`, `/`, `:`, `,`, `{`, `}` or whitespace + punctuation; re-read blocks before writing.
 
+- **Smallest architecture that satisfies RIGID wins.** A component, layer, queue, cache, or persistence store that no requirement demands is scope creep — cut it and list it under `## Deliberately Deferred` with the requirement that would justify it later. Never introduce a database, ORM, or persistent store unless the SPEC asks for one — prefer files/ledgers.
+- **Prior art before new tasks.** Before decomposing, Grep/Glob this repo and any sibling repo named in the architecture reference for functionality that already covers part of the request. Found → cite it under `## Assumptions` and delete the task instead of writing it. A deleted task is worth more than a well-written one.
+- **Task-count checkpoint.** More than ~10 tasks → the router-facing summary MUST open with the task count plus a one-line architecture summary, flagged as needing approval before the plan is acted on. Do not silently emit a 30-task plan.
+- A task that exists only for a hypothetical future need → cut it, list it under `## Deliberately Deferred`.
+
 ## Constraints
 
 - Read-only on application code — never edit src files; Bash only for `test`/`grep`-style probes and `mkdir -p` under `.spec/features/[slug]/`.

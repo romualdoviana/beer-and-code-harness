@@ -180,6 +180,13 @@ case "$scenario" in
       exit 1
     fi
     ;;
+  limit-weekly)
+    # reset a 3 dias: limite semanal, nao o de sessao (<= 5h)
+    if [ "$n" -eq 1 ]; then
+      emit_claude_limit "$(( $(date +%s) + 259200 ))"
+      exit 1
+    fi
+    ;;
 esac
 
 # stall-after-red: escreve no 1o ciclo (teste vermelho), depois trava sem
@@ -442,6 +449,20 @@ if case_enabled limit-epoch; then
   assert_eq 3 "$(commits "$d")" "fases commitadas apos a espera"
   assert_contains "$d/out.log" "Limite de uso atingido" "limite detectado"
   assert_contains "$d/out.log" "Reset previsto para" "epoch de reset extraido do log"
+fi
+
+# ---------------------------------------------------------------------------
+# 5b. Limite semanal (reset a dias) -> encerra em vez de dormir
+# ---------------------------------------------------------------------------
+if case_enabled limit-weekly; then
+  header "5b. limite semanal -> encerra com motivo e comando de retomada"
+  d=$(new_case limit-weekly)
+  rc=$(run_ralph "$d" limit-weekly --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 1 "$rc" "exit 1 (run encerrado, nao dormindo)"
+  assert_contains "$d/out.log" "Limite semanal de uso" "classificou como semanal"
+  assert_contains "$d/out.log" "--from" "devolveu o comando de retomada"
+  # commits() conta o commit de fixture: 1 = nenhuma fase commitada
+  assert_eq 1 "$(commits "$d")" "nenhuma fase commitada — parou na primeira"
 fi
 
 # ---------------------------------------------------------------------------
