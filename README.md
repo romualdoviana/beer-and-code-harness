@@ -206,6 +206,20 @@ Any red gate → **fix cycle**: a fresh session receives the full phase + the re
 
 Green gates with a clean tree → the phase was already implemented at HEAD: marked done, no commit.
 
+### Surgical repair (before the cycle)
+
+A fix cycle is expensive: a fresh session with the context preamble, the whole phase in the prompt, and full project access. Paying that because **one** assertion went red is waste. Before spending a cycle, ralph tries up to **2 surgical repairs** (`RALPH_MAX_REPAIRS`):
+
+- **Minimal prompt**: only the failure signature — the failing test, `file:line`, the assertion message — or only the verifier's `INCOMPLETE` lines. No preamble, no phase.
+- **Its own cheap model** (`RALPH_REPAIR_MODEL`, claude default `sonnet`).
+- **Does not consume a cycle**: `--max-cycles` stays fully in reserve.
+
+**Fail-closed.** It only repairs what it can localize. Straight to the full cycle: a red gate 0 (the engine died), test output with no localizable failure, a failure spread across more than `RALPH_REPAIR_MAX_FILES` files, more than `RALPH_REPAIR_MAX_TASKS` incomplete tasks, and a gate 3 failed on verifier **protocol** (which is not missing code). The model can also bail out on its own by answering `REPAIR_ABORT: <reason>` — bailing out cheaply beats a blind patch, and ralph escalates immediately instead of spending the next round.
+
+**Revalidation.** Between rounds gate 3 runs **scoped**: only the tasks that were `INCOMPLETE`, at their original positions (nothing is renumbered). An `INCOMPLETE` outside the scope fails the gate — that is the repair having broken something that already stood. Scope green **does not close the phase**: the full chain (whole suite + verification of every task) runs before any commit. A repair never commits.
+
+`--no-repair` (or `--max-repairs 0`) turns it off and restores the old behavior: red gate → cycle.
+
 ### Test command detection (gate 2)
 
 First rule that resolves wins: `--test-cmd` → `RALPH_TEST_CMD` → manifest detection (Laravel Sail → `composer test` → `php artisan test` → `npm test` → `pytest` → `go test ./...` → `cargo test`) → nothing resolved = gate 2 skipped with a loud warning (gate 3 holds the line alone).
@@ -220,7 +234,10 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `--from N` | Starts at phase N (clears progress for phases ≥ N) |
 | `--keep-going` | Continues after a phase fails (creates a `wip(phase-N)` commit; default: stop) |
 | `--max-cycles N` | Fix cycles per phase (default: 3) |
+| `--max-repairs N` | Surgical repairs per cycle (default: 2; `0` disables) |
+| `--no-repair` | Disables surgical repair |
 | `--test-cmd "<cmd>"` | Project test command (gate 2) |
+| `--baseline` | Measures what is already red at HEAD and makes gate 2 charge only the **delta** (default: off) |
 | `--no-verify` | Disables gate 3 |
 | `--ui` / `--no-ui` | Forces the ANSI panel on / off (see below) |
 | `--serve[=PORT]` | Local web dashboard over the same state |
@@ -228,9 +245,15 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | Variable | Effect |
 |---|---|
 | `RALPH_TEST_CMD` | Test command (gate 2) |
+| `RALPH_BASELINE` | `on` enables the gate 2 baseline (same as `--baseline`; default: `off`) |
 | `RALPH_VERIFY` | Gate 3: `always` (default) \| `auto` (saves tokens: only when gate 2's verdict isn't enough) \| `off` |
 | `RALPH_VERIFY_MODEL` | Verifier model (claude default: `haiku`) |
 | `RALPH_MAX_CYCLES` | Fix cycles per phase (default: 3) |
+| `RALPH_REPAIR` | Surgical repair: `on` (default) \| `off` |
+| `RALPH_MAX_REPAIRS` | Repairs per cycle (default: 2; `0` disables) |
+| `RALPH_REPAIR_MODEL` | Repair model (claude default: `sonnet`) |
+| `RALPH_REPAIR_MAX_FILES` | Above N files in the failure signature, go straight to the cycle (default: 5) |
+| `RALPH_REPAIR_MAX_TASKS` | Above N incomplete tasks, same (default: 3) |
 | `RALPH_MAX_LIMIT_WAITS` | Consecutive usage-limit waits, per phase (default: 20) |
 | `RALPH_LIMIT_WAIT_DEFAULT` | Fallback wait in seconds (default: 1800) |
 | `RALPH_LIMIT_BUFFER` | Extra seconds after the reset (default: 60) |
@@ -241,7 +264,7 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `RALPH_UI_KEYS` | Keyboard navigation in the panel table: `1` (default) \| `0` disables |
 | `RALPH_SERVE_PORT` | First port `--serve` tries (default: 7433) |
 
-During each session, ralph exports `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, and `RALPH_PHASE_MAX_ATTEMPTS`.
+During each session, ralph exports `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, `RALPH_PHASE_MAX_ATTEMPTS`, and `RALPH_PHASE_REPAIR` (repair round; `0` = none).
 
 ### Visual panel and web dashboard
 

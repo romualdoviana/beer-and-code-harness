@@ -14,6 +14,9 @@
 #   4. Limite de uso -> espera o reset e re-executa a MESMA fase, sem consumir
 #      ciclo de correcao.
 #   5. Um commit por fase concluida.
+#   6. O conserto cirurgico (repair) nunca commita e nunca substitui um gate:
+#      ele so devolve a fase para a MESMA cadeia de gates. Nenhum commit sai
+#      sem gate 2 e gate 3 completos verdes.
 #
 # Agnostico de stack: a fase e o CLAUDE.md/AGENTS.md do projeto definem
 # linguagem, framework, comandos e convencoes.
@@ -26,6 +29,13 @@
 #   --from N                 comeca na fase N (limpa do progresso as fases >= N)
 #   --keep-going             continua apos uma fase falhar (default: para)
 #   --max-cycles N           ciclos de correcao por fase (default: 3)
+#   --max-repairs N          consertos cirurgicos por ciclo (default: 2; 0 = off)
+#   --no-repair              desliga o conserto cirurgico (RALPH_REPAIR=off)
+#   --baseline               mede as falhas ja existentes em HEAD antes do run e
+#                            faz o gate 2 cobrar so o DELTA. Use quando a suite
+#                            ja esta vermelha por algo alheio as fases; NAO use
+#                            em fase cujo teste-alvo ja esta commitado vermelho,
+#                            porque o perdao seria permanente (RALPH_BASELINE=on)
 #   --no-verify              desliga o gate 3 (equivale a RALPH_VERIFY=off)
 #   --test-cmd "<cmd>"       comando de teste do projeto (gate 2)
 #   --verbose                streama o progresso do engine no terminal
@@ -63,6 +73,29 @@
 #      gate 2 desabilitado. --no-verify / RALPH_VERIFY=off desliga. No engine
 #      claude o verificador usa um modelo barato (RALPH_VERIFY_MODEL, default:
 #      haiku) — e leitura + checklist.
+#
+# Conserto cirurgico (repair) — acionamento independente entre o gate vermelho
+# e o ciclo de correcao:
+#   Um ciclo de correcao e caro: sessao nova com o preambulo de contexto, a
+#   fase inteira no prompt e acesso total ao projeto. Pagar isso porque UMA
+#   assertion ficou vermelha e desperdicio. Antes de gastar um ciclo, o ralph
+#   tenta ate RALPH_MAX_REPAIRS (default 2) consertos cirurgicos:
+#     - prompt minimo: SO a assinatura da falha (teste, arquivo:linha, mensagem)
+#       ou SO as linhas INCOMPLETE do verificador. Sem preambulo, sem a fase.
+#     - modelo proprio e barato (RALPH_REPAIR_MODEL, default: sonnet no claude)
+#     - o conserto NAO consome ciclo: os RALPH_MAX_CYCLES continuam de reserva
+#   Fail-closed. So repara o que da para localizar:
+#     - gate 2 vermelho com assinatura extraivel apontando <= RALPH_REPAIR_MAX_FILES
+#       arquivos distintos
+#     - gate 3 vermelho por task INCOMPLETE (<= RALPH_REPAIR_MAX_TASKS tasks)
+#   Gate 0 vermelho (engine morreu), causa nao parseavel, falha larga demais ou
+#   protocolo do verificador quebrado NAO sao reparaveis: vao direto para o
+#   ciclo completo. O modelo tambem pode desistir sozinho respondendo
+#   REPAIR_ABORT — desistir barato vale mais que um patch as cegas.
+#   Revalidacao: entre rounds de conserto o gate 3 roda ESCOPADO (so as tasks
+#   que estavam INCOMPLETE; as posicoes continuam as originais, nada e
+#   renumerado). Verde no escopo NAO fecha a fase: a cadeia completa — gate 2
+#   inteiro + gate 3 de todas as tasks — roda antes de qualquer commit.
 #
 # Streams do engine (stdout != stderr — nunca unir):
 #   .phases/logs/<fase>.<etapa>.log         stdout = RESPOSTA FINAL do engine.
@@ -171,6 +204,13 @@
 #   RALPH_HEARTBEAT          segundos entre heartbeats no modo quiet (default:
 #                            60; 0 desliga)
 #   RALPH_MAX_CYCLES         ciclos de correcao por fase (default: 3)
+#   RALPH_REPAIR             conserto cirurgico: on (default) | off
+#   RALPH_MAX_REPAIRS        consertos por ciclo (default: 2; 0 desliga)
+#   RALPH_REPAIR_MODEL       modelo do conserto (default: sonnet no claude)
+#   RALPH_REPAIR_MAX_FILES   acima de N arquivos distintos na assinatura da
+#                            falha, a falha e larga demais para conserto
+#                            cirurgico e vai direto ao ciclo (default: 5)
+#   RALPH_REPAIR_MAX_TASKS   acima de N tasks INCOMPLETE, idem (default: 3)
 #   RALPH_MAX_LIMIT_WAITS    esperas consecutivas por limite, por fase (default: 20)
 #   RALPH_LIMIT_WAIT_DEFAULT fallback de espera em segundos (default: 1800)
 #   RALPH_LIMIT_BUFFER       segundos extras apos o reset (default: 60)
@@ -198,6 +238,7 @@
 #   RALPH_PHASE_TOTAL        total de fases do run
 #   RALPH_PHASE_ATTEMPT      ciclo corrente (1 = implementacao inicial)
 #   RALPH_PHASE_MAX_ATTEMPTS igual a RALPH_MAX_CYCLES
+#   RALPH_PHASE_REPAIR       round de conserto corrente (0 = nenhum)
 #   RALPH_EVENT              evento corrente (so no processo de notificacao)
 #
 # Exit code: 0 = todas as fases verdes; 1 = alguma falhou ou abortou.
@@ -217,6 +258,36 @@ TEST_CMD_FLAG=""
 MAX_CYCLES="${RALPH_MAX_CYCLES:-3}"
 VERIFY_MODE="${RALPH_VERIFY:-always}"
 VERIFY_MODEL=""
+REPAIR_MODE="${RALPH_REPAIR:-on}"
+MAX_REPAIRS="${RALPH_MAX_REPAIRS:-2}"
+# Baseline do gate 2: a suite roda uma vez em HEAD (arvore limpa, garantida pelo
+# preflight) e o conjunto de testes ja vermelhos vira linha de base. Sem isso,
+# UMA falha pre-existente e alheia a fase prende o loop ate esgotar --max-cycles,
+# gastando um ciclo inteiro de engine + uma suite por rodada para reafirmar um
+# vermelho que nenhum codigo escrito pela fase pode consertar.
+#
+# DEFAULT OFF, e de proposito. O ralph nao tem como saber se um teste vermelho em
+# HEAD e alheio a fase ou e justamente o teste que a fase deve fazer passar (fase
+# escrita em TDD com o teste ja commitado vermelho). Ligado as cegas, ele
+# perdoaria para sempre o vermelho que a fase existe para consertar. Quem sabe a
+# diferenca e o operador: --baseline e a declaracao explicita dele.
+BASELINE_MODE="${RALPH_BASELINE:-off}"
+BASELINE_FILE=""
+BASELINE_COUNT=0
+BASELINE_ACTIVE=false
+GATE2_DELTA_NOTE=""
+# Memoria do gate 2 DENTRO da fase: assinatura da arvore na ultima execucao e o
+# veredito que ela deu. Arvore identica => mesmo veredito, sem gastar a suite.
+GATE2_LAST_SIG=""
+GATE2_LAST_VERDICT=""
+# 1 quando o gate 2 acabou de repetir o MESMO vermelho sobre a MESMA arvore.
+GATE2_STALE_RED=0
+# Desistencia explicita do conserto cirurgico (REPAIR_ABORT) e abortos de fase.
+REPAIR_ABORTED=0
+PHASE_ABORT_REASON=""
+REPAIR_MODEL=""
+REPAIR_MAX_FILES="${RALPH_REPAIR_MAX_FILES:-5}"
+REPAIR_MAX_TASKS="${RALPH_REPAIR_MAX_TASKS:-3}"
 VERBOSE=false
 [ "${RALPH_VERBOSE:-0}" = "1" ] && VERBOSE=true
 HEARTBEAT_SECS="${RALPH_HEARTBEAT:-60}"
@@ -234,6 +305,11 @@ while [[ $# -gt 0 ]]; do
     --from=*)      FROM_PHASE="${1#*=}"; shift ;;
     --max-cycles)  MAX_CYCLES="$2"; shift 2 ;;
     --max-cycles=*) MAX_CYCLES="${1#*=}"; shift ;;
+    --max-repairs) MAX_REPAIRS="$2"; shift 2 ;;
+    --max-repairs=*) MAX_REPAIRS="${1#*=}"; shift ;;
+    --no-repair)   REPAIR_MODE="off"; shift ;;
+    --baseline)    BASELINE_MODE="on"; shift ;;
+    --no-baseline) BASELINE_MODE="off"; shift ;;
     --test-cmd)    TEST_CMD_FLAG="$2"; shift 2 ;;
     --test-cmd=*)  TEST_CMD_FLAG="${1#*=}"; shift ;;
     --keep-going)  KEEP_GOING=true; shift ;;
@@ -336,6 +412,17 @@ ST_ACTIVITY=""
 ST_LAST_ERROR=""
 ST_STAGE_START=0
 ST_STDOUT_LOG=""
+# Conserto cirurgico: idle | running | ok | fail | skipped. ST_REPAIR_ROUND e o
+# round corrente DENTRO do ciclo (0 = nenhum conserto em curso).
+ST_REPAIR="idle"
+ST_REPAIR_ROUND=0
+# Sufixo dos logs/prompts dos gates dentro de um mesmo ciclo. Vazio no round 0
+# (nomes historicos preservados); "r<N>" nas revalidacoes pos-conserto, para que
+# um round nao sobrescreva o log do anterior.
+GATE_TAG=""
+# Escopo do gate 3: posicoes a verificar, separadas por espaco. Vazio = a fase
+# inteira (o comportamento normal).
+VERIFY_ONLY_IDX=""
 GATE_STARTED_AT=0
 FAILED_NUMS=""
 RALPH_PID=$$
@@ -473,6 +560,8 @@ state_sync() {
       "$ST_PHASE_STATUS" "$ST_CYCLE" "$MAX_CYCLES" "$ST_PHASE_START"
     printf '  "gates": {"0": "%s", "1": "%s", "2": "%s", "3": "%s"},\n' \
       "$ST_GATE0" "$ST_GATE1" "$ST_GATE2" "$ST_GATE3"
+    printf '  "repair": {"status": "%s", "round": %d, "max": %d},\n' \
+      "$ST_REPAIR" "$ST_REPAIR_ROUND" "$MAX_REPAIRS"
     printf '  "limit": {"waiting": %s, "until": %d, "waits": %d, "max_waits": %d},\n' \
       "$([ "$ST_LIMIT_WAITING" = "1" ] && echo true || echo false)" \
       "$ST_LIMIT_UNTIL" "$LIMIT_WAITS" "$MAX_LIMIT_WAITS"
@@ -522,6 +611,9 @@ ui_state_cache() {
     printf 'gate1=%s\n'       "$ST_GATE1"
     printf 'gate2=%s\n'       "$ST_GATE2"
     printf 'gate3=%s\n'       "$ST_GATE3"
+    printf 'repair=%s\n'      "$ST_REPAIR"
+    printf 'repair_round=%s\n' "$ST_REPAIR_ROUND"
+    printf 'max_repairs=%s\n' "$MAX_REPAIRS"
     printf 'test_cmd=%s\n'    "${TEST_CMD//$'\n'/ }"
     printf 'limit_waiting=%s\n' "$ST_LIMIT_WAITING"
     printf 'limit_until=%s\n' "$ST_LIMIT_UNTIL"
@@ -911,6 +1003,7 @@ ui_load_state() {
   UIV_last_error=""; UIV_pid=""; UIV_run_id=""; UIV_started=0
   UIV_stage_start=0; UIV_stderr_log=""; UIV_stdout_log=""
   UIV_engine=""; UIV_project=""
+  UIV_repair=""; UIV_repair_round=0; UIV_max_repairs=0
 
   [ -f "$UI_DIR/state.env" ] || return 0
   local k v
@@ -929,6 +1022,8 @@ ui_load_state() {
       started) UIV_started="$v" ;;         stage_start) UIV_stage_start="$v" ;;
       stderr_log) UIV_stderr_log="$v" ;;   stdout_log) UIV_stdout_log="$v" ;;
       engine) UIV_engine="$v" ;;           project) UIV_project="$v" ;;
+      repair) UIV_repair="$v" ;;           repair_round) UIV_repair_round="$v" ;;
+      max_repairs) UIV_max_repairs="$v" ;;
     esac
   done < "$UI_DIR/state.env"
 }
@@ -1044,8 +1139,14 @@ ui_sec_current_lines() {
 
   ui_box_row "$w" "Fase:  $UIV_phase_num · $UIV_phase_title" \
     "$(printf '%bFase:%b  %s · %s' "$UI_C_LABEL" "$UI_C_OFF" "$UIV_phase_num" "$UIV_phase_title")"
-  ui_box_row "$w" "Ciclo: $UIV_cycle/$UIV_max_cycles   Gate: $gate_now" \
-    "$(printf '%bCiclo:%b %s/%s   %bGate:%b %s' "$UI_C_LABEL" "$UI_C_OFF" "$UIV_cycle" "$UIV_max_cycles" "$UI_C_LABEL" "$UI_C_OFF" "$gate_now")"
+  # O conserto cirurgico nao e gate: nao entra na linha de gates. Aparece ao
+  # lado do ciclo porque e disso que ele fala — quantas tentativas baratas
+  # rodaram antes de gastar um ciclo caro.
+  local repair_txt=""
+  [ "$UIV_repair_round" -gt 0 ] 2> /dev/null && repair_txt="   Conserto: $UIV_repair_round/$UIV_max_repairs"
+
+  ui_box_row "$w" "Ciclo: $UIV_cycle/$UIV_max_cycles   Gate: $gate_now$repair_txt" \
+    "$(printf '%bCiclo:%b %s/%s   %bGate:%b %s%b%s%b' "$UI_C_LABEL" "$UI_C_OFF" "$UIV_cycle" "$UIV_max_cycles" "$UI_C_LABEL" "$UI_C_OFF" "$gate_now" "$UI_C_DIM" "$repair_txt" "$UI_C_OFF")"
   ui_box_row "$w" "Atividade: ${UIV_activity:-—}" \
     "$(printf '%bAtividade:%b %s' "$UI_C_LABEL" "$UI_C_OFF" "${UIV_activity:-—}")"
   ui_box_row "$w" "Último erro: ${UIV_last_error:-—}" \
@@ -1882,9 +1983,12 @@ async function tick() {
   }
 
   const p = state.phase || {};
+  // O conserto cirurgico so aparece quando existe: fora dele a linha nao muda.
+  const rp = state.repair || {};
+  const rpTxt = rp.round > 0 ? ` · conserto ${rp.round}/${rp.max}` : '';
   document.getElementById('phase-title').textContent = p.title || '—';
   document.getElementById('phase-meta').textContent = p.num
-    ? `fase ${p.seq}/${p.total} · ciclo ${p.cycle}/${p.max_cycles} · ${fmtDur(state.updated_at - p.started_at)}`
+    ? `fase ${p.seq}/${p.total} · ciclo ${p.cycle}/${p.max_cycles}${rpTxt} · ${fmtDur(state.updated_at - p.started_at)}`
     : '';
 
   const gates = document.getElementById('gates');
@@ -1955,6 +2059,30 @@ cleanup_ui() {
   serve_stop
 }
 
+# Ctrl-C manda SIGINT para o GRUPO inteiro: o engine morre, mas o bash so roda o
+# trap depois que o comando corrente retorna. Com `trap cleanup_ui INT` (sem
+# exit) o handler limpava a UI e o loop de ciclos SEGUIA — cada Ctrl-C matava o
+# engine, o log saia vazio, o gate 0 dava vermelho e o ciclo era consumido em
+# menos de um segundo. Quatro Ctrl-C torravam o orcamento inteiro de ciclos.
+# Aqui o sinal encerra o run: e o unico veredito honesto para "o operador mandou
+# parar".
+on_interrupt() {
+  local sig="${1:-INT}"
+  trap - EXIT INT TERM
+  # --attach e read-only por contrato: acompanha um run ALHEIO. Sincronizar o
+  # estado daqui sobrescreveria o state.env desse run com os defaults desta
+  # sessao, e o painel do dono passaria a ler lixo.
+  if ! $ATTACH; then
+    ST_RUN_STATUS="aborted"
+    ST_ACTIVITY="interrompido pelo operador ($sig)"
+    state_sync 2> /dev/null || true
+  fi
+  cleanup_ui
+  echo ""
+  fail "Interrompido pelo operador ($sig) — run encerrado."
+  exit 130
+}
+
 # ---------------------------------------------------------------------------
 # --attach — acompanhar um run JA em andamento
 #
@@ -1988,7 +2116,9 @@ attach_run() {
   log "attach: run ${UIV_run_id:-?} (pid ${UIV_pid:-?}) — projeto $PROJECT_NAME"
   log "attach: republicando status por task a cada ${ATTACH_INTERVAL}s; Ctrl-C sai sem tocar no run"
 
-  trap cleanup_ui EXIT INT TERM
+  trap cleanup_ui EXIT
+  trap 'on_interrupt INT' INT
+  trap 'on_interrupt TERM' TERM
   ui_start
 
   local st pnum
@@ -2200,6 +2330,31 @@ preflight_checks() {
     exit 1
   fi
 
+  if ! [[ "$MAX_REPAIRS" =~ ^[0-9]+$ ]]; then
+    fail "Valor invalido para --max-repairs: '$MAX_REPAIRS'. Use um inteiro >= 0 (0 desliga)."
+    exit 1
+  fi
+
+  case "$REPAIR_MODE" in
+    on|off) ;;
+    *)
+      fail "Valor invalido para RALPH_REPAIR: '$REPAIR_MODE'. Use on ou off."
+      exit 1
+      ;;
+  esac
+
+  # --no-repair e --max-repairs 0 sao o mesmo desligamento; normaliza para um
+  # unico predicado (repair_enabled) em vez de checar dois lugares no loop.
+  [ "$REPAIR_MODE" = "off" ] && MAX_REPAIRS=0
+
+  local n
+  for n in REPAIR_MAX_FILES REPAIR_MAX_TASKS; do
+    if ! [[ "${!n}" =~ ^[0-9]+$ ]] || [ "${!n}" -lt 1 ]; then
+      fail "Valor invalido para RALPH_${n}: '${!n}'. Use um inteiro >= 1."
+      exit 1
+    fi
+  done
+
   if ! [[ "$HEARTBEAT_SECS" =~ ^[0-9]+$ ]]; then
     fail "Valor invalido para RALPH_HEARTBEAT: '$HEARTBEAT_SECS'. Use um inteiro >= 0 (0 desliga)."
     exit 1
@@ -2227,6 +2382,15 @@ preflight_checks() {
     VERIFY_MODEL="$RALPH_VERIFY_MODEL"
   elif [[ "$ENGINE" == "claude" ]]; then
     VERIFY_MODEL="haiku"
+  fi
+
+  # Conserto cirurgico e um patch localizado com o erro na mao: nao precisa do
+  # modelo de implementacao, mas precisa de mais do que o verificador (escreve
+  # codigo). Mesma regra do codex: sem default, so se pedido.
+  if [ -n "${RALPH_REPAIR_MODEL:-}" ]; then
+    REPAIR_MODEL="$RALPH_REPAIR_MODEL"
+  elif [[ "$ENGINE" == "claude" ]]; then
+    REPAIR_MODEL="sonnet"
   fi
 
   if ! command -v "$ENGINE" &> /dev/null; then
@@ -2513,9 +2677,55 @@ INTRO
   echo "$prompt_file"
 }
 
+# Prompt de conserto cirurgico: o OPOSTO do fix. Nao carrega preambulo de
+# contexto nem a fase — so a assinatura da falha. Prompt largo e o que faz o
+# modelo reexplorar o projeto inteiro para consertar uma assertion.
+build_repair_prompt() {
+  local phase_file="$1" cycle="$2" round="$3" gate="$4" signature="$5"
+  local prompt_file="$PROMPT_DIR/${phase_file%.md}.repair-${cycle}-${round}.txt"
+
+  {
+    cat <<'INTRO'
+Voce e um desenvolvedor senior fazendo UMA correcao cirurgica.
+
+Nao explore o projeto. Nao refatore. Nao reimplemente nada que ja funciona.
+Corrija exatamente o erro abaixo e nada mais.
+INTRO
+    echo
+    echo "## Erro ($gate)"
+    echo '```'
+    printf '%s\n' "$signature"
+    echo '```'
+    echo
+    cat <<'RULES'
+## Regras obrigatorias
+- Mexa apenas nos arquivos necessarios para esse erro.
+- Nao crie teste novo, nao apague nem pule teste existente, nao mude o comando
+  de teste do projeto.
+- Nao deixe TODO nem placeholder.
+- Nao mude configuracao, dependencia ou versao de ferramenta para "fazer passar".
+RULES
+    if [ -n "$TEST_CMD" ]; then
+      echo "- Rode \`$TEST_CMD\` ao final e confirme que passa antes de terminar."
+    else
+      echo "- Rode o comando de teste do projeto ao final e confirme que passa."
+    fi
+    cat <<'ABORT'
+- Se a causa NAO estiver clara no erro acima, ou se o conserto exigir mudar
+  varios arquivos ou reimplementar a funcionalidade, PARE sem editar nada e
+  responda exatamente uma linha:
+  REPAIR_ABORT: <motivo em uma frase>
+  Desistir aqui e barato e correto — quem assume a fase depois recebe o
+  contexto completo. Um patch as cegas custa mais caro do que desistir.
+ABORT
+  } > "$prompt_file"
+
+  echo "$prompt_file"
+}
+
 build_verify_prompt() {
   local phase_file="$1" cycle="$2"
-  local prompt_file="$PROMPT_DIR/${phase_file%.md}.verify-${cycle}.txt"
+  local prompt_file="$PROMPT_DIR/${phase_file%.md}.verify-${cycle}${GATE_TAG}.txt"
 
   {
     cat <<'VERIFY'
@@ -2553,9 +2763,22 @@ Regras:
   prova: uma task marcada pode estar incompleta e uma task nao marcada pode
   estar pronta. So o codigo real decide.
 - Na duvida, INCOMPLETE.
-
-## Fase a verificar
 VERIFY
+    # Verificacao escopada (revalidacao entre rounds de conserto cirurgico): as
+    # POSICOES continuam as originais da fase. Renumerar de 1..k e o caminho
+    # curto para o bug de indice que ja custou uma fase reprovada de graca.
+    if [ -n "$VERIFY_ONLY_IDX" ]; then
+      echo
+      echo "## Escopo desta verificacao"
+      echo "As demais tasks desta fase JA foram confirmadas nesta rodada e nao"
+      echo "precisam ser reverificadas. Verifique APENAS as tasks nas posicoes:"
+      echo "  $VERIFY_ONLY_IDX"
+      echo "Esta instrucao SUBSTITUI a regra 'uma linha TASK para cada task':"
+      echo "aqui e uma linha TASK para cada task DO ESCOPO, e nenhuma alem delas."
+      echo "Use o numero da POSICAO ORIGINAL na fase — nao renumere, nao comece do 1."
+    fi
+    echo
+    echo "## Fase a verificar"
     cat "$PHASES_DIR/$phase_file"
   } > "$prompt_file"
 
@@ -2584,6 +2807,82 @@ engine_tail() {
     echo "--- stderr do engine (progresso, nao e veredito) ---"
     tail -n "$lines" "$err_log" 2>/dev/null || true
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Assinatura de falha — o insumo do conserto cirurgico
+#
+# GATE_CAUSE existe para o humano: leva `tail -n 200` do log de teste porque um
+# dev precisa do contexto ao redor. Prompt de conserto e outra coisa: 200 linhas
+# de saida de suite sao ruido que empurra o modelo a reexplorar o projeto.
+#
+# Agnostico de runner por construcao. Em vez de um ramo por framework (que
+# quebra na proxima versao do pest/vitest/pytest), casa os MARCADORES que todos
+# eles compartilham — cabecalho de falha, diff de assertion, referencia
+# arquivo:linha — e deduplica. Sem marcador nenhum => sem assinatura => a falha
+# NAO e reparavel (fail-closed), e o ciclo completo assume.
+# ---------------------------------------------------------------------------
+
+# Arquivos-fonte citados na assinatura. Serve de insumo e de medida de escopo:
+# uma falha que aponta o projeto inteiro nao e conserto cirurgico.
+REPAIR_FILES=""
+REPAIR_SIGNATURE=""
+
+# extract_failure_signature <log> [max_linhas]
+#
+# Publica em REPAIR_SIGNATURE e REPAIR_FILES (globais, nao stdout): command
+# substitution roda em subshell e as duas variaveis morreriam com ela.
+#   rc 0 = assinatura extraida   rc 1 = nada localizavel no log
+extract_failure_signature() {
+  local log="$1" max="${2:-30}"
+  REPAIR_SIGNATURE=""
+  REPAIR_FILES=""
+  [ -s "$log" ] || return 1
+
+  # -a: log de suite pode carregar byte binario (cor, progresso) e o grep
+  # trataria o arquivo como binario, devolvendo nada.
+  local marks
+  marks=$(grep -aE \
+    '(FAILED|FAILURES|--- FAIL:|^[[:space:]]*FAIL[[:space:]]|✕|⨯|×|●|panicked at|Failed asserting|Expected[[:space:]]*:|Received[[:space:]]*:|AssertionError|^[[:space:]]*E[[:space:]]{2,}|Error[[:space:]]*:|Exception)' \
+    "$log" 2> /dev/null \
+    | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
+    | sed 's/[[:space:]]*$//' \
+    | grep -avE '^[[:space:]]*$' \
+    | awk '!seen[$0]++' \
+    | head -n "$max" || true)
+
+  # Referencias arquivo:linha — o que transforma "falhou" em "falhou aqui".
+  local refs
+  refs=$(grep -aoE '[A-Za-z0-9_][A-Za-z0-9_./-]*\.(php|js|mjs|cjs|ts|tsx|jsx|vue|py|go|rs|rb|java|kt|cs|ex|exs)(:[0-9]+)+' \
+    "$log" 2> /dev/null | awk '!seen[$0]++' | head -n 15 || true)
+
+  REPAIR_FILES=$(printf '%s\n' "$refs" | sed 's/:[0-9]*$//' | awk 'NF && !seen[$0]++' || true)
+
+  # Marcador sem localizacao ainda serve (a mensagem pode nomear o teste), mas
+  # nenhum dos dois significa que nao ha o que apontar para o modelo.
+  if [ -z "${marks//[[:space:]]/}" ] && [ -z "${refs//[[:space:]]/}" ]; then
+    REPAIR_FILES=""
+    return 1
+  fi
+
+  local out=""
+  if [ -n "${marks//[[:space:]]/}" ]; then
+    out="$marks"
+  fi
+  if [ -n "${refs//[[:space:]]/}" ]; then
+    if [ -n "$out" ]; then
+      out="$out"$'\n'
+    fi
+    out="${out}Referencias no log (arquivo:linha):"$'\n'"$(printf '%s\n' "$refs" | sed 's/^/  /')"
+  fi
+
+  REPAIR_SIGNATURE="$out"
+  return 0
+}
+
+# Quantos arquivos distintos a assinatura aponta. 0 = sem localizacao.
+repair_file_count() {
+  printf '%s' "$REPAIR_FILES" | grep -c . || true
 }
 
 # Heartbeat do modo quiet: prova de vida enquanto o engine trabalha em silencio.
@@ -2811,14 +3110,20 @@ run_engine() {
   ST_STDERR_LOG="$err_log"
   ST_STDOUT_LOG="$log_file"
 
+  # Expandido como ${model_args[@]+"..."}: sob `set -u`, "${arr[@]}" de array
+  # VAZIO e "unbound variable" em bash < 4.4 (o bash 3.2 do macOS incluso).
   local model_args=()
   if [[ "$mode" == "verify" ]] && [ -n "$VERIFY_MODEL" ]; then
     model_args=(--model "$VERIFY_MODEL")
+  elif [[ "$mode" == "repair" ]] && [ -n "$REPAIR_MODEL" ]; then
+    model_args=(--model "$REPAIR_MODEL")
   fi
 
   local hb_label
   if [[ "$mode" == "verify" ]]; then
     hb_label="$ENGINE verificando a fase ${RALPH_PHASE_NUM:-?}"
+  elif [[ "$mode" == "repair" ]]; then
+    hb_label="$ENGINE consertando a fase ${RALPH_PHASE_NUM:-?} (round ${RALPH_PHASE_REPAIR:-1})"
   else
     hb_label="$ENGINE implementando a fase ${RALPH_PHASE_NUM:-?} (ciclo ${RALPH_PHASE_ATTEMPT:-1})"
   fi
@@ -2835,10 +3140,12 @@ run_engine() {
     if [[ "$ENGINE" == "codex" ]]; then
       if [[ "$mode" == "verify" ]]; then
         run_split "$log_file" "$err_log" "$prompt_file" \
-          codex exec --sandbox read-only "${model_args[@]}" - || rc=$?
+          codex exec --sandbox read-only ${model_args[@]+"${model_args[@]}"} - || rc=$?
       else
+        # O conserto tambem escreve codigo: mesmo sandbox da implementacao, so
+        # o modelo muda.
         run_split "$log_file" "$err_log" "$prompt_file" \
-          codex exec --sandbox danger-full-access - || rc=$?
+          codex exec --sandbox danger-full-access ${model_args[@]+"${model_args[@]}"} - || rc=$?
       fi
     else
       # stdin /dev/null: claude -p le stdin quando nao e TTY. Sem o redirect ele
@@ -2846,7 +3153,7 @@ run_engine() {
       if [[ "$mode" == "verify" ]]; then
         run_split "$log_file" "$err_log" /dev/null \
           env -u CLAUDECODE claude --dangerously-skip-permissions \
-          "${model_args[@]}" \
+          ${model_args[@]+"${model_args[@]}"} \
           -p "$(cat "$prompt_file")" \
           --allowedTools "Read,Glob,Grep" \
           --output-format text || rc=$?
@@ -2854,6 +3161,7 @@ run_engine() {
         # JSON: o exit code do CLI e sinal fraco; o gate 0 le is_error.
         run_split "$log_file" "$err_log" /dev/null \
           env -u CLAUDECODE claude --dangerously-skip-permissions \
+          ${model_args[@]+"${model_args[@]}"} \
           -p "$(cat "$prompt_file")" \
           --output-format json || rc=$?
       fi
@@ -2927,6 +3235,78 @@ gate1_session_wrote() {
   [ "$(tree_signature)" != "$sig_before" ]
 }
 
+# Identificadores dos testes vermelhos num log de suite, normalizados e unicos.
+# Os runners truncam o detalhe da falha ("FAILED  Tests\\Meta\\MetaTemplateImportSe…"),
+# mas o CABECALHO do arquivo/suite ("FAIL  Tests\\Meta\\MetaTemplateImportSecretsTest")
+# vem inteiro — e ele que serve de identidade estavel entre duas rodadas.
+gate2_failure_ids() {
+  sed -e 's/\x1b\[[0-9;]*m//g' "$1" 2> /dev/null | awk '
+    # phpunit / pest / jest / vitest: "FAIL  <suite ou arquivo>"
+    /^[[:space:]]*FAIL[[:space:]]+[^[:space:]]/ { print $2; next }
+    # pytest: "FAILED tests/test_x.py::test_y"
+    /^[[:space:]]*FAILED[[:space:]]+[^[:space:]]+::/ { print $2; next }
+    # go test: "--- FAIL: TestFoo"
+    /^[[:space:]]*--- FAIL: / { print $3; next }
+    # cargo test: "test foo::bar ... FAILED"
+    /^test .* \.\.\. FAILED/ { print $2; next }
+  ' | sort -u
+}
+
+# Quantos testes falharam, pela linha de resumo do runner. A contagem fecha o
+# buraco da identidade por suite: um teste NOVO quebrando dentro de uma suite que
+# ja estava vermelha nao muda o conjunto de ids, mas muda o total.
+gate2_failure_count() {
+  local n
+  n=$(sed -e 's/\x1b\[[0-9;]*m//g' "$1" 2> /dev/null \
+    | grep -oiE '[0-9]+ (failed|failures?|failing)' | head -n 1 | grep -oE '^[0-9]+' || true)
+  if [ -n "$n" ]; then
+    echo "$n"
+  else
+    gate2_failure_ids "$1" | wc -l | tr -d ' '
+  fi
+}
+
+# Mede em HEAD o que ja esta vermelho ANTES da primeira fase. O preflight exige
+# arvore limpa, entao esta medicao e exatamente o estado de HEAD — nada do que a
+# fase escrever pode ser confundido com uma falha herdada.
+measure_baseline() {
+  [ "$BASELINE_MODE" = "on" ] || return 0
+  [ -n "$TEST_CMD" ] || return 0
+
+  local log rc=0
+  log="$LOG_DIR/baseline.log"
+  BASELINE_FILE="$LOG_DIR/baseline.ids"
+
+  set_activity "medindo o baseline da suite em HEAD"
+  log "Baseline — medindo o que ja esta vermelho em HEAD: $TEST_CMD"
+  bash -c "$TEST_CMD" < /dev/null > "$log" 2>&1 || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    : > "$BASELINE_FILE"
+    BASELINE_COUNT=0
+    BASELINE_ACTIVE=true
+    success "Baseline — suite verde em HEAD; qualquer vermelho daqui pra frente e da fase"
+    return 0
+  fi
+
+  gate2_failure_ids "$log" > "$BASELINE_FILE"
+  BASELINE_COUNT=$(gate2_failure_count "$log")
+  BASELINE_ACTIVE=true
+
+  if [ ! -s "$BASELINE_FILE" ]; then
+    # Suite vermelha e nenhum id extraido: o formato do runner nao e conhecido.
+    # Herdar o vermelho as cegas mascararia regressao real — melhor desligar.
+    BASELINE_ACTIVE=false
+    warn "Baseline — suite vermelha em HEAD, mas nao consegui identificar os testes."
+    warn "Baseline DESLIGADO: o gate 2 vai exigir a suite inteira verde."
+    return 0
+  fi
+
+  warn "Baseline — HEAD ja tem $BASELINE_COUNT teste(s) vermelho(s), alheios a este run:"
+  sed 's/^/    /' "$BASELINE_FILE"
+  warn "O gate 2 vai cobrar apenas o DELTA. Conserte-os fora do ralph."
+}
+
 # Gate 2 — a suite do projeto passa, rodada PELO ralph (fora da sessao do agente)?
 gate2_tests_pass() {
   local test_log="$1"
@@ -2938,6 +3318,19 @@ gate2_tests_pass() {
     return 0
   fi
 
+  # Arvore identica a da ultima execucao => a suite responderia a mesma coisa.
+  # Foi exatamente isso que queimou 3 min por ciclo em quatro ciclos seguidos:
+  # sessoes que nao escreveram nada, e a suite reexecutada para reafirmar o
+  # mesmo veredito. So o VERDE e reaproveitado; o vermelho segue para o guarda
+  # de ciclo improdutivo, que aborta a fase em vez de repetir a rodada.
+  local sig
+  sig="$(tree_signature)"
+  if [ -n "$GATE2_LAST_SIG" ] && [ "$sig" = "$GATE2_LAST_SIG" ] && [ "$GATE2_LAST_VERDICT" = "pass" ]; then
+    log "Gate 2 — arvore identica a ultima execucao; veredito verde reaproveitado"
+    gate_end 2 pass
+    return 0
+  fi
+
   set_activity "executando a suite do projeto"
   log "Gate 2 — rodando a suite do projeto: $TEST_CMD"
   local rc=0
@@ -2946,14 +3339,64 @@ gate2_tests_pass() {
   bash -c "$TEST_CMD" < /dev/null > "$test_log" 2>&1 || rc=$?
 
   if [ "$rc" -ne 0 ]; then
-    GATE_CAUSE="O comando de teste do projeto ('$TEST_CMD') falhou com codigo $rc. Saida:"$'\n'"$(tail -n 200 "$test_log")"
+    if gate2_within_baseline "$test_log"; then
+      success "Gate 2 — sem regressao (as $BASELINE_COUNT falha(s) vermelhas ja existiam em HEAD)"
+      GATE2_LAST_SIG="$sig"; GATE2_LAST_VERDICT="pass"
+      gate_end 2 pass
+      return 0
+    fi
+    # Mesmo vermelho, mesma arvore, duas vezes seguidas: a suite provou ser
+    # funcao da arvore neste caso, entao insistir e ponto fixo. Medir DEPOIS de
+    # rodar (e nao presumir antes) e o que preserva o caso legitimo da suite que
+    # abre vermelha e fecha verde sobre a mesma arvore — migracao pendente,
+    # cache frio, ordem de teste.
+    if [ "$sig" = "$GATE2_LAST_SIG" ] && [ "$GATE2_LAST_VERDICT" = "fail" ]; then
+      GATE2_STALE_RED=1
+    else
+      GATE2_STALE_RED=0
+    fi
+    GATE2_LAST_SIG="$sig"; GATE2_LAST_VERDICT="fail"
+    GATE_CAUSE="O comando de teste do projeto ('$TEST_CMD') falhou com codigo $rc.${GATE2_DELTA_NOTE:- Saida:}"$'\n'"$(tail -n 200 "$test_log")"
     gate_end 2 fail
     return 1
   fi
 
   success "Gate 2 — suite verde"
+  GATE2_LAST_SIG="$sig"; GATE2_LAST_VERDICT="pass"
   gate_end 2 pass
   return 0
+}
+
+# A suite voltou vermelha: e regressao DESTA fase ou o vermelho herdado de HEAD?
+# Retorna 0 (sem regressao) so quando nenhum id novo aparece E o total de falhas
+# nao subiu — a contagem cobre o caso de um teste novo quebrar dentro de uma
+# suite que ja estava na linha de base.
+gate2_within_baseline() {
+  local test_log="$1"
+
+  GATE2_DELTA_NOTE=""
+  $BASELINE_ACTIVE || return 1
+  [ -n "$BASELINE_FILE" ] && [ -f "$BASELINE_FILE" ] || return 1
+
+  local atual_ids novos count
+  atual_ids="$test_log.ids"
+  gate2_failure_ids "$test_log" > "$atual_ids"
+  novos="$(comm -13 "$BASELINE_FILE" "$atual_ids" || true)"
+  count=$(gate2_failure_count "$test_log")
+
+  if [ -z "$novos" ] && [ "$count" -le "$BASELINE_COUNT" ]; then
+    return 0
+  fi
+
+  # Vermelho legitimo: o prompt do ciclo de correcao so precisa do DELTA. Mandar
+  # as falhas herdadas junto ja custou ciclos inteiros com o engine tentando
+  # consertar codigo que a fase nunca tocou.
+  if [ -n "$novos" ]; then
+    GATE2_DELTA_NOTE=" Falhas NOVAS em relacao a HEAD (as demais ja eram vermelhas antes do run e NAO sao desta fase — ignore-as):"$'\n'"$(echo "$novos" | sed 's/^/  - /')"$'\n'"Saida completa:"
+  else
+    GATE2_DELTA_NOTE=" O total de falhas subiu de $BASELINE_COUNT para $count sem suite nova vermelha: um teste novo quebrou dentro de uma suite que ja estava na linha de base. Saida:"
+  fi
+  return 1
 }
 
 # Gate 3 — sessao verificadora independente, read-only, task a task.
@@ -2966,11 +3409,21 @@ gate2_tests_pass() {
 # GATE3_RAN diz ao caminho "ja implementada" quais gates de fato validaram HEAD.
 GATE3_RAN=0
 
+# Posicoes das tasks que o verificador declarou INCOMPLETE na ultima reprovacao.
+# Insumo do conserto cirurgico (o que reparar) e do escopo da revalidacao.
+# Vazio quando o gate 3 reprovou por PROTOCOLO (nenhuma linha TASK, indice fora
+# do intervalo, cobertura faltando) — isso nao e codigo faltando e nao e
+# reparavel por patch.
+GATE3_INCOMPLETE_IDX=""
+GATE3_INCOMPLETE_LINES=""
+
 gate3_independent_verify() {
   local phase_file="$1" cycle="$2" session_wrote="$3"
-  local verify_log="$LOG_DIR/${phase_file%.md}.verify-${cycle}.log"
+  local verify_log="$LOG_DIR/${phase_file%.md}.verify-${cycle}${GATE_TAG}.log"
 
   GATE3_RAN=0
+  GATE3_INCOMPLETE_IDX=""
+  GATE3_INCOMPLETE_LINES=""
   local remapped_labels=0
   gate_start 3
 
@@ -2981,7 +3434,9 @@ gate3_independent_verify() {
       return 0
       ;;
     auto)
-      if [ "$cycle" -eq 1 ] && [ "$session_wrote" -eq 1 ] && [ -n "$TEST_CMD" ]; then
+      # Revalidacao escopada nunca e opcional: ela existe justamente porque o
+      # gate 3 acabou de reprovar. Pular aqui daria verde sem verificar nada.
+      if [ -z "$VERIFY_ONLY_IDX" ] && [ "$cycle" -eq 1 ] && [ "$session_wrote" -eq 1 ] && [ -n "$TEST_CMD" ]; then
         log "Gate 3 pulado: a sessao escreveu codigo e a suite passou (RALPH_VERIFY=always para rodar sempre)"
         gate_end 3 skip
         return 0
@@ -2998,9 +3453,26 @@ gate3_independent_verify() {
     return 0
   fi
 
+  # Cobertura exigida. Normalmente e a fase inteira (1..expected). Na
+  # revalidacao pos-conserto e so o escopo — mas nas POSICOES ORIGINAIS: o
+  # intervalo valido continua 1..expected, nada e renumerado.
+  local required scope_count
+  if [ -n "$VERIFY_ONLY_IDX" ]; then
+    required=$(printf '%s' "$VERIFY_ONLY_IDX" | tr ' ' '\n' | awk 'NF' | sort -n -u)
+    scope_count=$(printf '%s' "$required" | grep -c . || true)
+  else
+    required=$(seq 1 "$expected")
+    scope_count="$expected"
+  fi
+
   GATE3_RAN=1
-  set_activity "verificacao independente ($expected tasks)"
-  log "Gate 3 — sessao verificadora independente ($expected tasks${VERIFY_MODEL:+, modelo: $VERIFY_MODEL})"
+  if [ -n "$VERIFY_ONLY_IDX" ]; then
+    set_activity "verificacao escopada ($scope_count de $expected tasks)"
+    log "Gate 3 (escopado) — reverificando so a(s) task(s): $(printf '%s' "$required" | tr '\n' ' ')"
+  else
+    set_activity "verificacao independente ($expected tasks)"
+    log "Gate 3 — sessao verificadora independente ($expected tasks${VERIFY_MODEL:+, modelo: $VERIFY_MODEL})"
+  fi
 
   local prompt_file
   prompt_file=$(build_verify_prompt "$phase_file" "$cycle")
@@ -3045,7 +3517,10 @@ gate3_independent_verify() {
   # verificador tende a copiar o rotulo visivel. Se TODO indice emitido casa
   # com um rotulo da fase, a cobertura e verificavel do mesmo jeito:
   # remapeia rotulo -> posicao em vez de reprovar por "fora do intervalo".
-  if [ -n "${out_of_range// /}" ]; then
+  # Nao remapeia na verificacao escopada: o escopo ja e dado em posicoes, e
+  # remapear rotulo -> posicao em cima de um subconjunto e como o falso verde
+  # nasce.
+  if [ -n "${out_of_range// /}" ] && [ -z "$VERIFY_ONLY_IDX" ]; then
     local labels label_count remapped
     labels=$(sed -nE 's/^[[:space:]]*- \[[ x]\][[:space:]]*\**T0*([0-9]+).*$/\1/p' "$PHASES_DIR/$phase_file")
     label_count=$(printf '%s' "$labels" | grep -c . || true)
@@ -3069,6 +3544,31 @@ gate3_independent_verify() {
     return 1
   fi
 
+  # Escopo. Um veredito fora do recorte nao e erro de protocolo: o verificador
+  # so foi alem do pedido. DONE extra e ruido e vai fora. INCOMPLETE extra e
+  # informacao NOVA sobre uma task que ja estava confirmada — o conserto
+  # cirurgico quebrou algo que estava de pe. Isso reprova.
+  if [ -n "$VERIFY_ONLY_IDX" ]; then
+    local off_incomplete
+    off_incomplete=$(awk 'FILENAME == ARGV[1] { if (NF) want[$1 + 0] = 1; next }
+                          /INCOMPLETE/ { if (!(($2 + 0) in want)) print }' \
+      <(printf '%s\n' "$required") <(printf '%s\n' "$task_lines"))
+
+    if [ -n "$off_incomplete" ]; then
+      GATE_CAUSE="O conserto cirurgico quebrou task(s) que ja estavam confirmadas:"$'\n'"$off_incomplete"
+      gate_end 3 fail
+      return 1
+    fi
+
+    task_lines=$(awk 'FILENAME == ARGV[1] { if (NF) want[$1 + 0] = 1; next }
+                      NF && (($2 + 0) in want)' \
+      <(printf '%s\n' "$required") <(printf '%s\n' "$task_lines"))
+    indices=$(printf '%s\n' "$task_lines" \
+      | sed -nE 's/^TASK[[:space:]]+([0-9]+)[[:space:]]*:.*$/\1/p' \
+      | sort -n -u)
+    parsed=$(printf '%s' "$indices" | grep -c . || true)
+  fi
+
   # Duplicata nao pode esconder buraco: 'TASK 1' duas vezes e nenhum 'TASK 2'
   # da 2 linhas para 2 tasks, mas cobre so metade da fase.
   # Publica o veredito POR TASK para o painel e o dashboard. Apresentacao pura:
@@ -3076,21 +3576,33 @@ gate3_independent_verify() {
   # Quando houve remapeamento rotulo -> posicao, os indices de `indices` estao
   # normalizados mas os de `task_lines` nao: misturar os dois pintaria de verde
   # uma task incompleta. Nesse caso nao publica nada — pendente e honesto.
+  local vfile="$UI_DIR/verdicts-${ST_PHASE_NUM}.txt"
   if [ "$remapped_labels" -eq 0 ]; then
+    local vtmp="$vfile.tmp.$$"
     {
+      # Verificacao escopada julga so um recorte: reescrever o arquivo inteiro
+      # apagaria o veredito das tasks que continuam validas e o painel as
+      # mostraria como pendentes. Preserva o que esta fora do escopo.
+      if [ -n "$VERIFY_ONLY_IDX" ] && [ -f "$vfile" ]; then
+        awk -F'|' 'FILENAME == ARGV[1] { if (NF) want[$1 + 0] = 1; next }
+                   NF && !(($1 + 0) in want)' \
+          <(printf '%s\n' "$required") "$vfile" 2> /dev/null || true
+      fi
       printf '%s\n' "$indices"    | awk 'NF { print $1 "|DONE" }'
       printf '%s\n' "$task_lines" | sed -nE 's/^TASK[[:space:]]+([0-9]+)[[:space:]]*:.*INCOMPLETE.*/\1|INCOMPLETE/p'
-    } > "$UI_DIR/verdicts-${ST_PHASE_NUM}.txt" 2> /dev/null || true
+    } > "$vtmp" 2> /dev/null && mv -f "$vtmp" "$vfile" 2> /dev/null || rm -f "$vtmp" 2> /dev/null
   else
-    rm -f "$UI_DIR/verdicts-${ST_PHASE_NUM}.txt" 2> /dev/null || true
+    rm -f "$vfile" 2> /dev/null || true
   fi
 
+  # Cobertura contra o conjunto EXIGIDO (a fase inteira, ou so o escopo).
   local missing
-  missing=$(printf '%s\n' "$indices" \
-    | awk -v max="$expected" 'NF{seen[$1 + 0] = 1} END{for (i = 1; i <= max; i++) if (!(i in seen)) printf "%d ", i}')
+  missing=$(awk 'FILENAME == ARGV[1] { if (NF) seen[$1 + 0] = 1; next }
+                 NF && !(($1 + 0) in seen) { printf "%d ", $1 }' \
+    <(printf '%s\n' "$indices") <(printf '%s\n' "$required"))
 
   if [ -n "${missing// /}" ]; then
-    GATE_CAUSE="O verificador cobriu $parsed de $expected tasks — faltou veredito para a(s) task(s): ${missing%% }. Linhas emitidas:"$'\n'"$task_lines"
+    GATE_CAUSE="O verificador cobriu $parsed de $scope_count tasks — faltou veredito para a(s) task(s): ${missing%% }. Linhas emitidas:"$'\n'"$task_lines"
     gate_end 3 fail
     return 1
   fi
@@ -3102,12 +3614,27 @@ gate3_independent_verify() {
   incomplete=$(printf '%s\n' "$task_lines" | grep 'INCOMPLETE' | awk '!seen[$2]++' || true)
 
   if [ -n "$incomplete" ]; then
+    # Unica reprovacao do gate 3 que e "falta codigo" e nao "protocolo quebrado":
+    # so ela alimenta o conserto cirurgico. Publicado apos o remapeamento, entao
+    # os indices ja estao em posicao — exceto quando houve remap, caso em que
+    # `task_lines` continua com rotulo e o escopo seria mentiroso.
+    if [ "$remapped_labels" -eq 0 ]; then
+      GATE3_INCOMPLETE_LINES="$incomplete"
+      GATE3_INCOMPLETE_IDX=$(printf '%s\n' "$incomplete" \
+        | sed -nE 's/^TASK[[:space:]]+([0-9]+)[[:space:]]*:.*$/\1/p' \
+        | sort -n -u | tr '\n' ' ')
+      GATE3_INCOMPLETE_IDX="${GATE3_INCOMPLETE_IDX%% }"
+    fi
     GATE_CAUSE="O verificador independente encontrou tasks incompletas:"$'\n'"$incomplete"
     gate_end 3 fail
     return 1
   fi
 
-  success "Gate 3 — $parsed/$expected tasks confirmadas no codigo"
+  if [ -n "$VERIFY_ONLY_IDX" ]; then
+    success "Gate 3 (escopado) — $parsed/$scope_count task(s) reverificada(s) e confirmada(s)"
+  else
+    success "Gate 3 — $parsed/$expected tasks confirmadas no codigo"
+  fi
   gate_end 3 pass
   return 0
 }
@@ -3135,6 +3662,127 @@ commit_wip() {
   warn "Commit wip criado para a fase $phase_num — a proxima fase parte de arvore limpa"
 }
 
+# ---------------------------------------------------------------------------
+# Conserto cirurgico
+#
+# Acionamento independente entre o gate vermelho e o ciclo de correcao. Nunca
+# commita, nunca decide gate: patch + devolve a fase para a MESMA cadeia.
+# ---------------------------------------------------------------------------
+
+REPAIR_SKIP_REASON=""
+
+# repair_classify <gate2|gate3> <test_log>
+#   rc 0 = reparavel (REPAIR_SIGNATURE pronta)
+#   rc 1 = nao reparavel (REPAIR_SKIP_REASON explica; o ciclo completo assume)
+#
+# Fail-closed por desenho. Um conserto cirurgico so faz sentido com um alvo:
+# sem alvo, o patch vira chute e sai mais caro que o ciclo que ele evitaria.
+repair_classify() {
+  local gate="$1" test_log="$2"
+  REPAIR_SIGNATURE=""
+  REPAIR_SKIP_REASON=""
+  REPAIR_FILES=""
+
+  case "$gate" in
+    gate2)
+      if ! extract_failure_signature "$test_log"; then
+        REPAIR_SKIP_REASON="a saida da suite nao trouxe falha localizavel"
+        return 1
+      fi
+      local files
+      files=$(repair_file_count)
+      if [ "$files" -gt "$REPAIR_MAX_FILES" ]; then
+        REPAIR_SKIP_REASON="a falha atinge $files arquivos (limite: $REPAIR_MAX_FILES) — larga demais para conserto cirurgico"
+        return 1
+      fi
+      return 0
+      ;;
+    gate3)
+      # So INCOMPLETE alimenta conserto. Gate 3 vermelho por protocolo do
+      # verificador (nenhuma linha TASK, indice fora do intervalo, cobertura
+      # faltando) nao e codigo faltando: patch nenhum resolve.
+      if [ -z "$GATE3_INCOMPLETE_IDX" ]; then
+        REPAIR_SKIP_REASON="o gate 3 reprovou pelo protocolo do verificador, nao por task incompleta"
+        return 1
+      fi
+      local tasks
+      tasks=$(printf '%s' "$GATE3_INCOMPLETE_IDX" | tr ' ' '\n' | grep -c . || true)
+      if [ "$tasks" -gt "$REPAIR_MAX_TASKS" ]; then
+        REPAIR_SKIP_REASON="$tasks tasks incompletas (limite: $REPAIR_MAX_TASKS) — e reimplementacao, nao conserto"
+        return 1
+      fi
+      REPAIR_SIGNATURE="Tasks reprovadas pelo verificador independente:"$'\n'"$GATE3_INCOMPLETE_LINES"
+      return 0
+      ;;
+    *)
+      REPAIR_SKIP_REASON="gate nao reparavel"
+      return 1
+      ;;
+  esac
+}
+
+# run_repair <phase_file> <cycle> <round> <gate>
+#   rc 0 = patch aplicado, revalidar
+#   rc 1 = nao consertou — o ciclo de correcao assume agora. Insistir com outro
+#          round depois de "nao sei" ou de zero escrita e desperdicio garantido.
+run_repair() {
+  local phase_file="$1" cycle="$2" round="$3" gate="$4"
+  local prompt_file log_file rc=0 sig_before
+  # GATE_CAUSE e o insumo do ciclo de correcao la na frente. gate0 sobrescreve
+  # em caso de falha do engine do conserto: guarda a causa REAL da fase.
+  local saved_cause="$GATE_CAUSE"
+
+  log_file="$LOG_DIR/${phase_file%.md}.repair-${cycle}-${round}.log"
+  prompt_file=$(build_repair_prompt "$phase_file" "$cycle" "$round" "$gate" "$REPAIR_SIGNATURE")
+
+  export RALPH_PHASE_REPAIR="$round"
+  ST_REPAIR="running"
+  ST_REPAIR_ROUND="$round"
+  set_activity "conserto cirurgico (round $round/$MAX_REPAIRS)"
+  state_event repair_start "gate=$gate" "round=$round"
+  log "Conserto cirurgico $round/$MAX_REPAIRS sobre o $gate${REPAIR_MODEL:+ (modelo: $REPAIR_MODEL)}"
+
+  REPAIR_ABORTED=0
+  sig_before=$(tree_signature)
+  run_engine "$prompt_file" "$log_file" repair || rc=$?
+
+  if ! gate0_engine_finished "$log_file" "$rc"; then
+    ST_REPAIR="fail"
+    state_event repair_end "round=$round" "verdict=engine_failed"
+    warn "Conserto nao concluiu (engine); o ciclo de correcao assume."
+    GATE_CAUSE="$saved_cause"
+    return 1
+  fi
+
+  # A arvore e o veredito, nao o texto. Um log que MENCIONA REPAIR_ABORT depois
+  # de ter editado arquivos nao e desistencia — quem decide e o diff. Checar a
+  # arvore primeiro tambem tira o falso positivo do grep no JSON do claude.
+  if [ "$(tree_signature)" = "$sig_before" ]; then
+    ST_REPAIR="fail"
+    if grep -qa 'REPAIR_ABORT:' "$log_file" 2> /dev/null; then
+      local why
+      why=$(grep -aoE 'REPAIR_ABORT:[^"\\]*' "$log_file" | head -n 1 | cut -c1-200 || true)
+      state_event repair_end "round=$round" "verdict=abort"
+      warn "Conserto abortado pelo modelo — $why"
+      # REPAIR_ABORT nao e "nao consegui": e "isto nao se conserta escrevendo
+      # codigo". Voltar ao ciclo de correcao so entrega o MESMO problema a um
+      # modelo maior e mais caro, que vai chegar a mesma conclusao. O sinal mais
+      # barato do harness era o unico ignorado.
+      REPAIR_ABORTED=1
+    else
+      state_event repair_end "round=$round" "verdict=no_change"
+      warn "Conserto nao alterou nenhum arquivo; o ciclo de correcao assume."
+    fi
+    GATE_CAUSE="$saved_cause"
+    return 1
+  fi
+
+  ST_REPAIR="ok"
+  state_event repair_end "round=$round" "verdict=patched"
+  success "Conserto aplicado (round $round) — revalidando"
+  return 0
+}
+
 # run_phase <phase_file> <phase_num> <phase_title> <seq> <total>
 run_phase() {
   local phase_file="$1" phase_num="$2" phase_title="$3" seq="$4" total="$5"
@@ -3149,6 +3797,13 @@ run_phase() {
   LIMIT_WAITS=0
   GATE_CAUSE=""
   ST_LAST_ERROR=""
+  # Memoria do gate 2 e abortos sao POR FASE: a fase seguinte parte de outra
+  # arvore e nao pode herdar veredito nem desistencia da anterior.
+  GATE2_LAST_SIG=""
+  GATE2_LAST_VERDICT=""
+  GATE2_STALE_RED=0
+  REPAIR_ABORTED=0
+  PHASE_ABORT_REASON=""
 
   ST_PHASE_NUM="$phase_num"
   ST_PHASE_SEQ="$seq"
@@ -3165,9 +3820,12 @@ run_phase() {
   local cycle=1
   while [ "$cycle" -le "$MAX_CYCLES" ]; do
     export RALPH_PHASE_ATTEMPT="$cycle"
+    export RALPH_PHASE_REPAIR=0
     ST_CYCLE="$cycle"
     # Ciclo novo revalida tudo: gates do ciclo anterior nao valem mais.
     ST_GATE0="pending"; ST_GATE1="pending"; ST_GATE2="pending"; ST_GATE3="pending"
+    ST_REPAIR="idle"; ST_REPAIR_ROUND=0
+    GATE_TAG=""; VERIFY_ONLY_IDX=""
     [ "$cycle" -gt 1 ] && warn "Ciclo de correcao $cycle/$MAX_CYCLES..."
 
     local prompt_file log_file rc=0 sig_before
@@ -3217,21 +3875,105 @@ run_phase() {
       gate0_ok=0
     fi
 
+    # Cadeia 2/3 com conserto cirurgico entre o vermelho e o proximo ciclo.
+    # phase_green=1 so quando a cadeia COMPLETA (suite inteira + verificacao de
+    # todas as tasks) fecha verde — escopo verde nunca commita.
+    local phase_green=0 repair_round=0 gate2_fresh=0
     if [ "$gate0_ok" -eq 0 ]; then
       LAST_GATE="gate 0 — engine nao concluiu"
       ST_LAST_ERROR="$(gate_cause_summary)"
+      # Engine morto nao tem erro de codigo para apontar: nada a reparar.
       fail "Gate 0 vermelho"
-    elif ! gate2_tests_pass "$LOG_DIR/${phase_file%.md}.test-${cycle}.log"; then
-      LAST_GATE="gate 2 — suite de testes do projeto"
-      GATE_CAUSE="${no_change_note}${GATE_CAUSE}"
-      ST_LAST_ERROR="$(gate_cause_summary)"
-      fail "Gate 2 vermelho — testes do projeto falharam"
-    elif ! gate3_independent_verify "$phase_file" "$cycle" "$session_wrote"; then
-      LAST_GATE="gate 3 — verificacao independente"
-      GATE_CAUSE="${no_change_note}${GATE_CAUSE}"
-      ST_LAST_ERROR="$(gate_cause_summary)"
-      fail "Gate 3 vermelho — implementacao incompleta"
     else
+      while true; do
+        local failed_gate="" test_log rrc=0
+        test_log="$LOG_DIR/${phase_file%.md}.test-${cycle}${GATE_TAG}.log"
+        GATE_CAUSE=""
+
+        if [ "$gate2_fresh" -eq 1 ]; then
+          # A arvore nao mudou desde a suite verde deste mesmo ciclo: rodar de
+          # novo custaria minutos para reafirmar o que ja foi provado.
+          log "Gate 2 — suite ja verde nesta arvore, nao reexecutada"
+        elif gate2_tests_pass "$test_log"; then
+          gate2_fresh=1
+        else
+          failed_gate="gate2"
+          LAST_GATE="gate 2 — suite de testes do projeto"
+        fi
+
+        if [ -z "$failed_gate" ] && ! gate3_independent_verify "$phase_file" "$cycle" "$session_wrote"; then
+          failed_gate="gate3"
+          LAST_GATE="gate 3 — verificacao independente"
+        fi
+
+        if [ -z "$failed_gate" ]; then
+          # Verde no escopo NAO fecha a fase. Antes de commitar, a verificacao
+          # roda sobre TODAS as tasks — o conserto pode ter quebrado uma que ja
+          # estava confirmada, e o escopo nunca olharia para ela.
+          if [ -n "$VERIFY_ONLY_IDX" ]; then
+            log "Escopo verde — revalidando a fase inteira antes do commit"
+            GATE_TAG="${GATE_TAG}f"
+            VERIFY_ONLY_IDX=""
+            continue
+          fi
+          phase_green=1
+          break
+        fi
+
+        GATE_CAUSE="${no_change_note}${GATE_CAUSE}"
+        ST_LAST_ERROR="$(gate_cause_summary)"
+        if [ "$failed_gate" = "gate2" ]; then
+          fail "Gate 2 vermelho — testes do projeto falharam"
+        else
+          fail "Gate 3 vermelho — implementacao incompleta"
+        fi
+
+        # Ponto fixo provado: a sessao nao escreveu nada E o gate 2 devolveu o
+        # mesmo vermelho sobre a mesma arvore. O proximo ciclo receberia prompt
+        # identico e chegaria ao mesmo lugar — gastar o orcamento restante aqui
+        # e desperdicio garantido, nao persistencia.
+        if [ "$failed_gate" = "gate2" ] && [ "$GATE2_STALE_RED" -eq 1 ] && [ "$session_wrote" -eq 0 ]; then
+          LAST_GATE="ciclo improdutivo (gate 2)"
+          PHASE_ABORT_REASON="o engine nao alterou nenhum arquivo e o gate 2 repetiu o mesmo vermelho sobre a mesma arvore. Ciclos adicionais receberiam o mesmo prompt e o mesmo veredito."
+          break
+        fi
+
+        if [ "$repair_round" -ge "$MAX_REPAIRS" ]; then
+          [ "$MAX_REPAIRS" -gt 0 ] && log "Consertos cirurgicos esgotados ($MAX_REPAIRS) — indo para o ciclo de correcao"
+          break
+        fi
+
+        if ! repair_classify "$failed_gate" "$test_log"; then
+          log "Conserto cirurgico nao se aplica: $REPAIR_SKIP_REASON"
+          break
+        fi
+
+        repair_round=$((repair_round + 1))
+        run_repair "$phase_file" "$cycle" "$repair_round" "$failed_gate" || rrc=$?
+        if [ "$REPAIR_ABORTED" -eq 1 ]; then
+          PHASE_ABORT_REASON="o conserto cirurgico desistiu (REPAIR_ABORT): a causa do $failed_gate nao se resolve escrevendo codigo. Ciclos adicionais repetiriam o mesmo veredito."
+          break
+        fi
+        [ "$rrc" -eq 0 ] || break
+
+        # Revalidacao: logs proprios (nao sobrescreve o round anterior) e, no
+        # gate 3, escopo nas tasks que travaram — nas posicoes ORIGINAIS.
+        GATE_TAG="r${repair_round}"
+        gate2_fresh=0
+        # O conserto escreveu — o modo auto do gate 3 nao pode mais tratar a
+        # revalidacao como "sessao sem escrita". Ja `no_change_note` continua
+        # valendo: ele fala da SESSAO DE IMPLEMENTACAO, e essa segue vazia; e o
+        # sinal que o ciclo de correcao precisa receber.
+        session_wrote=1
+        if [ "$failed_gate" = "gate3" ]; then
+          VERIFY_ONLY_IDX="$GATE3_INCOMPLETE_IDX"
+        else
+          VERIFY_ONLY_IDX=""
+        fi
+      done
+    fi
+
+    if [ "$phase_green" -eq 1 ]; then
       local phase_duration=$(($(date +%s) - phase_start))
 
       # Gates verdes e nada a commitar => a fase ja estava implementada em HEAD
@@ -3270,6 +4012,11 @@ run_phase() {
     # nao passou pelo terminal: diga onde ele esta antes de gastar outro ciclo.
     if ! $VERBOSE; then
       log "Progresso do engine: $(stderr_log_for "$log_file")"
+    fi
+
+    if [ -n "$PHASE_ABORT_REASON" ]; then
+      warn "Abortando a fase sem gastar os ciclos restantes — $PHASE_ABORT_REASON"
+      break
     fi
 
     cycle=$((cycle + 1))
@@ -3320,12 +4067,16 @@ main() {
 
   # Ctrl-C ou abort do preflight nao pode deixar cursor escondido nem servidor
   # orfao segurando a porta.
-  trap cleanup_ui EXIT INT TERM
+  trap cleanup_ui EXIT
+  trap 'on_interrupt INT' INT
+  trap 'on_interrupt TERM' TERM
 
   preflight_checks
   split_phases
   apply_from_override
   serve_start
+  # Depois de split_phases: ele faz `rm -rf .phases` e levaria junto o baseline.
+  measure_baseline
 
   local total_phases
   total_phases=$(manifest_entries | wc -l)

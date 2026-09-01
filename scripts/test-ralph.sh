@@ -152,7 +152,13 @@ if [ "$verify" -eq 1 ]; then
       ;;
   esac
 
-  if [ "$scenario" = "verify-incomplete-once" ] && [ "$n" -eq 1 ]; then
+  if [ "$scenario" = "verify-incomplete-always" ] \
+    || [ "$scenario" = "repair-abort" ] || [ "$scenario" = "repair-nochange" ]; then
+    # Task 1 nunca fica pronta: da o gate 3 vermelho que aciona o conserto e
+    # exercita o esgotamento / a desistencia.
+    echo "TASK 1: INCOMPLETE — o arquivo nao foi criado"
+    for i in $(seq 2 "$tasks"); do echo "TASK $i: DONE"; done
+  elif [ "$scenario" = "verify-incomplete-once" ] && [ "$n" -eq 1 ]; then
     echo "TASK 1: INCOMPLETE — o arquivo nao foi criado"
     for i in $(seq 2 "$tasks"); do echo "TASK $i: DONE"; done
   else
@@ -161,11 +167,42 @@ if [ "$verify" -eq 1 ]; then
   exit 0
 fi
 
-# --- sessao de implementacao -------------------------------------------------
-n=$(bump impl_calls)
-
 emit_claude_ok()    { echo '{"type":"result","subtype":"success","is_error":false,"result":"implementado"}'; }
 emit_claude_limit() { echo "{\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true,\"result\":\"Claude AI usage limit reached|$1\"}"; }
+
+# --- conserto cirurgico ------------------------------------------------------
+# O prompt de conserto e o unico que carrega a clausula REPAIR_ABORT. Grava o
+# prompt para os asserts de escopo (o que ele NAO pode conter e o que importa).
+if grep -q 'REPAIR_ABORT' <<< "$prompt"; then
+  n=$(bump repair_calls)
+  [ -n "$model" ] && echo "$model" > "$state/repair_model"
+  printf '%s' "$prompt" > "$state/repair_prompt_$n.txt"
+
+  case "$scenario" in
+    repair-abort)
+      # Desistencia explicita, sem tocar em arquivo nenhum.
+      if [ "$name" = "claude" ]; then
+        echo '{"type":"result","subtype":"success","is_error":false,"result":"REPAIR_ABORT: causa nao localizavel no erro"}'
+      else
+        echo "REPAIR_ABORT: causa nao localizavel no erro"
+      fi
+      exit 0
+      ;;
+    repair-nochange)
+      : # termina bem, mas nao escreve: conserto inutil
+      ;;
+    *)
+      mkdir -p src
+      echo "repair $n" > "src/repair-$n.txt"
+      ;;
+  esac
+
+  if [ "$name" = "claude" ]; then emit_claude_ok; else echo "Done."; fi
+  exit 0
+fi
+
+# --- sessao de implementacao -------------------------------------------------
+n=$(bump impl_calls)
 
 case "$scenario" in
   limit-epoch)
@@ -195,6 +232,12 @@ write=1
 [ "$scenario" = "empty-diff" ] && write=0
 [ "$scenario" = "already-done" ] && write=0
 [ "$scenario" = "stall-after-red" ] && [ "$n" -gt 1 ] && write=0
+# stall-red-forever: escreve no 1o ciclo e depois trava, com a suite vermelha
+# para sempre. E o ponto fixo que o ralph tem que reconhecer.
+[ "$scenario" = "stall-red-forever" ] && [ "$n" -gt 1 ] && write=0
+
+# slow-engine: sessao longa o bastante para o teste mandar o sinal no meio dela.
+[ "$scenario" = "slow-engine" ] && sleep 5
 
 if [ "$write" -eq 1 ]; then
   mkdir -p src
@@ -235,6 +278,38 @@ if [ "$scenario" = "test-red-once" ] || [ "$scenario" = "stall-after-red" ]; the
     echo "1 failing test: ExpectedFooTest"
     exit 1
   fi
+fi
+
+# Vermelho permanente e SEM arquivo:linha: o conserto cirurgico nao se aplica,
+# entao o caso isola o ciclo de correcao.
+if [ "$scenario" = "stall-red-forever" ]; then
+  echo "1 failing test: ExpectedFooTest"
+  exit 1
+fi
+
+# baseline-*: vermelho que ja existe em HEAD. A 1a chamada e a medicao do
+# baseline; dai em diante a suite devolve o MESMO vermelho.
+if [ "$scenario" = "baseline-inherited" ] || [ "$scenario" = "baseline-regression" ]; then
+  echo "   FAIL  Tests\\Feature\\HerdadoTest"
+  if [ "$scenario" = "baseline-regression" ] && [ "$n" -gt 1 ]; then
+    echo "   FAIL  Tests\\Feature\\NovoTest"
+    echo "  Tests:    2 failed, 3 passed"
+    exit 1
+  fi
+  echo "  Tests:    1 failed, 3 passed"
+  exit 1
+fi
+
+# Falha com a forma que um runner real produz: cabecalho de falha, diff de
+# assertion e arquivo:linha. E disso que o conserto cirurgico se alimenta.
+if [ "$scenario" = "test-red-repairable" ] && [ "$n" -eq 1 ]; then
+  cat <<'REDOUT'
+   FAILED  Tests\Feature\SomaTest > soma dois valores
+  Failed asserting that 3 matches expected 4.
+
+  at tests/Feature/SomaTest.php:22
+REDOUT
+  exit 1
 fi
 echo "all green"
 exit 0
@@ -340,6 +415,7 @@ run_ralph() {
     RALPH_HEARTBEAT="${CASE_HEARTBEAT:-0}" \
     RALPH_VERIFY="${CASE_VERIFY:-}" \
     RALPH_VERIFY_MODEL="${CASE_VERIFY_MODEL:-}" \
+    RALPH_REPAIR_MODEL="${CASE_REPAIR_MODEL:-}" \
     RALPH_NOTIFY_CMD="${CASE_NOTIFY_CMD:-}" \
       bash "$RALPH" "$@" > "$dir/out.log" 2>&1
   ) || rc=$?
@@ -424,17 +500,48 @@ if case_enabled empty-diff; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Verificador INCOMPLETE 1x -> ciclo -> DONE -> commit
+# 4. Verificador INCOMPLETE 1x -> conserto cirurgico -> DONE -> commit
+#    (com --no-repair o mesmo cenario cai no ciclo de correcao: caso 4b)
 # ---------------------------------------------------------------------------
 if case_enabled verify-incomplete; then
-  header "4. verificador INCOMPLETE uma vez -> ciclo -> DONE"
+  header "4. verificador INCOMPLETE uma vez -> conserto cirurgico -> DONE"
   d=$(new_case verify-incomplete)
   rc=$(run_ralph "$d" verify-incomplete-once --engine claude --test-cmd "$d/test.sh" --max-cycles 2)
   assert_eq 0 "$rc" "exit 0"
   assert_eq 3 "$(commits "$d")" "1 commit por fase"
   assert_contains "$d/out.log" "Gate 3 vermelho" "gate 3 reportado vermelho"
-  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-2.txt" "TASK 1: INCOMPLETE" "prompt de correcao carrega as tasks incompletas verbatim"
+  assert_contains "$d/out.log" "Conserto cirurgico 1/2" "o conserto entrou antes do ciclo"
+  assert_not_contains "$d/out.log" "Ciclo de correcao" "nenhum ciclo de correcao gasto"
+  assert_eq 1 "$(cat "$d/state/repair_calls")" "um unico conserto"
   test -f "$d/repo/.phases/logs/phase-01.verify-1.log" && ok "log do verificador por ciclo" || bad "log do verificador por ciclo"
+
+  # O prompt do conserto e o oposto do prompt de correcao: leva o erro e SO ele.
+  assert_contains "$d/state/repair_prompt_1.txt" "TASK 1: INCOMPLETE" "conserto recebe as tasks incompletas verbatim"
+  assert_not_contains "$d/state/repair_prompt_1.txt" "Descubra a stack" "conserto nao carrega o preambulo de contexto"
+  assert_not_contains "$d/state/repair_prompt_1.txt" "Acceptance criteria" "conserto nao carrega a fase inteira"
+
+  # Revalidacao escopada entre rounds; cadeia completa antes do commit.
+  assert_contains "$d/repo/.phases/prompts/phase-01.verify-1r1.txt" "Escopo desta verificacao" "revalidacao pos-conserto e escopada"
+  test -f "$d/repo/.phases/prompts/phase-01.verify-1r1f.txt" \
+    && ok "a verificacao completa pre-commit tem prompt proprio" \
+    || bad "a verificacao completa pre-commit tem prompt proprio"
+  assert_not_contains "$d/repo/.phases/prompts/phase-01.verify-1r1f.txt" "Escopo desta verificacao" "antes do commit o gate 3 roda sobre a fase inteira"
+  assert_contains "$d/out.log" "revalidando a fase inteira antes do commit" "escopo verde nao fecha a fase sozinho"
+fi
+
+# ---------------------------------------------------------------------------
+# 4b. O MESMO cenario com --no-repair: o ciclo de correcao volta a ser o unico
+#     caminho, e o prompt dele continua auto-contido (fase inteira + causa).
+# ---------------------------------------------------------------------------
+if case_enabled verify-incomplete-no-repair; then
+  header "4b. --no-repair devolve o cenario ao ciclo de correcao"
+  d=$(new_case verify-incomplete-no-repair)
+  rc=$(run_ralph "$d" verify-incomplete-once --engine claude --test-cmd "$d/test.sh" --max-cycles 2 --no-repair)
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 3 "$(commits "$d")" "1 commit por fase"
+  assert_contains "$d/out.log" "Ciclo de correcao 2/2" "entrou em ciclo de correcao"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-2.txt" "TASK 1: INCOMPLETE" "prompt de correcao carrega as tasks incompletas verbatim"
+  test -f "$d/state/repair_calls" && bad "nenhuma sessao de conserto gasta" || ok "nenhuma sessao de conserto gasta"
 fi
 
 # ---------------------------------------------------------------------------
@@ -604,8 +711,10 @@ fi
 if case_enabled dirty-after-fail; then
   header "18. fase falhou com trabalho na arvore -> instrui o dev"
   d=$(new_case dirty-after-fail)
-  # verify-incomplete-once com 1 ciclo: escreve, testes verdes, verificador reprova
-  rc=$(run_ralph "$d" verify-incomplete-once --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  # verify-incomplete-once com 1 ciclo: escreve, testes verdes, verificador
+  # reprova. --no-repair porque aqui o alvo e a INSTRUCAO de arvore suja: com
+  # o conserto ligado esse cenario fecha verde (caso 4) e nunca chega ao aviso.
+  rc=$(run_ralph "$d" verify-incomplete-once --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --no-repair)
   assert_eq 1 "$rc" "exit 1"
   assert_eq 1 "$(commits "$d")" "nenhum commit"
   assert_contains "$d/out.log" "trabalho parcial desta fase ficou na arvore" "avisou sobre a arvore suja"
@@ -1624,6 +1733,215 @@ if case_enabled ui-painter-exit; then
     # sempre. Se sobrou algo desta suite, mata antes de seguir.
     pkill -f "$painter_probe" 2> /dev/null || true
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# 47. Gate 2 vermelho com falha localizavel -> conserto cirurgico -> verde,
+#     sem gastar ciclo de correcao. O caminho que a mudanca existe para criar.
+# ---------------------------------------------------------------------------
+if case_enabled repair-gate2; then
+  header "47. gate 2 vermelho localizavel -> conserto cirurgico, sem ciclo"
+  d=$(new_case repair-gate2)
+  rc=$(run_ralph "$d" test-red-repairable --engine claude --test-cmd "$d/test.sh" --max-cycles 2)
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 3 "$(commits "$d")" "1 commit por fase"
+  assert_contains "$d/out.log" "Gate 2 vermelho" "gate 2 reportado vermelho"
+  assert_contains "$d/out.log" "Conserto cirurgico 1/2 sobre o gate2" "conserto acionado pelo gate 2"
+  assert_not_contains "$d/out.log" "Ciclo de correcao" "nenhum ciclo de correcao gasto"
+  assert_eq 1 "$(cat "$d/state/repair_calls")" "um unico conserto"
+  # uma sessao de implementacao por fase, nenhuma a mais
+  assert_eq 2 "$(cat "$d/state/impl_calls")" "nenhuma sessao de implementacao extra"
+
+  # A assinatura da falha chega ao prompt; a fase e o preambulo nao.
+  assert_contains "$d/state/repair_prompt_1.txt" "tests/Feature/SomaTest.php:22" "conserto recebe o arquivo:linha da falha"
+  assert_contains "$d/state/repair_prompt_1.txt" "Failed asserting that 3 matches expected 4." "conserto recebe a mensagem da assertion"
+  assert_not_contains "$d/state/repair_prompt_1.txt" "Descubra a stack" "conserto nao carrega o preambulo de contexto"
+  assert_not_contains "$d/state/repair_prompt_1.txt" "Acceptance criteria" "conserto nao carrega a fase inteira"
+  # logs por round, nunca sobrescritos
+  test -f "$d/repo/.phases/logs/phase-01.repair-1-1.log" && ok "log do conserto por round" || bad "log do conserto por round"
+  test -f "$d/repo/.phases/logs/phase-01.test-1r1.log" && ok "revalidacao da suite tem log proprio" || bad "revalidacao da suite tem log proprio"
+fi
+
+# ---------------------------------------------------------------------------
+# 48. --no-repair devolve o gate 2 vermelho ao ciclo de correcao.
+# ---------------------------------------------------------------------------
+if case_enabled repair-off; then
+  header "48. --no-repair devolve o gate 2 ao ciclo de correcao"
+  d=$(new_case repair-off)
+  rc=$(run_ralph "$d" test-red-repairable --engine claude --test-cmd "$d/test.sh" --max-cycles 2 --no-repair)
+  assert_eq 0 "$rc" "exit 0"
+  assert_contains "$d/out.log" "Ciclo de correcao 2/2" "entrou em ciclo de correcao"
+  test -f "$d/state/repair_calls" && bad "nenhuma sessao de conserto gasta" || ok "nenhuma sessao de conserto gasta"
+
+  # --max-repairs 0 e o mesmo desligamento por outra porta
+  d2=$(new_case repair-zero)
+  rc=$(run_ralph "$d2" test-red-repairable --engine claude --test-cmd "$d2/test.sh" --max-cycles 2 --max-repairs 0)
+  assert_eq 0 "$rc" "exit 0 com --max-repairs 0"
+  test -f "$d2/state/repair_calls" && bad "--max-repairs 0 nao gasta conserto" || ok "--max-repairs 0 nao gasta conserto"
+fi
+
+# ---------------------------------------------------------------------------
+# 49. REPAIR_ABORT: o modelo desiste. Escalar na hora e mais barato que gastar
+#     o round seguinte depois de um "nao sei".
+# ---------------------------------------------------------------------------
+if case_enabled repair-abort; then
+  header "49. REPAIR_ABORT escala na hora, sem gastar o round seguinte"
+  d=$(new_case repair-abort)
+  rc=$(run_ralph "$d" repair-abort --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --max-repairs 2)
+  assert_eq 1 "$rc" "exit 1 (a fase nao foi resolvida)"
+  assert_contains "$d/out.log" "Conserto abortado pelo modelo" "a desistencia foi reportada"
+  assert_eq 1 "$(cat "$d/state/repair_calls")" "so um round gasto, mesmo com orcamento de 2"
+fi
+
+# ---------------------------------------------------------------------------
+# 50. Conserto que termina bem mas nao escreve nada tambem escala: sem diff
+#     nao houve conserto, e o proximo round repetiria o mesmo nada.
+# ---------------------------------------------------------------------------
+if case_enabled repair-nochange; then
+  header "50. conserto sem diff escala em vez de repetir"
+  d=$(new_case repair-nochange)
+  rc=$(run_ralph "$d" repair-nochange --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --max-repairs 2)
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "Conserto nao alterou nenhum arquivo" "sem diff, sem conserto"
+  assert_eq 1 "$(cat "$d/state/repair_calls")" "so um round gasto"
+fi
+
+# ---------------------------------------------------------------------------
+# 51. Orcamento de consertos esgotado -> o ciclo de correcao assume. O conserto
+#     e tentativa EXTRA: nao pode consumir nem substituir os ciclos.
+# ---------------------------------------------------------------------------
+if case_enabled repair-exhausted; then
+  header "51. consertos esgotados -> ciclo de correcao assume"
+  d=$(new_case repair-exhausted)
+  rc=$(run_ralph "$d" verify-incomplete-always --engine claude --test-cmd "$d/test.sh" --max-cycles 2 --max-repairs 2)
+  assert_eq 1 "$rc" "exit 1 (task 1 nunca fica pronta)"
+  assert_contains "$d/out.log" "Consertos cirurgicos esgotados" "o esgotamento foi reportado"
+  assert_contains "$d/out.log" "Ciclo de correcao 2/2" "os ciclos continuaram disponiveis"
+  # 2 rounds por ciclo x 2 ciclos: o orcamento e POR ciclo, nao por fase
+  assert_eq 4 "$(cat "$d/state/repair_calls")" "orcamento de conserto renova a cada ciclo"
+fi
+
+# ---------------------------------------------------------------------------
+# 52. Gate 3 vermelho por PROTOCOLO do verificador nao e reparavel: nao ha
+#     codigo faltando para apontar, e um patch as cegas so gastaria sessao.
+# ---------------------------------------------------------------------------
+if case_enabled repair-not-applicable; then
+  header "52. gate 3 quebrado por protocolo nao aciona conserto"
+  d=$(new_case repair-not-applicable)
+  rc=$(run_ralph "$d" verify-dup-hides-gap --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "Conserto cirurgico nao se aplica" "o ralph explicou por que nao reparou"
+  assert_contains "$d/out.log" "protocolo do verificador" "a razao e o protocolo, nao codigo faltando"
+  test -f "$d/state/repair_calls" && bad "nenhuma sessao de conserto gasta" || ok "nenhuma sessao de conserto gasta"
+fi
+
+# ---------------------------------------------------------------------------
+# 53. O conserto usa modelo proprio (barato), como o verificador.
+# ---------------------------------------------------------------------------
+if case_enabled repair-model; then
+  header "53. conserto usa RALPH_REPAIR_MODEL"
+  d=$(new_case repair-model)
+  rc=$(CASE_REPAIR_MODEL=haiku run_ralph "$d" test-red-repairable --engine claude --test-cmd "$d/test.sh" --max-cycles 2)
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq "haiku" "$(cat "$d/state/repair_model")" "modelo do conserto repassado ao engine"
+  assert_contains "$d/out.log" "sobre o gate2 (modelo: haiku)" "modelo do conserto logado"
+fi
+
+# ---------------------------------------------------------------------------
+# 54. Ponto fixo do gate 2: sessao que nao escreve nada + o MESMO vermelho sobre
+#     a MESMA arvore. O proximo ciclo receberia prompt identico e chegaria ao
+#     mesmo lugar — o orcamento restante e desperdicio garantido.
+#     Regressao do run real que queimou 5 ciclos (1h) sobre um vermelho que
+#     nenhuma linha escrita pela fase podia consertar.
+# ---------------------------------------------------------------------------
+if case_enabled stall-red-forever; then
+  header "54. ciclo improdutivo sobre gate 2 vermelho aborta a fase"
+  d=$(new_case stall-red-forever)
+  rc=$(run_ralph "$d" stall-red-forever --engine claude --test-cmd "$d/test.sh" --max-cycles 5)
+  assert_eq 1 "$rc" "exit 1 (a fase nao foi resolvida)"
+  assert_contains "$d/out.log" "Abortando a fase sem gastar os ciclos restantes" "o abort foi reportado"
+  assert_eq 2 "$(cat "$d/state/impl_calls")" "so 2 sessoes gastas, com orcamento de 5"
+  assert_eq 2 "$(cat "$d/state/test_calls")" "so 2 suites rodadas, com orcamento de 5"
+  assert_not_contains "$d/out.log" "Ciclo de correcao 3/5" "nenhum ciclo alem do que provou o ponto fixo"
+fi
+
+# ---------------------------------------------------------------------------
+# 55. REPAIR_ABORT nao e "nao consegui", e "isto nao se conserta escrevendo
+#     codigo". Entregar o mesmo problema ao ciclo de correcao so paga um modelo
+#     maior para chegar a mesma conclusao.
+# ---------------------------------------------------------------------------
+if case_enabled repair-abort-cycles; then
+  header "55. REPAIR_ABORT encerra a fase, nao so o round"
+  d=$(new_case repair-abort-cycles)
+  rc=$(run_ralph "$d" repair-abort --engine claude --test-cmd "$d/test.sh" --max-cycles 3 --max-repairs 2)
+  assert_eq 1 "$rc" "exit 1 (a fase nao foi resolvida)"
+  assert_contains "$d/out.log" "Conserto abortado pelo modelo" "a desistencia foi reportada"
+  assert_contains "$d/out.log" "Abortando a fase sem gastar os ciclos restantes" "a fase parou na desistencia"
+  assert_eq 1 "$(cat "$d/state/impl_calls")" "nenhum ciclo de correcao gasto depois do REPAIR_ABORT"
+  assert_not_contains "$d/out.log" "Ciclo de correcao 2/3" "o ciclo seguinte nao foi gasto"
+fi
+
+# ---------------------------------------------------------------------------
+# 56. --baseline: o vermelho que ja existia em HEAD e alheio a fase. Sem isso
+#     ele prende o loop ate esgotar os ciclos. Com ele, o gate 2 cobra o DELTA.
+# ---------------------------------------------------------------------------
+if case_enabled baseline-inherited; then
+  header "56. --baseline: falha pre-existente nao reprova a fase"
+  d=$(new_case baseline-inherited)
+  rc=$(run_ralph "$d" baseline-inherited --engine claude --test-cmd "$d/test.sh" --baseline --max-cycles 2)
+  assert_eq 0 "$rc" "exit 0 (a falha herdada nao e da fase)"
+  assert_contains "$d/out.log" "HerdadoTest" "o baseline nomeou o teste ja vermelho"
+  assert_contains "$d/out.log" "Gate 2 — sem regressao" "o gate 2 cobrou so o delta"
+  assert_eq 3 "$(commits "$d")" "1 commit por fase, apesar da suite vermelha"
+
+  # Sem a flag, o mesmo cenario reprova: o default nao pode perdoar nada.
+  d2=$(new_case baseline-off)
+  rc=$(run_ralph "$d2" baseline-inherited --engine claude --test-cmd "$d2/test.sh" --max-cycles 1)
+  assert_eq 1 "$rc" "exit 1 sem --baseline (default nao perdoa vermelho)"
+  assert_contains "$d2/out.log" "Gate 2 vermelho" "sem a flag o gate 2 reprova"
+fi
+
+# ---------------------------------------------------------------------------
+# 57. O baseline perdoa o herdado, nunca a regressao. Um teste NOVO vermelho
+#     tem que reprovar mesmo com a flag ligada.
+# ---------------------------------------------------------------------------
+if case_enabled baseline-regression; then
+  header "57. --baseline nao esconde regressao nova"
+  d=$(new_case baseline-regression)
+  rc=$(run_ralph "$d" baseline-regression --engine claude --test-cmd "$d/test.sh" --baseline --max-cycles 1)
+  assert_eq 1 "$rc" "exit 1 (regressao nova reprova)"
+  assert_contains "$d/out.log" "Gate 2 vermelho" "gate 2 reprovou"
+  assert_contains "$d/out.log" "Falhas NOVAS em relacao a HEAD" "a causa separa o delta do herdado"
+  assert_contains "$d/out.log" "NovoTest" "a causa nomeia a falha NOVA"
+fi
+
+# ---------------------------------------------------------------------------
+# 58. Ctrl-C encerra o run. Com `trap cleanup_ui INT` (sem exit) o handler
+#     limpava a UI e o loop SEGUIA: cada sinal matava o engine, o log saia
+#     vazio, o gate 0 dava vermelho e o ciclo era consumido em menos de um
+#     segundo. Regressao do run real em que 4 Ctrl-C torraram o orcamento.
+# ---------------------------------------------------------------------------
+if case_enabled interrupt; then
+  header "58. SIGINT encerra o run em vez de queimar os ciclos"
+  d=$(new_case interrupt)
+  # `exec`: sem ele o sinal pararia no subshell e nunca chegaria ao ralph.
+  (
+    cd "$d/repo" || exit 1
+    PATH="$d/bin:$PATH" \
+    MOCK_STATE="$d/state" \
+    MOCK_SCENARIO="slow-engine" \
+    RALPH_HEARTBEAT=0 \
+      exec bash "$RALPH" --engine claude --test-cmd "$d/test.sh" --max-cycles 5
+  ) > "$d/out.log" 2>&1 &
+  rpid=$!
+  sleep 2
+  kill -INT "$rpid" 2> /dev/null || true
+  rc=0
+  wait "$rpid" || rc=$?
+  assert_eq 130 "$rc" "exit 130 (encerrado por sinal)"
+  assert_contains "$d/out.log" "Interrompido pelo operador" "o encerramento foi reportado"
+  assert_eq 1 "$(cat "$d/state/impl_calls")" "nenhum ciclo gasto depois do sinal"
+  assert_eq 1 "$(commits "$d")" "nada commitado a meio caminho (so o commit da fixture)"
 fi
 
 # ---------------------------------------------------------------------------

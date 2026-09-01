@@ -202,6 +202,20 @@ Qualquer gate vermelho → **ciclo de correção**: sessão nova recebe a fase i
 
 Gates verdes com árvore limpa → fase já estava implementada em HEAD: marcada como feita, sem commit.
 
+### Conserto cirúrgico (antes do ciclo)
+
+Um ciclo de correção é caro: sessão nova com preâmbulo de contexto, a fase inteira no prompt e acesso total ao projeto. Pagar isso porque **uma** assertion ficou vermelha é desperdício. Antes de gastar um ciclo, o ralph tenta até **2 consertos cirúrgicos** (`RALPH_MAX_REPAIRS`):
+
+- **Prompt mínimo**: só a assinatura da falha — teste que quebrou, `arquivo:linha`, mensagem da assertion — ou só as linhas `INCOMPLETE` do verificador. Sem preâmbulo, sem a fase.
+- **Modelo próprio e barato** (`RALPH_REPAIR_MODEL`, default `sonnet` no claude).
+- **Não consome ciclo**: os `--max-cycles` continuam inteiros de reserva.
+
+**Fail-closed.** Só repara o que dá para localizar. Vão direto ao ciclo completo: gate 0 vermelho (engine morreu), saída de teste sem falha localizável, falha espalhada por mais de `RALPH_REPAIR_MAX_FILES` arquivos, mais de `RALPH_REPAIR_MAX_TASKS` tasks incompletas, e gate 3 reprovado por **protocolo** do verificador (que não é código faltando). O modelo também pode desistir sozinho respondendo `REPAIR_ABORT: <motivo>` — desistir barato vale mais que um patch às cegas, e o ralph escala na hora em vez de gastar o round seguinte.
+
+**Revalidação.** Entre rounds, o gate 3 roda **escopado**: só as tasks que estavam `INCOMPLETE`, nas posições originais (nada é renumerado). Um `INCOMPLETE` fora do escopo reprova — é o conserto tendo quebrado algo que já estava de pé. Verde no escopo **não fecha a fase**: a cadeia completa (suite inteira + verificação de todas as tasks) roda antes de qualquer commit. O conserto nunca commita.
+
+`--no-repair` (ou `--max-repairs 0`) desliga e devolve o comportamento antigo: gate vermelho → ciclo.
+
 ### Detecção do comando de teste (gate 2)
 
 Primeira regra que resolver: `--test-cmd` → `RALPH_TEST_CMD` → detecção por manifest (Laravel Sail → `composer test` → `php artisan test` → `npm test` → `pytest` → `go test ./...` → `cargo test`) → nada resolvido = gate 2 pulado com aviso alto (gate 3 segura sozinho).
@@ -216,7 +230,10 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | `--from N` | Começa na fase N (limpa o progresso das fases ≥ N) |
 | `--keep-going` | Continua após fase falhar (cria commit `wip(phase-N)`; default: para) |
 | `--max-cycles N` | Ciclos de correção por fase (default: 3) |
+| `--max-repairs N` | Consertos cirúrgicos por ciclo (default: 2; `0` desliga) |
+| `--no-repair` | Desliga o conserto cirúrgico |
 | `--test-cmd "<cmd>"` | Comando de teste do projeto (gate 2) |
+| `--baseline` | Mede em HEAD o que já está vermelho e faz o gate 2 cobrar só o **delta** (default: desligado) |
 | `--no-verify` | Desliga o gate 3 |
 | `--ui` / `--no-ui` | Força o painel ANSI ligado / desligado (ver abaixo) |
 | `--serve[=PORTA]` | Dashboard web local sobre o mesmo estado |
@@ -224,9 +241,15 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | Variável | Efeito |
 |---|---|
 | `RALPH_TEST_CMD` | Comando de teste (gate 2) |
+| `RALPH_BASELINE` | `on` liga o baseline do gate 2 (mesmo que `--baseline`; default: `off`) |
 | `RALPH_VERIFY` | Gate 3: `always` (default) \| `auto` (economiza: só quando o gate 2 não basta) \| `off` |
 | `RALPH_VERIFY_MODEL` | Modelo do verificador (default no claude: `haiku`) |
 | `RALPH_MAX_CYCLES` | Ciclos de correção por fase (default: 3) |
+| `RALPH_REPAIR` | Conserto cirúrgico: `on` (default) \| `off` |
+| `RALPH_MAX_REPAIRS` | Consertos por ciclo (default: 2; `0` desliga) |
+| `RALPH_REPAIR_MODEL` | Modelo do conserto (default no claude: `sonnet`) |
+| `RALPH_REPAIR_MAX_FILES` | Acima de N arquivos na assinatura da falha, vai direto ao ciclo (default: 5) |
+| `RALPH_REPAIR_MAX_TASKS` | Acima de N tasks incompletas, idem (default: 3) |
 | `RALPH_MAX_LIMIT_WAITS` | Esperas consecutivas por limite de uso, por fase (default: 20) |
 | `RALPH_LIMIT_WAIT_DEFAULT` | Fallback de espera em segundos (default: 1800) |
 | `RALPH_LIMIT_BUFFER` | Segundos extras após o reset (default: 60) |
@@ -237,7 +260,7 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | `RALPH_UI_KEYS` | Navegação por teclado na tabela do painel: `1` (default) \| `0` desliga |
 | `RALPH_SERVE_PORT` | Primeira porta tentada pelo `--serve` (default: 7433) |
 
-Durante cada sessão, o ralph exporta `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT` e `RALPH_PHASE_MAX_ATTEMPTS`.
+Durante cada sessão, o ralph exporta `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, `RALPH_PHASE_MAX_ATTEMPTS` e `RALPH_PHASE_REPAIR` (round de conserto; `0` = nenhum).
 
 ### Painel visual e dashboard web
 
