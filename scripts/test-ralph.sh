@@ -202,6 +202,9 @@ if grep -q 'REPAIR_ABORT' <<< "$prompt"; then
 fi
 
 # --- sessao de implementacao -------------------------------------------------
+# O modelo da impl nao pode vazar do verificador nem do conserto: cada modo tem
+# o seu, e o teste de modelo confere os tres.
+[ -n "$model" ] && echo "$model" > "$state/impl_model"
 n=$(bump impl_calls)
 
 case "$scenario" in
@@ -297,6 +300,31 @@ if [ "$scenario" = "baseline-inherited" ] || [ "$scenario" = "baseline-regressio
     exit 1
   fi
   echo "  Tests:    1 failed, 3 passed"
+  exit 1
+fi
+
+# infra-*: a suite NAO chegou a julgar o codigo — servico externo fora do ar.
+# Forma real do runner (SQLSTATE de conexao nomeando o container que caiu).
+#   infra-recovered: so a 1a chamada cai; a reexecucao do gate 2 acha tudo verde
+#   infra-forever:   o servico nunca volta
+if [ "$scenario" = "infra-recovered" ] || [ "$scenario" = "infra-forever" ]; then
+  if [ "$scenario" = "infra-forever" ] || [ "$n" -le 1 ]; then
+    echo "   FAILED  Tests\\Feature\\SubjectTest > projeta o assunto"
+    echo "  SQLSTATE[HY000] [2002] php_network_getaddresses: getaddrinfo for ralph-fixture-db-1 failed: Name or service not known (Connection: mysql_vizinho, Host: ralph-fixture-db-1, Port: 3306)"
+    echo "  Tests:    5 failed, 100 passed"
+    exit 1
+  fi
+fi
+
+# Vermelho de verdade, enterrado sob centenas de linhas verdes. E a forma real
+# de uma suite grande: a falha sai no FIM, e o `head` do tail so mostra verde.
+if [ "$scenario" = "red-noisy" ]; then
+  i=1
+  while [ "$i" -le 240 ]; do echo "  ✓ teste verde $i"; i=$((i + 1)); done
+  echo "   FAILED  Tests\\Feature\\AlvoTest > soma dois valores"
+  echo "  Failed asserting that 3 matches expected 4."
+  echo "  at tests/Feature/AlvoTest.php:22"
+  echo "  Tests:    1 failed, 240 passed"
   exit 1
 fi
 
@@ -750,11 +778,11 @@ if case_enabled verify-auto; then
 fi
 
 # ---------------------------------------------------------------------------
-# 21. Verificador roda com modelo barato: haiku por default no claude,
+# 21. Verificador roda com modelo proprio: sonnet por default no claude,
 #     RALPH_VERIFY_MODEL sobrepoe.
 # ---------------------------------------------------------------------------
 if case_enabled verify-model; then
-  header "21. verificador usa modelo barato (haiku default, env sobrepoe)"
+  header "21. verificador usa modelo proprio (sonnet default, env sobrepoe)"
   d=$(new_case verify-model)
   # fase ja implementada em HEAD: sessao nao escreve -> gate 3 roda em auto
   mkdir -p "$d/repo/src"
@@ -762,16 +790,16 @@ if case_enabled verify-model; then
   git -C "$d/repo" add -A && git -C "$d/repo" commit -q -m "feat: trabalho previo"
   rc=$(run_ralph "$d" already-done --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
   assert_eq 0 "$rc" "exit 0"
-  assert_eq "haiku" "$(cat "$d/state/verify_model" 2>/dev/null)" "verify chamado com --model haiku"
-  assert_contains "$d/out.log" "modelo: haiku" "log do gate 3 informa o modelo"
+  assert_eq "sonnet" "$(cat "$d/state/verify_model" 2>/dev/null)" "verify chamado com --model sonnet"
+  assert_contains "$d/out.log" "modelo: sonnet" "log do gate 3 informa o modelo"
 
   d2=$(new_case verify-model-override)
   mkdir -p "$d2/repo/src"
   echo "impl previo" > "$d2/repo/src/impl-1.txt"
   git -C "$d2/repo" add -A && git -C "$d2/repo" commit -q -m "feat: trabalho previo"
-  rc=$(CASE_VERIFY_MODEL=sonnet run_ralph "$d2" already-done --engine claude --test-cmd "$d2/test.sh" --max-cycles 1)
+  rc=$(CASE_VERIFY_MODEL=haiku run_ralph "$d2" already-done --engine claude --test-cmd "$d2/test.sh" --max-cycles 1)
   assert_eq 0 "$rc" "exit 0 (override)"
-  assert_eq "sonnet" "$(cat "$d2/state/verify_model" 2>/dev/null)" "RALPH_VERIFY_MODEL sobrepoe o default"
+  assert_eq "haiku" "$(cat "$d2/state/verify_model" 2>/dev/null)" "RALPH_VERIFY_MODEL sobrepoe o default"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1942,6 +1970,87 @@ if case_enabled interrupt; then
   assert_contains "$d/out.log" "Interrompido pelo operador" "o encerramento foi reportado"
   assert_eq 1 "$(cat "$d/state/impl_calls")" "nenhum ciclo gasto depois do sinal"
   assert_eq 1 "$(commits "$d")" "nada commitado a meio caminho (so o commit da fixture)"
+fi
+
+# ---------------------------------------------------------------------------
+# 59. Servico externo fora do ar que VOLTA: o gate 2 reconhece o ambiente,
+#     reexecuta a suite uma vez e o run segue normal. Sem isso, a fase morria
+#     por um vermelho que nao era dela.
+# ---------------------------------------------------------------------------
+if case_enabled infra-recovered; then
+  header "59. ambiente cai e volta: gate 2 reexecuta a suite uma vez"
+  d=$(new_case infra-recovered)
+  rc=$(run_ralph "$d" infra-recovered --engine claude --test-cmd "$d/test.sh" --max-cycles 2)
+  assert_eq 0 "$rc" "exit 0 (o ambiente voltou; a fase nao tem culpa)"
+  assert_contains "$d/out.log" "caiu por AMBIENTE" "o gate 2 classificou como ambiente"
+  assert_contains "$d/out.log" "ralph-fixture-db-1" "a causa nomeia o servico fora do ar"
+  assert_contains "$d/out.log" "reexecutando a suite uma vez" "houve exatamente uma reexecucao"
+  assert_contains "$d/out.log" "ambiente recuperado" "a reexecucao fechou verde"
+  assert_eq 3 "$(commits "$d")" "1 commit por fase (1 fixture + 2)"
+  assert_eq 0 "$(cat "$d/state/repair_calls" 2> /dev/null || echo 0)" "nenhum conserto cirurgico gasto com ambiente"
+  assert_eq 2 "$(cat "$d/state/impl_calls")" "nenhum ciclo de correcao gasto (1 sessao por fase)"
+fi
+
+# ---------------------------------------------------------------------------
+# 60. Servico que NAO volta: veredito de ambiente, nao de fase. O run inteiro
+#     encerra com exit 3, o trabalho ja escrito vira commit wip e nenhum ciclo
+#     ou conserto e gasto. Regressao do run real em que o MySQL de um projeto
+#     vizinho caiu no meio da fase e o ralph descartou 6 arquivos corretos.
+# ---------------------------------------------------------------------------
+if case_enabled infra-abort; then
+  header "60. ambiente fora do ar encerra o run e preserva o trabalho"
+  d=$(new_case infra-abort)
+  rc=$(run_ralph "$d" infra-forever --engine claude --test-cmd "$d/test.sh" --max-cycles 5 --keep-going)
+  assert_eq 3 "$rc" "exit 3 (ambiente, nao falha de codigo)"
+  assert_contains "$d/out.log" "INTERROMPIDA pelo ambiente" "a fase nao foi declarada reprovada"
+  assert_contains "$d/out.log" "ralph-fixture-db-1" "o servico fora do ar foi nomeado"
+  assert_not_contains "$d/out.log" "Gate 2 vermelho" "ambiente nao vira vermelho da fase"
+  assert_eq "wip(phase-1): interrompido por falha de ambiente — see .phases/logs/" \
+    "$(git -C "$d/repo" log -1 --pretty=%s)" "trabalho da fase salvo em commit wip"
+  assert_eq 0 "$(cat "$d/state/repair_calls" 2> /dev/null || echo 0)" "nenhum conserto cirurgico"
+  assert_eq 1 "$(cat "$d/state/impl_calls")" "nenhum ciclo extra e nenhuma fase seguinte (--keep-going nao continua)"
+fi
+
+# ---------------------------------------------------------------------------
+# 61. --no-env-guard devolve o comportamento antigo: quem ASSERTA mensagem de
+#     conexao na propria suite nao pode ficar refem do guard.
+# ---------------------------------------------------------------------------
+if case_enabled infra-guard-off; then
+  header "61. --no-env-guard trata ambiente como gate 2 vermelho comum"
+  d=$(new_case infra-guard-off)
+  rc=$(run_ralph "$d" infra-forever --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --no-env-guard --no-repair)
+  assert_eq 1 "$rc" "exit 1 (falha de fase, como antes)"
+  assert_contains "$d/out.log" "Gate 2 vermelho" "sem o guard o gate 2 reprova"
+  assert_not_contains "$d/out.log" "INTERROMPIDA pelo ambiente" "nenhum veredito de ambiente"
+fi
+
+# ---------------------------------------------------------------------------
+# 62. A causa impressa no fim tem que conter a FALHA. GATE_CAUSE carrega o tail
+#     de 200 linhas da suite; imprimir o `head` disso mostrava so teste verde e
+#     escondia o erro — o operador via "PASS PASS PASS" numa fase reprovada.
+# ---------------------------------------------------------------------------
+if case_enabled cause-shows-failure; then
+  header "62. a causa impressa mostra a falha, nao o verde de cima"
+  d=$(new_case cause-shows-failure)
+  rc=$(run_ralph "$d" red-noisy --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --no-repair)
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "AlvoTest" "a causa nomeia o teste que falhou"
+  assert_contains "$d/out.log" "Failed asserting that 3 matches expected 4." "a causa traz a assercao"
+fi
+
+# ---------------------------------------------------------------------------
+# 63. --model fixa o modelo da implementacao sem contaminar o verificador nem
+#     o conserto, que tem modelo proprio e barato.
+# ---------------------------------------------------------------------------
+if case_enabled impl-model; then
+  header "63. --model vale so para implementacao/correcao"
+  d=$(new_case impl-model)
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --model modelo-grande)
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq "modelo-grande" "$(cat "$d/state/impl_model" 2> /dev/null || echo vazio)" "a impl recebeu --model"
+  assert_eq "sonnet" "$(cat "$d/state/verify_model" 2> /dev/null || echo vazio)" "o verificador manteve o modelo proprio"
+  assert_contains "$d/out.log" "conserto: opus" "o conserto usa o modelo forte"
+  assert_contains "$d/out.log" "implementacao: modelo-grande" "o run reporta os modelos usados"
 fi
 
 # ---------------------------------------------------------------------------

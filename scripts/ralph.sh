@@ -26,6 +26,10 @@
 #
 # Opcoes:
 #   --engine codex|claude    engine de implementacao (default: codex)
+#   --model NOME             modelo das sessoes de implementacao e correcao
+#                            (default: o da CLI do engine). O verificador e o
+#                            conserto tem modelo proprio — ver RALPH_VERIFY_MODEL
+#                            e RALPH_REPAIR_MODEL
 #   --from N                 comeca na fase N (limpa do progresso as fases >= N)
 #   --keep-going             continua apos uma fase falhar (default: para)
 #   --max-cycles N           ciclos de correcao por fase (default: 3)
@@ -37,6 +41,9 @@
 #                            em fase cujo teste-alvo ja esta commitado vermelho,
 #                            porque o perdao seria permanente (RALPH_BASELINE=on)
 #   --no-verify              desliga o gate 3 (equivale a RALPH_VERIFY=off)
+#   --no-env-guard           desliga a deteccao de ambiente fora do ar no gate 2
+#                            (RALPH_ENV_GUARD=off): toda falha volta a ser
+#                            vermelho da fase
 #   --test-cmd "<cmd>"       comando de teste do projeto (gate 2)
 #   --verbose                streama o progresso do engine no terminal
 #   --quiet                  so o placar do ralph no terminal (DEFAULT)
@@ -71,8 +78,8 @@
 #      economiza: so roda quando o veredito do gate 2 nao basta — sessao que
 #      nao escreveu nada (claim "ja implementada"), ciclo de correcao, ou
 #      gate 2 desabilitado. --no-verify / RALPH_VERIFY=off desliga. No engine
-#      claude o verificador usa um modelo barato (RALPH_VERIFY_MODEL, default:
-#      haiku) — e leitura + checklist.
+#      claude o verificador usa RALPH_VERIFY_MODEL (default: sonnet) — e
+#      leitura + checklist, nao escreve codigo.
 #
 # Conserto cirurgico (repair) — acionamento independente entre o gate vermelho
 # e o ciclo de correcao:
@@ -82,7 +89,9 @@
 #   tenta ate RALPH_MAX_REPAIRS (default 2) consertos cirurgicos:
 #     - prompt minimo: SO a assinatura da falha (teste, arquivo:linha, mensagem)
 #       ou SO as linhas INCOMPLETE do verificador. Sem preambulo, sem a fase.
-#     - modelo proprio e barato (RALPH_REPAIR_MODEL, default: sonnet no claude)
+#     - modelo proprio e FORTE (RALPH_REPAIR_MODEL, default: opus no claude):
+#       e a unica etapa que escreve codigo com contexto minimo e a unica que
+#       pode abortar a fase sozinha com REPAIR_ABORT
 #     - o conserto NAO consome ciclo: os RALPH_MAX_CYCLES continuam de reserva
 #   Fail-closed. So repara o que da para localizar:
 #     - gate 2 vermelho com assinatura extraivel apontando <= RALPH_REPAIR_MAX_FILES
@@ -96,6 +105,25 @@
 #   que estavam INCOMPLETE; as posicoes continuam as originais, nada e
 #   renumerado). Verde no escopo NAO fecha a fase: a cadeia completa — gate 2
 #   inteiro + gate 3 de todas as tasks — roda antes de qualquer commit.
+#
+# Ambiente fora do ar (gate 2) — veredito PROPRIO, nem verde nem vermelho:
+#   Servico externo caido (banco, cache, fila, container derrubado por falta de
+#   memoria) nao e defeito de codigo: a suite nao chegou a julgar a fase.
+#   Tratar isso como gate 2 vermelho custa ciclo, custa conserto cirurgico e no
+#   fim descarta o trabalho da fase — nenhum patch faz um container morto subir.
+#   Ao reconhecer a assinatura (recusa de conexao, DNS que nao resolve, SQLSTATE
+#   de conexao), o ralph:
+#     1. tenta levantar o que esta caido — `docker start` nos containers
+#        NOMEADOS no proprio erro (podem ser de outro compose project) e, se o
+#        projeto usa Sail e os containers dele estao parados, `sail up -d`
+#     2. reexecuta a suite UMA vez (por fase). Voltou verde: o run segue normal
+#     3. ainda fora do ar: encerra o RUN inteiro (mesmo com --keep-going, porque
+#        a proxima fase encontraria o mesmo servico morto), salva o trabalho da
+#        fase num commit `wip(phase-N): interrompido por falha de ambiente` e sai
+#        com exit code 3
+#   Re-rodar com o ambiente de pe revalida a fase e segue de onde parou.
+#   --no-env-guard / RALPH_ENV_GUARD=off desliga (util se a suite ASSERTA
+#   mensagens de erro de conexao e o guard as confunde com ambiente caido).
 #
 # Streams do engine (stdout != stderr — nunca unir):
 #   .phases/logs/<fase>.<etapa>.log         stdout = RESPOSTA FINAL do engine.
@@ -199,14 +227,19 @@
 # Variaveis de ambiente:
 #   RALPH_TEST_CMD           comando de teste (gate 2); --test-cmd tem prioridade
 #   RALPH_VERIFY             gate 3: always (default) | auto | off
-#   RALPH_VERIFY_MODEL       modelo do verificador (default: haiku no claude)
+#   RALPH_VERIFY_MODEL       modelo do verificador (default: sonnet no claude)
+#   RALPH_MODEL              modelo das sessoes de implementacao/correcao
+#                            (default: vazio = o da CLI do engine)
+#   RALPH_ENV_GUARD          on (default) | off — deteccao de ambiente caido
+#   RALPH_ENV_RECOVER_TIMEOUT segundos de espera pelos servicos ao tentar
+#                            levantar o ambiente (default: 90)
 #   RALPH_VERBOSE            1 = streama o progresso do engine (igual --verbose)
 #   RALPH_HEARTBEAT          segundos entre heartbeats no modo quiet (default:
 #                            60; 0 desliga)
 #   RALPH_MAX_CYCLES         ciclos de correcao por fase (default: 3)
 #   RALPH_REPAIR             conserto cirurgico: on (default) | off
 #   RALPH_MAX_REPAIRS        consertos por ciclo (default: 2; 0 desliga)
-#   RALPH_REPAIR_MODEL       modelo do conserto (default: sonnet no claude)
+#   RALPH_REPAIR_MODEL       modelo do conserto (default: opus no claude)
 #   RALPH_REPAIR_MAX_FILES   acima de N arquivos distintos na assinatura da
 #                            falha, a falha e larga demais para conserto
 #                            cirurgico e vai direto ao ciclo (default: 5)
@@ -241,7 +274,9 @@
 #   RALPH_PHASE_REPAIR       round de conserto corrente (0 = nenhum)
 #   RALPH_EVENT              evento corrente (so no processo de notificacao)
 #
-# Exit code: 0 = todas as fases verdes; 1 = alguma falhou ou abortou.
+# Exit code: 0 = todas as fases verdes; 1 = alguma falhou ou abortou;
+#            3 = run encerrado por ambiente fora do ar (nenhum veredito sobre o
+#            codigo — suba os servicos e re-rode).
 #
 # Pre-requisitos:
 #   - Codex: npm install -g @openai/codex + OPENAI_API_KEY
@@ -251,6 +286,7 @@
 set -euo pipefail
 
 ENGINE="codex"
+IMPL_MODEL="${RALPH_MODEL:-}"
 INPUT_FILE=""
 FROM_PHASE=0
 KEEP_GOING=false
@@ -282,6 +318,16 @@ GATE2_LAST_SIG=""
 GATE2_LAST_VERDICT=""
 # 1 quando o gate 2 acabou de repetir o MESMO vermelho sobre a MESMA arvore.
 GATE2_STALE_RED=0
+# Ambiente fora do ar: veredito do gate 2 que NAO e vermelho da fase.
+#   GATE2_INFRA   1 = a ultima execucao da suite caiu por servico fora do ar
+#   INFRA_RETRIED 1 = esta fase ja gastou a sua reexecucao pos-recuperacao
+#   ENV_ABORT     1 = o run inteiro para; exit code 3
+ENV_GUARD=true
+[ "${RALPH_ENV_GUARD:-on}" = "off" ] && ENV_GUARD=false
+ENV_RECOVER_TIMEOUT="${RALPH_ENV_RECOVER_TIMEOUT:-90}"
+GATE2_INFRA=0
+INFRA_RETRIED=0
+ENV_ABORT=0
 # Desistencia explicita do conserto cirurgico (REPAIR_ABORT) e abortos de fase.
 REPAIR_ABORTED=0
 PHASE_ABORT_REASON=""
@@ -301,6 +347,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --engine)      ENGINE="$2"; shift 2 ;;
     --engine=*)    ENGINE="${1#*=}"; shift ;;
+    --model)       IMPL_MODEL="$2"; shift 2 ;;
+    --model=*)     IMPL_MODEL="${1#*=}"; shift ;;
     --from)        FROM_PHASE="$2"; shift 2 ;;
     --from=*)      FROM_PHASE="${1#*=}"; shift ;;
     --max-cycles)  MAX_CYCLES="$2"; shift 2 ;;
@@ -314,6 +362,7 @@ while [[ $# -gt 0 ]]; do
     --test-cmd=*)  TEST_CMD_FLAG="${1#*=}"; shift ;;
     --keep-going)  KEEP_GOING=true; shift ;;
     --no-verify)   VERIFY_MODE="off"; shift ;;
+    --no-env-guard) ENV_GUARD=false; shift ;;
     --verbose)     VERBOSE=true; shift ;;
     --quiet)       VERBOSE=false; shift ;;
     --ui)          UI_MODE="panel"; shift ;;
@@ -2376,22 +2425,28 @@ preflight_checks() {
       ;;
   esac
 
-  # Verificacao e leitura + checklist: nao precisa do modelo de implementacao.
+  # Verificacao e leitura + checklist contra o codigo real: le, compara, emite
+  # uma linha por task. Nao escreve nada — modelo intermediario da conta.
   # No codex nao ha default seguro de modelo barato — so aplica se pedido.
   if [ -n "${RALPH_VERIFY_MODEL:-}" ]; then
     VERIFY_MODEL="$RALPH_VERIFY_MODEL"
   elif [[ "$ENGINE" == "claude" ]]; then
-    VERIFY_MODEL="haiku"
+    VERIFY_MODEL="sonnet"
   fi
 
-  # Conserto cirurgico e um patch localizado com o erro na mao: nao precisa do
-  # modelo de implementacao, mas precisa de mais do que o verificador (escreve
-  # codigo). Mesma regra do codex: sem default, so se pedido.
+  # Conserto cirurgico e a UNICA etapa que escreve codigo com contexto minimo:
+  # so a assinatura da falha, sem a fase e sem preambulo. E tambem a etapa que
+  # decide, sozinha, se a causa se resolve escrevendo codigo (REPAIR_ABORT) — um
+  # veredito que aborta a fase inteira. Patch cego e desistencia errada custam
+  # muito mais do que a diferenca de modelo: aqui vale o mais forte.
+  # Mesma regra do codex: sem default, so se pedido.
   if [ -n "${RALPH_REPAIR_MODEL:-}" ]; then
     REPAIR_MODEL="$RALPH_REPAIR_MODEL"
   elif [[ "$ENGINE" == "claude" ]]; then
-    REPAIR_MODEL="sonnet"
+    REPAIR_MODEL="opus"
   fi
+
+  log "Modelos — implementacao: ${IMPL_MODEL:-default da CLI}; verificacao: ${VERIFY_MODEL:-default da CLI}; conserto: ${REPAIR_MODEL:-default da CLI}"
 
   if ! command -v "$ENGINE" &> /dev/null; then
     if [[ "$ENGINE" == "codex" ]]; then
@@ -2617,9 +2672,13 @@ Para cada item:
 2. Crie EXATAMENTE os testes listados no campo `Testes:` da task, seguindo o
    framework de testes do projeto. Task com `Testes: none` NAO leva teste — a
    verificacao dela e por inspecao do codigo contra os acceptance criteria
-3. Rode os testes com o comando de teste do projeto
+3. Rode SO os testes daquela task (o runner do projeto aceita caminho ou
+   filtro). A suite completa e cara: rodar ela a cada item queima minutos e
+   memoria da maquina — e o ralph a roda por fora de qualquer jeito
 4. Se um teste falhar, corrija o codigo e rode novamente
-5. So passe pro proximo item quando os testes passarem
+5. So passe pro proximo item quando os testes DA TASK passarem
+6. Ao terminar todos os itens, rode a suite completa UMA vez para confirmar que
+   nada mais quebrou
 
 ## Regras obrigatorias
 - Use SEMPRE os comandos, o runner de testes e as ferramentas ja adotados pelo
@@ -2632,6 +2691,9 @@ Para cada item:
 - Testes e fixtures/factories devem criar todas as dependencias necessarias
 - Nomes de classes, arquivos e metodos devem seguir EXATAMENTE o que esta descrito
 - Nao pule nenhum item marcado com [ ]
+- Nao pare, reinicie nem derrube containers/servicos do ambiente para "liberar
+  recurso": o gate 2 roda a suite depois de voce e um servico fora do ar
+  interrompe o run inteiro
 - Ao final, valide que toda a suite de testes da fase passa
 
 ## Fase a implementar
@@ -3113,10 +3175,19 @@ run_engine() {
   # Expandido como ${model_args[@]+"..."}: sob `set -u`, "${arr[@]}" de array
   # VAZIO e "unbound variable" em bash < 4.4 (o bash 3.2 do macOS incluso).
   local model_args=()
-  if [[ "$mode" == "verify" ]] && [ -n "$VERIFY_MODEL" ]; then
-    model_args=(--model "$VERIFY_MODEL")
-  elif [[ "$mode" == "repair" ]] && [ -n "$REPAIR_MODEL" ]; then
-    model_args=(--model "$REPAIR_MODEL")
+  if [[ "$mode" == "verify" ]]; then
+    if [ -n "$VERIFY_MODEL" ]; then
+      model_args=(--model "$VERIFY_MODEL")
+    fi
+  elif [[ "$mode" == "repair" ]]; then
+    if [ -n "$REPAIR_MODEL" ]; then
+      model_args=(--model "$REPAIR_MODEL")
+    fi
+  elif [ -n "$IMPL_MODEL" ]; then
+    # Implementacao e correcao: sem --model o engine usa o default da CLI, e o
+    # operador nao tem como saber qual modelo escreveu a fase. Fixar aqui evita
+    # trocar o default global so para rodar o ralph.
+    model_args=(--model "$IMPL_MODEL")
   fi
 
   local hb_label
@@ -3307,6 +3378,107 @@ measure_baseline() {
   warn "O gate 2 vai cobrar apenas o DELTA. Conserte-os fora do ralph."
 }
 
+# ---------------------------------------------------------------------------
+# Ambiente fora do ar — veredito proprio do gate 2
+#
+# Um servico externo caido (banco, cache, fila, container derrubado por falta de
+# memoria no host) nao e defeito de codigo: a suite nao chegou a julgar a fase.
+# O run real que motivou isto: o MySQL de um projeto VIZINHO morreu no meio da
+# fase, cinco testes cairam com `getaddrinfo ... Name or service not known`, e o
+# ralph condenou a fase, gastou conserto cirurgico e descartou seis arquivos
+# corretos. Nenhum patch faz um container morto voltar.
+#
+# Assinaturas agnosticas de stack: recusa de conexao, DNS que nao resolve,
+# SQLSTATE de conexao. Elas nomeiam o SERVICO, nunca a assercao.
+# ---------------------------------------------------------------------------
+
+INFRA_SIGNATURE=""
+
+# gate2_infra_failure <log>
+#   rc 0 = a suite caiu por ambiente (INFRA_SIGNATURE publicada)
+#   rc 1 = falha normal (assertion, erro de codigo) ou guard desligado
+gate2_infra_failure() {
+  local log="$1"
+  INFRA_SIGNATURE=""
+  $ENV_GUARD || return 1
+  [ -s "$log" ] || return 1
+
+  local hit
+  hit=$(grep -aE '(SQLSTATE\[HY000\] \[200[0-9]\]|SQLSTATE\[08[0-9A-Z]{3}\]|[Cc]onnection refused|ECONNREFUSED|ENOTFOUND|could not connect to|getaddrinfo|Name or service not known|Temporary failure in name resolution|No route to host|server closed the connection unexpectedly|Cannot connect to the Docker daemon|Sail is not running|connect: connection refused|Connection timed out)' \
+    "$log" 2> /dev/null \
+    | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | awk 'NF && !seen[$0]++' | head -n 5 || true)
+
+  [ -n "${hit//[[:space:]]/}" ] || return 1
+  INFRA_SIGNATURE="$hit"
+  return 0
+}
+
+# Hosts citados na assinatura. Um container derrubado aparece pelo NOME no erro
+# de DNS/conexao — e o nome do container e a chave para levanta-lo de volta,
+# mesmo quando ele pertence a outro compose project.
+infra_hosts() {
+  printf '%s\n' "$INFRA_SIGNATURE" \
+    | grep -aoE '(getaddrinfo for |Host: |host=|connect to |connecting to |[Cc]onnection to )[A-Za-z0-9_.-]+' \
+    | sed -E 's/^(getaddrinfo for |Host: |host=|connect to |connecting to |[Cc]onnection to )//' \
+    | awk 'NF && !seen[$0]++' \
+    | grep -avE '^(localhost|127\.0\.0\.1|::1)$' || true
+}
+
+# Tenta devolver o ambiente ao ar. Duas receitas, ambas conservadoras: sobe o
+# que ja existe e esta parado, nunca cria nem reconfigura nada.
+#   rc 0 = algo foi levantado   rc 1 = nada a fazer / nao subiu
+recover_env() {
+  local acted=0 started="" h
+
+  if command -v docker > /dev/null 2>&1; then
+    local all up
+    all=$(docker ps -a --format '{{.Names}}' 2> /dev/null || true)
+    up=$(docker ps --format '{{.Names}}' 2> /dev/null || true)
+    while IFS= read -r h; do
+      [ -n "$h" ] || continue
+      grep -qxF "$h" <<< "$all" || continue
+      grep -qxF "$h" <<< "$up" && continue
+      log "Ambiente — container '$h' esta parado; subindo com docker start"
+      docker start "$h" > "$LOG_DIR/env-recover.log" 2>&1 || true
+      started="$started $h"
+      acted=1
+    done <<< "$(infra_hosts)"
+  fi
+
+  if [ -n "$SAIL_BIN" ] && test_cmd_uses_sail && [ -x "$SAIL_BIN" ] && ! sail_running; then
+    log "Ambiente — containers do projeto parados; subindo: $SAIL_BIN up -d"
+    "$SAIL_BIN" up -d < /dev/null >> "$LOG_DIR/env-recover.log" 2>&1 || true
+    acted=1
+  fi
+
+  [ "$acted" -eq 1 ] || return 1
+
+  # Esperar o servico ACEITAR conexao esta fora do alcance do ralph (cada stack
+  # tem seu handshake). O que da para provar aqui e o container em execucao;
+  # quem da o veredito final e a reexecucao da suite.
+  local waited=0 pending
+  while [ "$waited" -lt "$ENV_RECOVER_TIMEOUT" ]; do
+    pending=0
+    for h in $started; do
+      docker ps --format '{{.Names}}' 2> /dev/null | grep -qxF "$h" || pending=1
+    done
+    if [ -n "$SAIL_BIN" ] && test_cmd_uses_sail && [ -x "$SAIL_BIN" ]; then
+      sail_running || pending=1
+    fi
+    if [ "$pending" -eq 0 ]; then
+      success "Ambiente — servicos de pe apos $(format_duration "$waited")"
+      return 0
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+
+  warn "Ambiente — os servicos nao subiram em $(format_duration "$ENV_RECOVER_TIMEOUT")"
+  return 1
+}
+
 # Gate 2 — a suite do projeto passa, rodada PELO ralph (fora da sessao do agente)?
 gate2_tests_pass() {
   local test_log="$1"
@@ -3337,6 +3509,35 @@ gate2_tests_pass() {
   # < /dev/null: sail test (docker compose exec) anexa stdin e consumiria o
   # stream de quem chamou, alem de poder travar esperando input.
   bash -c "$TEST_CMD" < /dev/null > "$test_log" 2>&1 || rc=$?
+
+  # Ambiente fora do ar antes de qualquer outro julgamento: sem servico de pe a
+  # suite nao mediu o codigo, e o baseline / o ponto fixo / o conserto estariam
+  # todos raciocinando sobre um vermelho que nao e da fase.
+  GATE2_INFRA=0
+  if [ "$rc" -ne 0 ] && gate2_infra_failure "$test_log"; then
+    warn "Gate 2 — a suite caiu por AMBIENTE, nao por codigo:"
+    printf '%s\n' "$INFRA_SIGNATURE" | head -n 3 | sed 's/^/    /'
+    if [ "$INFRA_RETRIED" -eq 0 ]; then
+      INFRA_RETRIED=1
+      recover_env || true
+      log "Gate 2 — reexecutando a suite uma vez (unica reexecucao desta fase)"
+      set_activity "reexecutando a suite apos recuperar o ambiente"
+      rc=0
+      bash -c "$TEST_CMD" < /dev/null > "$test_log" 2>&1 || rc=$?
+    fi
+    if [ "$rc" -ne 0 ] && gate2_infra_failure "$test_log"; then
+      GATE2_INFRA=1
+      GATE2_LAST_SIG="$sig"; GATE2_LAST_VERDICT="fail"
+      GATE_CAUSE="A suite NAO pode ser avaliada: servico externo fora do ar. Isto nao e veredito sobre o codigo da fase."$'\n'"$INFRA_SIGNATURE"
+      gate_end 2 fail
+      return 1
+    fi
+    # `[ ... ] && cmd` como ultima linha do bloco devolveria 1 e o `set -e`
+    # mataria o run justamente no caminho em que o ambiente voltou.
+    if [ "$rc" -eq 0 ]; then
+      success "Gate 2 — ambiente recuperado; a suite rodou de verdade"
+    fi
+  fi
 
   if [ "$rc" -ne 0 ]; then
     if gate2_within_baseline "$test_log"; then
@@ -3639,6 +3840,26 @@ gate3_independent_verify() {
   return 0
 }
 
+# O GATE_CAUSE carrega ate 200 linhas de saida de suite porque o prompt do ciclo
+# de correcao precisa do contexto. Imprimir o `head` disso mostra o COMECO do
+# tail — dezenas de linhas de teste VERDE — e esconde a falha do operador. Aqui
+# a saida e para o humano: cabecalho + as linhas que marcam falha; sem marcador,
+# as ultimas linhas.
+print_gate_cause() {
+  local max="${1:-20}" head_line body marks
+  head_line=$(printf '%s\n' "$GATE_CAUSE" | head -n 1)
+  body=$(printf '%s\n' "$GATE_CAUSE" | tail -n +2)
+  printf '    %s\n' "$head_line"
+  marks=$(printf '%s\n' "$body" \
+    | grep -aE '(FAILED|FAILURES|--- FAIL:|^[[:space:]]*FAIL[[:space:]]|✕|⨯|×|●|Failed asserting|Expected[[:space:]]*:|Received[[:space:]]*:|AssertionError|Error[[:space:]]*:|Exception|^[[:space:]]*Tests:)' \
+    | awk '!seen[$0]++' | head -n "$max" || true)
+  if [ -n "${marks//[[:space:]]/}" ]; then
+    printf '%s\n' "$marks" | sed 's/^/    /'
+  else
+    printf '%s\n' "$body" | tail -n "$max" | sed 's/^/    /'
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Execucao de fase
 # ---------------------------------------------------------------------------
@@ -3660,6 +3881,18 @@ commit_wip() {
   git add -A
   git commit -q -m "wip(phase-${phase_num}): incomplete — see .phases/logs/"
   warn "Commit wip criado para a fase $phase_num — a proxima fase parte de arvore limpa"
+}
+
+# Interrupcao por ambiente nao pode custar o trabalho da fase. O codigo pode
+# estar inteiro e correto — foi o servico que caiu, e a suite nunca o julgou.
+# Commit em vez de aviso: um `git checkout -- .` distraido apagaria tudo.
+commit_wip_env() {
+  local phase_num="$1"
+  [ -n "$(git status --porcelain)" ] || return 0
+  git add -A
+  git commit -q -m "wip(phase-${phase_num}): interrompido por falha de ambiente — see .phases/logs/"
+  warn "Trabalho da fase $phase_num salvo em commit wip."
+  warn "Suba os servicos e re-rode o ralph: ele revalida a fase e segue de onde parou."
 }
 
 # ---------------------------------------------------------------------------
@@ -3802,6 +4035,9 @@ run_phase() {
   GATE2_LAST_SIG=""
   GATE2_LAST_VERDICT=""
   GATE2_STALE_RED=0
+  GATE2_INFRA=0
+  # A reexecucao pos-recuperacao e por FASE: cada fase tem direito a uma.
+  INFRA_RETRIED=0
   REPAIR_ABORTED=0
   PHASE_ABORT_REASON=""
 
@@ -3922,6 +4158,18 @@ run_phase() {
 
         GATE_CAUSE="${no_change_note}${GATE_CAUSE}"
         ST_LAST_ERROR="$(gate_cause_summary)"
+
+        # Ambiente fora do ar nao e vermelho da fase: nao gasta ciclo, nao gasta
+        # conserto cirurgico e nao condena o codigo ja escrito. O gate 2 ja
+        # tentou levantar os servicos e reexecutou a suite uma vez.
+        if [ "$GATE2_INFRA" -eq 1 ]; then
+          LAST_GATE="ambiente fora do ar (gate 2)"
+          fail "Gate 2 — ambiente fora do ar; a fase nao chegou a ser julgada"
+          ENV_ABORT=1
+          PHASE_ABORT_REASON="a suite nao pode ser avaliada: servico externo fora do ar. Ciclo nenhum e patch nenhum levantam um servico morto."
+          break
+        fi
+
         if [ "$failed_gate" = "gate2" ]; then
           fail "Gate 2 vermelho — testes do projeto falharam"
         else
@@ -4028,9 +4276,23 @@ run_phase() {
   # O dump da causa tem ate 40 linhas — nao cabe na area de mensagens do painel.
   # Desmonta o quadro antes e deixa a saida rolar como sempre.
   ui_stop
+
+  # Ambiente fora do ar: a fase nao foi reprovada — ela nao chegou a ser
+  # julgada. Desfecho proprio, trabalho preservado, run encerrado.
+  if [ "$ENV_ABORT" -eq 1 ]; then
+    fail "Phase $phase_num: $phase_title — INTERROMPIDA pelo ambiente ($(format_duration "$phase_duration"))"
+    fail "Servico externo fora do ar (nenhum veredito sobre o codigo):"
+    printf '%s\n' "$INFRA_SIGNATURE" | head -n 5 | sed 's/^/    /'
+    fail "Logs em: $LOG_DIR/${phase_file%.md}.*"
+    commit_wip_env "$phase_num"
+    notify_and_record phase_failed \
+      "INTERROMPIDA pelo ambiente apos $(format_duration "$phase_duration"): servico externo fora do ar. Trabalho salvo em commit wip."
+    return 1
+  fi
+
   fail "Phase $phase_num: $phase_title — FALHOU apos $MAX_CYCLES ciclos ($(format_duration "$phase_duration"))"
   fail "Ultima causa ($LAST_GATE):"
-  printf '%s\n' "$GATE_CAUSE" | head -n 20 | sed 's/^/    /'
+  print_gate_cause 20
   fail "Logs em: $LOG_DIR/${phase_file%.md}.*"
 
   # O trabalho parcial fica na arvore; o preflight da proxima execucao exige
@@ -4155,6 +4417,13 @@ main() {
       completed_phases+=("$title")
     else
       failed_phases+=("$title")
+      # Ambiente fora do ar para o run INTEIRO, mesmo com --keep-going: a
+      # proxima fase encontraria o mesmo servico morto e morreria igual,
+      # gastando sessao de engine para reafirmar o obvio.
+      if [ "$ENV_ABORT" -eq 1 ]; then
+        warn "Parando o run: o ambiente esta fora do ar (as proximas fases falhariam igual)."
+        break
+      fi
       if $KEEP_GOING; then
         warn "--keep-going: seguindo para a proxima fase"
         commit_wip "$num"
@@ -4222,6 +4491,12 @@ main() {
   fi
   serve_stop
 
+  # 3 = ambiente. Distingue "o codigo reprovou" de "o ralph nao pode julgar":
+  # automacao em cima do exit code precisa reagir diferente aos dois.
+  if [ "$ENV_ABORT" -eq 1 ]; then
+    fail "Run encerrado por ambiente fora do ar. Suba os servicos e re-rode."
+    exit 3
+  fi
   [ ${#failed_phases[@]} -eq 0 ] || exit 1
 }
 

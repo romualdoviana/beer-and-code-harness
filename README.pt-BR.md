@@ -196,7 +196,7 @@ Sem argumento, resolve o input nesta ordem: `.spec/init/project-phases.md` → `
 | 0 | O engine terminou de verdade? | claude: `is_error` no JSON de resultado; codex: exit code |
 | 1 | A sessão escreveu código? | Assinatura da árvore antes/depois. **Sinal, não veredito** — fase já implementada faz o engine (corretamente) não escrever nada; o sinal alimenta a causa do ciclo de correção |
 | 2 | A suite de testes passa? | Rodada **pelo ralph**, fora da sessão do agente — o agente não pode "mentir verde" |
-| 3 | Cada task está de fato no código? | Sessão verificadora independente, read-only, que emite `TASK <n>: DONE/INCOMPLETE` por task. Roda em toda fase por default (`RALPH_VERIFY=always`); no engine claude usa modelo barato (haiku) |
+| 3 | Cada task está de fato no código? | Sessão verificadora independente, read-only, que emite `TASK <n>: DONE/INCOMPLETE` por task. Roda em toda fase por default (`RALPH_VERIFY=always`); no engine claude usa `sonnet` |
 
 Qualquer gate vermelho → **ciclo de correção**: sessão nova recebe a fase inteira + a causa real da falha (nunca "os testes falharam" genérico). Default: 3 ciclos por fase.
 
@@ -207,7 +207,7 @@ Gates verdes com árvore limpa → fase já estava implementada em HEAD: marcada
 Um ciclo de correção é caro: sessão nova com preâmbulo de contexto, a fase inteira no prompt e acesso total ao projeto. Pagar isso porque **uma** assertion ficou vermelha é desperdício. Antes de gastar um ciclo, o ralph tenta até **2 consertos cirúrgicos** (`RALPH_MAX_REPAIRS`):
 
 - **Prompt mínimo**: só a assinatura da falha — teste que quebrou, `arquivo:linha`, mensagem da assertion — ou só as linhas `INCOMPLETE` do verificador. Sem preâmbulo, sem a fase.
-- **Modelo próprio e barato** (`RALPH_REPAIR_MODEL`, default `sonnet` no claude).
+- **Modelo próprio e forte** (`RALPH_REPAIR_MODEL`, default `opus` no claude): é a única etapa que escreve código com contexto mínimo e a única que pode abortar a fase sozinha (`REPAIR_ABORT`). Patch cego e desistência errada custam mais que a diferença de modelo.
 - **Não consome ciclo**: os `--max-cycles` continuam inteiros de reserva.
 
 **Fail-closed.** Só repara o que dá para localizar. Vão direto ao ciclo completo: gate 0 vermelho (engine morreu), saída de teste sem falha localizável, falha espalhada por mais de `RALPH_REPAIR_MAX_FILES` arquivos, mais de `RALPH_REPAIR_MAX_TASKS` tasks incompletas, e gate 3 reprovado por **protocolo** do verificador (que não é código faltando). O modelo também pode desistir sozinho respondendo `REPAIR_ABORT: <motivo>` — desistir barato vale mais que um patch às cegas, e o ralph escala na hora em vez de gastar o round seguinte.
@@ -215,6 +215,18 @@ Um ciclo de correção é caro: sessão nova com preâmbulo de contexto, a fase 
 **Revalidação.** Entre rounds, o gate 3 roda **escopado**: só as tasks que estavam `INCOMPLETE`, nas posições originais (nada é renumerado). Um `INCOMPLETE` fora do escopo reprova — é o conserto tendo quebrado algo que já estava de pé. Verde no escopo **não fecha a fase**: a cadeia completa (suite inteira + verificação de todas as tasks) roda antes de qualquer commit. O conserto nunca commita.
 
 `--no-repair` (ou `--max-repairs 0`) desliga e devolve o comportamento antigo: gate vermelho → ciclo.
+
+### Ambiente fora do ar (veredito próprio do gate 2)
+
+Serviço externo caído — banco, cache, fila, container derrubado por falta de memória no host — **não é defeito de código**: a suite não chegou a julgar a fase. Tratar isso como gate 2 vermelho custa ciclo, custa conserto cirúrgico e no fim descarta o trabalho da fase, porque nenhum patch levanta um container morto.
+
+Ao reconhecer a assinatura (recusa de conexão, DNS que não resolve, `SQLSTATE` de conexão), o ralph:
+
+1. **Tenta levantar o que caiu** — `docker start` nos containers **nomeados no próprio erro** (podem ser de outro compose project) e, se o projeto usa Sail com os containers parados, `sail up -d`.
+2. **Reexecuta a suite uma vez** (uma por fase). Voltou verde: o run segue normal, sem ciclo gasto.
+3. **Ainda fora do ar**: encerra o **run inteiro** — mesmo com `--keep-going`, porque a próxima fase encontraria o mesmo serviço morto —, salva o trabalho da fase em `wip(phase-N): interrompido por falha de ambiente` e sai com **exit code 3**.
+
+Re-rodar com o ambiente de pé revalida a fase e segue de onde parou. `--no-env-guard` (ou `RALPH_ENV_GUARD=off`) desliga — útil se a sua suite **asserta** mensagens de erro de conexão e o guard as confunde com ambiente caído.
 
 ### Detecção do comando de teste (gate 2)
 
@@ -227,6 +239,7 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | Opção | Efeito |
 |---|---|
 | `--engine codex\|claude` | Engine de implementação (default: `codex`) |
+| `--model NOME` | Modelo das sessões de implementação e correção (default: o da CLI do engine) |
 | `--from N` | Começa na fase N (limpa o progresso das fases ≥ N) |
 | `--keep-going` | Continua após fase falhar (cria commit `wip(phase-N)`; default: para) |
 | `--max-cycles N` | Ciclos de correção por fase (default: 3) |
@@ -235,6 +248,7 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | `--test-cmd "<cmd>"` | Comando de teste do projeto (gate 2) |
 | `--baseline` | Mede em HEAD o que já está vermelho e faz o gate 2 cobrar só o **delta** (default: desligado) |
 | `--no-verify` | Desliga o gate 3 |
+| `--no-env-guard` | Desliga a detecção de ambiente fora do ar: toda falha volta a ser vermelho da fase |
 | `--ui` / `--no-ui` | Força o painel ANSI ligado / desligado (ver abaixo) |
 | `--serve[=PORTA]` | Dashboard web local sobre o mesmo estado |
 
@@ -243,11 +257,14 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | `RALPH_TEST_CMD` | Comando de teste (gate 2) |
 | `RALPH_BASELINE` | `on` liga o baseline do gate 2 (mesmo que `--baseline`; default: `off`) |
 | `RALPH_VERIFY` | Gate 3: `always` (default) \| `auto` (economiza: só quando o gate 2 não basta) \| `off` |
-| `RALPH_VERIFY_MODEL` | Modelo do verificador (default no claude: `haiku`) |
+| `RALPH_VERIFY_MODEL` | Modelo do verificador (default no claude: `sonnet`) |
+| `RALPH_MODEL` | Modelo das sessões de implementação/correção (vazio = o da CLI) |
+| `RALPH_ENV_GUARD` | Detecção de ambiente fora do ar: `on` (default) \| `off` |
+| `RALPH_ENV_RECOVER_TIMEOUT` | Segundos de espera pelos serviços ao tentar levantá-los (default: 90) |
 | `RALPH_MAX_CYCLES` | Ciclos de correção por fase (default: 3) |
 | `RALPH_REPAIR` | Conserto cirúrgico: `on` (default) \| `off` |
 | `RALPH_MAX_REPAIRS` | Consertos por ciclo (default: 2; `0` desliga) |
-| `RALPH_REPAIR_MODEL` | Modelo do conserto (default no claude: `sonnet`) |
+| `RALPH_REPAIR_MODEL` | Modelo do conserto cirúrgico (default no claude: `opus`) |
 | `RALPH_REPAIR_MAX_FILES` | Acima de N arquivos na assinatura da falha, vai direto ao ciclo (default: 5) |
 | `RALPH_REPAIR_MAX_TASKS` | Acima de N tasks incompletas, idem (default: 3) |
 | `RALPH_MAX_LIMIT_WAITS` | Esperas consecutivas por limite de uso, por fase (default: 20) |
@@ -385,7 +402,7 @@ Cada sessão do engine grava **dois** logs, nunca unidos:
 
 Os dois vão inteiros para os logs; `--verbose` também os streama ao vivo. Unir os streams (`2>&1`) fazia o Codex ecoar a resposta final nos dois e o gate 3 contar cada task duas vezes, reprovando fase inteiramente implementada por "cobertura incompleta". Por isso o gate 3 mede cobertura em **índices únicos** de task: eco duplicado não infla nem esconde cobertura, `INCOMPLETE` vence `DONE` no mesmo índice, e índice fora de `1..N` ou task sem veredito deixam o gate vermelho.
 
-Exit code: `0` = todas as fases verdes; `1` = alguma falhou ou abortou.
+Exit code: `0` = todas as fases verdes; `1` = alguma falhou ou abortou; `3` = run encerrado por ambiente fora do ar (nenhum veredito sobre o código — suba os serviços e re-rode).
 
 ### Contrato de formato do input
 
