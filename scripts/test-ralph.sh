@@ -105,6 +105,22 @@ if [ "$verify" -eq 1 ] && [ -n "$model" ]; then
   echo "$model" > "$state/verify_model"
 fi
 
+# Nivel de caveman pedido, por tipo de sessao. `-` = variavel ausente.
+if [ "$name" = "claude" ]; then
+  if [ "$verify" -eq 1 ]; then
+    echo "${CAVEMAN_DEFAULT_MODE:--}" >> "$state/caveman_verify"
+  else
+    echo "${CAVEMAN_DEFAULT_MODE:--}" >> "$state/caveman_impl"
+  fi
+
+  # Simula o hook SessionStart do plugin: ele reescreve o flag GLOBAL
+  # ~/.claude/.caveman-active com o nivel ativo. O ralph tem que devolver o
+  # arquivo ao valor anterior para nao arrastar a sessao interativa do dev.
+  if [ -n "${CAVEMAN_DEFAULT_MODE:-}" ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    printf '%s' "$CAVEMAN_DEFAULT_MODE" > "$CLAUDE_CONFIG_DIR/.caveman-active"
+  fi
+fi
+
 # --- verificador independente ------------------------------------------------
 # Verifica o CODIGO REAL, como o verificador de verdade: sem arquivo de
 # implementacao no repo, a fase esta incompleta.
@@ -126,28 +142,33 @@ if [ "$verify" -eq 1 ]; then
       # codex 0.145: a resposta final sai no stdout E no stderr. Com 2>&1 o
       # parser via 4 linhas para 2 tasks e acusava cobertura incompleta.
       for i in $(seq 1 "$tasks"); do
-        echo "TASK $i: DONE"
-        echo "TASK $i: DONE" >&2
+        echo "TASK $i: DONE — src/impl-$i.txt:1"
+        echo "TASK $i: DONE — src/impl-$i.txt:1" >&2
       done
       exit 0
       ;;
     verify-dup-stdout)
       # O modelo repete o bloco como resumo, no mesmo stream.
-      for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE"; done
+      for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
       echo "Resumo final:"
-      for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE"; done
+      for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
       exit 0
       ;;
     verify-dup-hides-gap)
       # 2 linhas para 2 tasks, mas so a task 1 foi julgada: contar linhas daria
       # verde com metade da fase sem veredito.
-      echo "TASK 1: DONE"
-      echo "TASK 1: DONE"
+      echo "TASK 1: DONE — src/impl-1.txt:1"
+      echo "TASK 1: DONE — src/impl-1.txt:1"
+      exit 0
+      ;;
+    verify-bare-done)
+      # Linguagem confiante sem prova: o gate 3 reprova por protocolo.
+      for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE"; done
       exit 0
       ;;
     verify-index-out-of-range)
-      for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE"; done
-      echo "TASK 9: DONE"
+      for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
+      echo "TASK 9: DONE — src/impl-9.txt:1"
       exit 0
       ;;
   esac
@@ -157,12 +178,12 @@ if [ "$verify" -eq 1 ]; then
     # Task 1 nunca fica pronta: da o gate 3 vermelho que aciona o conserto e
     # exercita o esgotamento / a desistencia.
     echo "TASK 1: INCOMPLETE — o arquivo nao foi criado"
-    for i in $(seq 2 "$tasks"); do echo "TASK $i: DONE"; done
+    for i in $(seq 2 "$tasks"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
   elif [ "$scenario" = "verify-incomplete-once" ] && [ "$n" -eq 1 ]; then
     echo "TASK 1: INCOMPLETE — o arquivo nao foi criado"
-    for i in $(seq 2 "$tasks"); do echo "TASK $i: DONE"; done
+    for i in $(seq 2 "$tasks"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
   else
-    for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE"; done
+    for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
   fi
   exit 0
 fi
@@ -247,6 +268,17 @@ if [ "$write" -eq 1 ]; then
   echo "impl $n" > "src/impl-$n.txt"
 fi
 
+# scoped-tests: so a fase 2 (2a sessao de implementacao) cria arquivo de teste.
+# critical-change: so a fase 2 mexe em migration — caminho critico.
+if [ "$scenario" = "scoped-tests" ] && [ "$n" -eq 2 ]; then
+  mkdir -p tests/Feature
+  echo "teste da fase 2" > tests/Feature/AlvoTest.py
+fi
+if [ "$scenario" = "critical-change" ] && [ "$n" -eq 2 ]; then
+  mkdir -p database/migrations
+  echo "migration da fase 2" > database/migrations/2026_01_01_000000_cria_tabela.php
+fi
+
 if [ "$scenario" = "false-429" ]; then
   # 429 no MEIO do log: e output de teste do projeto, nao limite de uso.
   echo "FAIL tests/HttpClientTest: expected 429 Too Many Requests, got 200"
@@ -275,6 +307,9 @@ scenario="${MOCK_SCENARIO:-ok}"
 f="$state/test_calls"; n=0
 [ -f "$f" ] && n=$(cat "$f")
 n=$((n + 1)); echo "$n" > "$f"
+# Argumentos de cada execucao: e assim que o teste prova se o gate 2 rodou
+# escopado (caminho de teste) ou completo (sem argumento nenhum).
+printf '%s\n' "$*" >> "$state/test_args"
 
 if [ "$scenario" = "test-red-once" ] || [ "$scenario" = "stall-after-red" ]; then
   if [ "$n" -eq 1 ]; then
@@ -373,6 +408,53 @@ Projeto de teste.
 - nenhuma
 '
 
+# Documento de 3 fases: a 2 e intermediaria de verdade (nem primeira, nem
+# ultima), que e onde o escopo do gate 2 aparece.
+PHASES_FIXTURE_3='# Test Project — Project Phases
+
+## Phase 1: Foundation
+
+- [ ] **Task:** cria o arquivo A
+  - **Acceptance criteria:**
+    - o arquivo existe
+
+## Phase 2: Feature
+
+- [ ] **Task:** cria o arquivo B
+  - **Acceptance criteria:**
+    - o arquivo existe
+
+## Phase 3: Wrap up
+
+- [ ] **Task:** cria o arquivo C
+  - **Acceptance criteria:**
+    - o arquivo existe
+'
+
+# Igual ao de 3 fases, mas a fase 2 DECLARA que quer a suite inteira.
+PHASES_FIXTURE_DECLARED='# Test Project — Project Phases
+
+## Phase 1: Foundation
+
+- [ ] **Task:** cria o arquivo A
+  - **Acceptance criteria:**
+    - o arquivo existe
+
+## Phase 2: Feature
+
+Suite: completa
+
+- [ ] **Task:** cria o arquivo B
+  - **Acceptance criteria:**
+    - o arquivo existe
+
+## Phase 3: Wrap up
+
+- [ ] **Task:** cria o arquivo C
+  - **Acceptance criteria:**
+    - o arquivo existe
+'
+
 # Fixture de projeto Laravel + Sail. `sail ps` responde conforme SAIL_UP.
 make_sail_fixture() {
   local repo="$1" up="$2"
@@ -413,6 +495,10 @@ new_case() {
   mkdir -p "$dir/repo" "$dir/state" "$dir/bin"
   make_mocks "$dir/bin"
   make_testcmd "$dir/test.sh"
+  # Mesmo runner, com nome que o ralph reconhece como escopavel por caminho.
+  # `test.sh` cai no ramo "runner desconhecido" e forca suite completa — os dois
+  # comportamentos precisam de fixture propria.
+  make_testcmd "$dir/pytest"
 
   (
     cd "$dir/repo" || exit 1
@@ -420,7 +506,7 @@ new_case() {
     git config user.email "test@ralph"
     git config user.name "Ralph Test"
     mkdir -p .spec/init
-    printf '%s' "$PHASES_FIXTURE" > .spec/init/project-phases.md
+    printf '%s' "${CASE_PHASES:-$PHASES_FIXTURE}" > .spec/init/project-phases.md
     git add -A
     git commit -q -m "chore: fixture"
   )
@@ -433,6 +519,7 @@ run_ralph() {
   local rc=0
   (
     cd "$dir/repo" || exit 1
+    [ -n "${CASE_CLAUDE_CONFIG_DIR:-}" ] && export CLAUDE_CONFIG_DIR="$CASE_CLAUDE_CONFIG_DIR"
     PATH="$dir/bin:$PATH" \
     MOCK_STATE="$dir/state" \
     MOCK_SCENARIO="$scenario" \
@@ -443,7 +530,10 @@ run_ralph() {
     RALPH_HEARTBEAT="${CASE_HEARTBEAT:-0}" \
     RALPH_VERIFY="${CASE_VERIFY:-}" \
     RALPH_VERIFY_MODEL="${CASE_VERIFY_MODEL:-}" \
+    RALPH_UI_SHOT_CMD="${CASE_UI_SHOT_CMD:-}" \
+    RALPH_UI_VERIFY="${CASE_UI_VERIFY:-}" \
     RALPH_REPAIR_MODEL="${CASE_REPAIR_MODEL:-}" \
+    RALPH_CAVEMAN="${CASE_CAVEMAN:-}" \
     RALPH_NOTIFY_CMD="${CASE_NOTIFY_CMD:-}" \
       bash "$RALPH" "$@" > "$dir/out.log" 2>&1
   ) || rc=$?
@@ -498,7 +588,9 @@ fi
 if case_enabled test-red-once; then
   header "2. gate 2 vermelho uma vez -> ciclo de correcao"
   d=$(new_case test-red-once)
-  rc=$(run_ralph "$d" test-red-once --engine claude --test-cmd "$d/test.sh" --max-cycles 2)
+  # --full-suite: o alvo do caso e o gate 2 rodando na PRIMEIRA fase. No default
+  # (escopo por fase) a suite so roda na ultima — isso e o caso "gate2-escopado".
+  rc=$(run_ralph "$d" test-red-once --engine claude --test-cmd "$d/test.sh" --max-cycles 2 --full-suite)
   assert_eq 0 "$rc" "exit 0"
   assert_eq 3 "$(commits "$d")" "1 commit por fase (ciclo intermediario nao commita)"
   assert_contains "$d/out.log" "Gate 2 vermelho" "gate 2 reportado vermelho"
@@ -811,7 +903,7 @@ if case_enabled sail-up; then
   d=$(new_case sail-up)
   make_sail_fixture "$d/repo" up
   git -C "$d/repo" add -A && git -C "$d/repo" commit -q -m "chore: sail"
-  rc=$(run_ralph "$d" ok --engine claude)   # sem --test-cmd: exercita a deteccao
+  rc=$(run_ralph "$d" ok --engine claude --full-suite)   # sem --test-cmd: exercita a deteccao
   assert_eq 0 "$rc" "exit 0"
   assert_contains "$d/out.log" "comando de teste (detectado): vendor/bin/sail test" "detectou sail test"
   assert_not_contains "$d/out.log" "composer test" "composer test nao foi escolhido"
@@ -1330,7 +1422,7 @@ for i in 1 2 3 4 5 6; do
 done
 if [ "$verify" -eq 1 ]; then
   n=$(grep -cE '^[[:space:]]*- \[[ x]\]' <<< "$prompt")
-  for i in $(seq 1 "$n"); do echo "TASK $i: DONE"; done
+  for i in $(seq 1 "$n"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
   exit 0
 fi
 mkdir -p src app/Services
@@ -1407,7 +1499,7 @@ verify=0
 grep -q '^RALPH_VERIFY' <<< "$prompt" && verify=1
 if [ "$verify" -eq 1 ]; then
   n=$(grep -cE '^[[:space:]]*- \[[ x]\]' <<< "$prompt")
-  for i in $(seq 1 "$n"); do echo "TASK $i: DONE"; done
+  for i in $(seq 1 "$n"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
   exit 0
 fi
 mkdir -p app/Jobs database/migrations
@@ -1464,7 +1556,7 @@ set -uo pipefail
 prompt=$(cat)
 if grep -q '^RALPH_VERIFY' <<< "$prompt"; then
   n=$(grep -cE '^[[:space:]]*- \[[ xX]\]' <<< "$prompt")
-  for i in $(seq 1 "$n"); do echo "TASK $i: DONE"; done
+  for i in $(seq 1 "$n"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
   exit 0
 fi
 mkdir -p src
@@ -1522,10 +1614,10 @@ if grep -q '^RALPH_VERIFY' <<< "$prompt"; then
   total=$(grep -cE '^[[:space:]]*- \[[ xX]\]' <<< "$prompt")
   if [ "$n" -eq 1 ]; then
     echo "TASK 1: INCOMPLETE — o arquivo A nao existe"
-    for i in $(seq 2 "$total"); do echo "TASK $i: DONE"; done
+    for i in $(seq 2 "$total"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
     exit 0
   fi
-  for i in $(seq 1 "$total"); do echo "TASK $i: DONE"; done
+  for i in $(seq 1 "$total"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
   exit 0
 fi
 mkdir -p src
@@ -1770,7 +1862,7 @@ fi
 if case_enabled repair-gate2; then
   header "47. gate 2 vermelho localizavel -> conserto cirurgico, sem ciclo"
   d=$(new_case repair-gate2)
-  rc=$(run_ralph "$d" test-red-repairable --engine claude --test-cmd "$d/test.sh" --max-cycles 2)
+  rc=$(run_ralph "$d" test-red-repairable --engine claude --test-cmd "$d/test.sh" --max-cycles 2 --full-suite)
   assert_eq 0 "$rc" "exit 0"
   assert_eq 3 "$(commits "$d")" "1 commit por fase"
   assert_contains "$d/out.log" "Gate 2 vermelho" "gate 2 reportado vermelho"
@@ -1885,7 +1977,7 @@ fi
 if case_enabled stall-red-forever; then
   header "54. ciclo improdutivo sobre gate 2 vermelho aborta a fase"
   d=$(new_case stall-red-forever)
-  rc=$(run_ralph "$d" stall-red-forever --engine claude --test-cmd "$d/test.sh" --max-cycles 5)
+  rc=$(run_ralph "$d" stall-red-forever --engine claude --test-cmd "$d/test.sh" --max-cycles 5 --full-suite)
   assert_eq 1 "$rc" "exit 1 (a fase nao foi resolvida)"
   assert_contains "$d/out.log" "Abortando a fase sem gastar os ciclos restantes" "o abort foi reportado"
   assert_eq 2 "$(cat "$d/state/impl_calls")" "so 2 sessoes gastas, com orcamento de 5"
@@ -2000,7 +2092,7 @@ fi
 if case_enabled infra-abort; then
   header "60. ambiente fora do ar encerra o run e preserva o trabalho"
   d=$(new_case infra-abort)
-  rc=$(run_ralph "$d" infra-forever --engine claude --test-cmd "$d/test.sh" --max-cycles 5 --keep-going)
+  rc=$(run_ralph "$d" infra-forever --engine claude --test-cmd "$d/test.sh" --max-cycles 5 --keep-going --full-suite)
   assert_eq 3 "$rc" "exit 3 (ambiente, nao falha de codigo)"
   assert_contains "$d/out.log" "INTERROMPIDA pelo ambiente" "a fase nao foi declarada reprovada"
   assert_contains "$d/out.log" "ralph-fixture-db-1" "o servico fora do ar foi nomeado"
@@ -2051,6 +2143,244 @@ if case_enabled impl-model; then
   assert_eq "sonnet" "$(cat "$d/state/verify_model" 2> /dev/null || echo vazio)" "o verificador manteve o modelo proprio"
   assert_contains "$d/out.log" "conserto: opus" "o conserto usa o modelo forte"
   assert_contains "$d/out.log" "implementacao: modelo-grande" "o run reporta os modelos usados"
+fi
+
+# ---------------------------------------------------------------------------
+# 65. Caveman no run headless: nivel maximo nas sessoes que ESCREVEM codigo,
+#     nunca no verificador (cujo output e contrato de maquina), e o flag global
+#     do plugin volta ao valor que tinha antes do run.
+# ---------------------------------------------------------------------------
+if case_enabled caveman; then
+  header "65. caveman ultra so nas sessoes de implementacao/conserto"
+  d=$(new_case caveman)
+  mkdir -p "$d/cfg"
+  printf 'full' > "$d/cfg/.caveman-active"
+  rc=$(CASE_CLAUDE_CONFIG_DIR="$d/cfg" run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  assert_contains "$d/state/caveman_impl" "ultra" "a implementacao pediu caveman ultra"
+  assert_not_contains "$d/state/caveman_verify" "ultra" "o verificador ficou no formato normal"
+  assert_eq "full" "$(cat "$d/cfg/.caveman-active" 2> /dev/null || echo ausente)" "o flag global do plugin voltou ao nivel de antes"
+  assert_contains "$d/out.log" "Caveman — nivel 'ultra'" "o run reporta o nivel usado"
+
+  d2=$(new_case caveman-off)
+  rc=$(CASE_CAVEMAN=off run_ralph "$d2" ok --engine claude --test-cmd "$d2/test.sh")
+  assert_eq 0 "$rc" "exit 0 (off)"
+  assert_not_contains "$d2/state/caveman_impl" "ultra" "RALPH_CAVEMAN=off nao injeta nivel nenhum"
+fi
+
+# ---------------------------------------------------------------------------
+# Escopo do gate 2 — a suite inteira e o gate da SPEC, nao o de cada fase
+# ---------------------------------------------------------------------------
+
+# Argumentos da n-esima execucao do comando de teste ("" = suite completa).
+test_args_line() { sed -n "${2}p" "$1/state/test_args" 2> /dev/null || true; }
+
+# 66. Fase intermediaria que altera arquivo de teste -> o gate 2 roda SO esse
+#     arquivo. A suite completa fica para a ultima fase.
+if case_enabled gate2-escopado; then
+  header "66. fase intermediaria roda so os testes que ela alterou"
+  CASE_PHASES="$PHASES_FIXTURE_3"
+  d=$(new_case gate2-escopado)
+  unset CASE_PHASES
+  rc=$(run_ralph "$d" scoped-tests --engine claude --test-cmd "$d/pytest")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 4 "$(commits "$d")" "1 commit por fase (1 fixture + 3)"
+  assert_eq 2 "$(cat "$d/state/test_calls")" "2 execucoes: a fase 2 (escopada) e a fase 3 (completa)"
+  assert_eq "tests/Feature/AlvoTest.py" "$(test_args_line "$d" 1)" "a fase 2 rodou so o teste que ela criou"
+  assert_eq "" "$(test_args_line "$d" 2)" "a ultima fase rodou a suite inteira, sem escopo"
+  assert_contains "$d/out.log" "rodando os testes desta fase" "o log separa escopo de suite"
+  assert_contains "$d/out.log" "ultima fase do documento — gate final da spec" "a suite completa e o gate da spec"
+  assert_contains "$d/out.log" "a suite completa roda na fase 3" "o run anuncia onde a suite inteira roda"
+fi
+
+# 67. Fase mecanica (nenhum teste alterado, nada critico) -> gate 2 nao executa.
+#     E aqui que nascia o teste inutil: fase sem comportamento novo precisando
+#     de "algo verde" para fechar o gate.
+if case_enabled gate2-skip; then
+  header "67. fase sem teste e sem mudanca critica nao roda suite"
+  CASE_PHASES="$PHASES_FIXTURE_3"
+  d=$(new_case gate2-skip)
+  unset CASE_PHASES
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/pytest")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 4 "$(commits "$d")" "as fases fecharam pelo gate 3 (1 fixture + 3)"
+  assert_eq 1 "$(cat "$d/state/test_calls")" "a suite rodou UMA vez no run inteiro (fim da spec)"
+  assert_contains "$d/out.log" "Gate 2 — nao executado" "o gate 2 explica que nao rodou"
+  assert_contains "$d/out.log" "nao alterou nem citou arquivo de teste" "o motivo aparece no log"
+  assert_eq 3 "$(cat "$d/state/verify_calls")" "o gate 3 continua rodando em toda fase"
+fi
+
+# 68. Mudanca critica (migration) na fase intermediaria -> suite completa ali
+#     mesmo. Escopo nao protege contra schema quebrado.
+if case_enabled gate2-critico; then
+  header "68. mudanca critica na fase forca a suite completa"
+  CASE_PHASES="$PHASES_FIXTURE_3"
+  d=$(new_case gate2-critico)
+  unset CASE_PHASES
+  rc=$(run_ralph "$d" critical-change --engine claude --test-cmd "$d/pytest")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 2 "$(cat "$d/state/test_calls")" "a fase 2 (critica) e a fase 3 (final) rodaram a suite"
+  assert_eq "" "$(test_args_line "$d" 1)" "a fase critica rodou sem escopo"
+  assert_contains "$d/out.log" "mudanca critica na fase: database/migrations/" "o log nomeia o arquivo critico"
+fi
+
+# 69. A fase pode DECLARAR que quer a suite inteira. Escalada, nunca o contrario.
+if case_enabled gate2-declarado; then
+  header "69. fase que declara 'Suite: completa' roda a suite inteira"
+  CASE_PHASES="$PHASES_FIXTURE_DECLARED"
+  d=$(new_case gate2-declarado)
+  unset CASE_PHASES
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/pytest")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 2 "$(cat "$d/state/test_calls")" "a fase declarada e a final rodaram a suite"
+  assert_contains "$d/out.log" "a fase declara 'Suite: completa'" "o log cita a declaracao da fase"
+fi
+
+# 70. Runner que nao aceita caminho (nome desconhecido, go, cargo) -> suite
+#     completa. Fail-safe: escopo duvidoso vira suite inteira, nunca menos teste.
+if case_enabled gate2-runner-cego; then
+  header "70. runner que nao aceita escopo cai na suite completa"
+  CASE_PHASES="$PHASES_FIXTURE_3"
+  d=$(new_case gate2-runner-cego)
+  unset CASE_PHASES
+  rc=$(run_ralph "$d" scoped-tests --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 2 "$(cat "$d/state/test_calls")" "fase 2 e fase 3 rodaram a suite"
+  assert_eq "" "$(test_args_line "$d" 1)" "nenhum caminho foi anexado ao runner cego"
+  assert_contains "$d/out.log" "nao aceita escopo por caminho" "o log explica a queda para suite completa"
+fi
+
+# 71. Sem gate 3, o gate 2 e a unica prova mecanica: nao escopa e nao pula.
+if case_enabled gate2-sem-verify; then
+  header "71. --no-verify mantem a suite completa em toda fase"
+  CASE_PHASES="$PHASES_FIXTURE_3"
+  d=$(new_case gate2-sem-verify)
+  unset CASE_PHASES
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/pytest" --no-verify)
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 3 "$(cat "$d/state/test_calls")" "a suite rodou em toda fase (1 por fase)"
+  assert_contains "$d/out.log" "gate 3 desligado" "o log justifica a suite completa"
+fi
+
+# 72. --full-suite restaura o comportamento anterior integralmente.
+if case_enabled gate2-full-suite; then
+  header "72. --full-suite roda a suite completa em toda fase"
+  CASE_PHASES="$PHASES_FIXTURE_3"
+  d=$(new_case gate2-full-suite)
+  unset CASE_PHASES
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/pytest" --full-suite)
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 3 "$(cat "$d/state/test_calls")" "1 execucao por fase"
+  assert_contains "$d/out.log" "suite completa em toda fase" "o modo aparece no log"
+  assert_not_contains "$d/out.log" "Gate 2 — nao executado" "nenhuma fase pulou o gate 2"
+fi
+
+# 73. O prompt de implementacao nao manda mais rodar a suite completa.
+if case_enabled prompt-sem-suite; then
+  header "73. prompt manda rodar so os testes da fase"
+  d=$(new_case prompt-sem-suite)
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/pytest")
+  assert_eq 0 "$rc" "exit 0"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-1.txt" "NAO rode a suite completa" "o prompt proibe a suite completa"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-1.txt" "so no fim da spec" "o prompt diz quem roda a suite e quando"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-1.txt" "Nao invente teste para ter o que" "o prompt corta o teste de fachada"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 3 com prova: DONE nu reprova; `Tela:` exige captura feita pelo ralph
+# ---------------------------------------------------------------------------
+PHASES_FIXTURE_UI='# Test Project — Project Phases
+
+## Phase 1: Tela
+
+- [ ] **Task:** cria o arquivo A
+  - **Acceptance criteria:**
+    - o arquivo existe
+  Tela: /admin | .fi-header, [data-x="y"] | | claro
+- [ ] **Task:** cria o arquivo B
+  - **Acceptance criteria:**
+    - o arquivo existe
+'
+
+if case_enabled verify-bare-done; then
+  header "G3-A. verificador responde DONE sem evidencia -> gate 3 vermelho por protocolo"
+  d=$(new_case verify-bare-done)
+  rc=$(run_ralph "$d" verify-bare-done --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --no-repair)
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "DONE sem evidencia" "a causa nomeia a falta de prova"
+  assert_eq 1 "$(commits "$d")" "nenhum commit de fase"
+  assert_contains "$d/repo/.phases/prompts/phase-01.verify-1.txt" "Voce NAO executa comandos" "o prompt do verificador nao promete o que a ferramenta proibe"
+  assert_contains "$d/repo/.phases/prompts/phase-01.verify-1.txt" "DONE — <evidencia" "o contrato de saida pede evidencia"
+fi
+
+if case_enabled ui-shot-missing; then
+  header "G3-B. fase com 'Tela:' e sem comando de captura -> reprova fail-closed"
+  d=$(CASE_PHASES="$PHASES_FIXTURE_UI" new_case ui-shot-missing)
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --no-repair)
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "RALPH_UI_SHOT_CMD" "a causa aponta o comando ausente"
+  assert_eq 0 "$(cat "$d/state/verify_calls" 2> /dev/null || echo 0)" "verificador nem roda sem a prova"
+fi
+
+if case_enabled ui-shot-ok; then
+  header "G3-C. captura feita pelo ralph vira evidencia do verificador"
+  d=$(CASE_PHASES="$PHASES_FIXTURE_UI" new_case ui-shot-ok)
+  cat > "$d/shot.sh" <<'SHOT'
+#!/usr/bin/env bash
+echo "$1|$2|$3|$4" >> "${MOCK_STATE}/shot_args"
+printf 'PNG-FAKE' > "$2"
+SHOT
+  chmod +x "$d/shot.sh"
+  rc=$(CASE_UI_SHOT_CMD="$d/shot.sh" run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 0 "$rc" "exit 0"
+  test -s "$d/repo/.phases/evidence/phase-01/task-1.png" && ok "captura gravada em .phases/evidence/<fase>/task-1.png" || bad "captura gravada em .phases/evidence/<fase>/task-1.png"
+  test -e "$d/repo/.phases/evidence/phase-01/task-2.png" && bad "task sem 'Tela:' nao e fotografada" || ok "task sem 'Tela:' nao e fotografada"
+  assert_contains "$d/state/shot_args" '/admin|' "o comando recebe a rota"
+  assert_contains "$d/state/shot_args" '|.fi-header, [data-x="y"]|claro' "o comando recebe os seletores e o tema (4o campo)"
+  assert_contains "$d/repo/.phases/prompts/phase-01.verify-1.txt" "(tema: claro)" "o verificador sabe em que tema a captura foi feita"
+  assert_contains "$d/repo/.phases/prompts/phase-01.verify-1.txt" "Evidencia visual" "o verificador recebe a secao de evidencia"
+  assert_contains "$d/repo/.phases/prompts/phase-01.verify-1.txt" "evidence/phase-01/task-1.png" "o verificador recebe o caminho da captura"
+fi
+
+if case_enabled ui-shot-autodetect; then
+  header "G3-C2. sem RALPH_UI_SHOT_CMD, scripts/ralph-ui-shot.sh do repo e o comando de captura"
+  d=$(CASE_PHASES="$PHASES_FIXTURE_UI" new_case ui-shot-autodetect)
+  mkdir -p "$d/repo/scripts"
+  printf '#!/usr/bin/env bash\nprintf PNG > "$2"\n' > "$d/repo/scripts/ralph-ui-shot.sh"
+  git -C "$d/repo" add -A && git -C "$d/repo" commit -q -m "chore: shot script"
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 0 "$rc" "exit 0"
+  assert_contains "$d/out.log" "comando de captura detectado: bash scripts/ralph-ui-shot.sh" "o ralph anuncia o comando detectado"
+  test -s "$d/repo/.phases/evidence/phase-01/task-1.png" && ok "captura gravada pelo script do repo" || bad "captura gravada pelo script do repo"
+fi
+
+if case_enabled ui-shot-fails; then
+  header "G3-D. captura falha (seletor ausente / pagina nao renderiza) -> fase reprova"
+  d=$(CASE_PHASES="$PHASES_FIXTURE_UI" new_case ui-shot-fails)
+  printf '#!/usr/bin/env bash\necho "seletor .fi-header nao encontrado" >&2\nexit 3\n' > "$d/shot.sh"
+  chmod +x "$d/shot.sh"
+  rc=$(CASE_UI_SHOT_CMD="$d/shot.sh" run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --no-repair)
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "Evidencia visual da task 1 falhou" "a causa nomeia a task e a captura"
+  assert_contains "$d/out.log" "seletor .fi-header nao encontrado" "a saida do comando de captura vai para a causa"
+fi
+
+if case_enabled ui-verify-off; then
+  header "G3-E. --no-ui-verify desliga a prova visual de proposito"
+  d=$(CASE_PHASES="$PHASES_FIXTURE_UI" new_case ui-verify-off)
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --no-ui-verify)
+  assert_eq 0 "$rc" "exit 0"
+  assert_contains "$d/out.log" "Evidencia visual DESLIGADA" "o desligamento e anunciado, nao silencioso"
+fi
+
+if case_enabled checkbox-sync; then
+  header "G3-F. fase verde -> ralph marca [x] no documento de entrada (mecanico, nao o engine)"
+  d=$(new_case checkbox-sync)
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 3 "$(grep -c -- '- \[x\]' "$d/repo/.spec/init/project-phases.md")" "as 3 tasks do documento marcadas"
+  assert_eq 0 "$(grep -c -- '- \[ \]' "$d/repo/.spec/init/project-phases.md")" "nenhum checkbox aberto sobrou"
+  assert_eq 0 "$(git -C "$d/repo" status --porcelain | wc -l)" "a marcacao entrou no commit da fase (arvore limpa)"
 fi
 
 # ---------------------------------------------------------------------------

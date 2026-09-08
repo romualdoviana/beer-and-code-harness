@@ -49,6 +49,8 @@ Format constraints (ralph's `split_phases` dictates them):
 
 - Phase headings MUST match `^## Phase N: <title>` — colon separator, numbered contiguously from 1. Same machine contract as `.spec/init/project-phases.md`; `ralph.sh` preflight rejects any deviation. These are the ONLY level-2 headings allowed in the file — any other `## ` heading truncates the phase before it. `# ` title line and `### `/deeper headings are safe.
 - Phase grouping mirrors the `## Execution Phases` table exactly: same task-to-phase assignment, same order; parallel-safe tasks share a phase, sequential dependencies get later phases. `light` tier → single `## Phase 1` with all tasks.
+- **The last phase is the spec's suite gate.** `ralph.sh` runs the FULL project suite only on the last pending phase of the document; intermediate phases are charged just the tests they touched (and nothing at all when they touched none). So order phases such that the feature is functionally complete by the last one — never leave a phase after it whose only job is "run the tests".
+- **`Suite: completa` — escalation line, optional.** A phase whose diff will reach schema/migrations, dependency manifests, global config, bootstrap/DI, container images, or CI gets the literal line `Suite: completa` in its preamble; `ralph.sh` then runs the whole suite on that phase instead of the scoped set. `ralph.sh` already auto-detects the common critical paths — this line is for the cases only the plan knows (a behavior change with wide blast radius, a shared contract other modules consume). There is no line that asks for LESS: a phase may escalate rigor, never lower it.
 - Each phase body starts with a context preamble (each ralph phase runs in a fresh engine session — the phase must be self-contained):
 
   ```
@@ -66,10 +68,19 @@ Format constraints (ralph's `split_phases` dictates them):
         Cobre: RF-XX, UI-XX
         Acceptance criteria: <condição verificável contra o código>
         Testes: `path/to/test.ext` — <test case>   |   none — <motivo>
+        Tela: <rota> | <seletor CSS>[, <seletor>...] | <png-alvo> | <tema>   (UI tasks only; tema optional: claro)
   ```
+
+- **`Tela:` is mandatory on every task that changes what a user sees** (view, template, component, stylesheet, layout, theme token, navigation, page shell). `ralph.sh` photographs that route itself before the independent verifier runs, fails the phase if the page does not render or a listed selector is missing, and hands the capture plus the target PNG to the verifier — the only evidence that does not come from the implementer's own report. Rules:
+  - `<rota>` is the path the user opens (`/admin`, `/admin/campanhas/1`); `<seletores>` are 1–4 CSS selectors that only exist when the task is really done (`[data-tc="health-strip"]`, `.fi-header`), never generic ones (`body`, `div`); `<png-alvo>` is the exported artboard/mockup the SPEC points to (`.spec/features/[slug]/artboards/NN-<tela>.png`) — omit only when the SPEC has no visual reference for that screen, and say so in the task.
+  - `<tema>` (4th field, optional) selects the capture theme (`claro` / `light`); omit for the default dark capture. A route that needs an existing record (`/admin/x/{id}`) must cite a concrete id backed by a demo fixture task planned earlier in the same PHASES — a fresh environment returns 404 and the gate fails closed. A screen with no artboard of its own cites the PNG of the screen it follows and says so in the task text; the verifier then compares only tokens, typography, table header, badges and column layout — never the drawing's content or tabs.
+  - A UI task without `Tela:` is a planning defect: grep-shaped acceptance criteria ("class exists", "CSS rule declared", "`<svg>` present in HTML") prove structure, not the screen — that is exactly how a "complete" phase ships an unstyled widget or a header twice the height of the mockup.
+  - Acceptance criteria of UI tasks describe what the capture must show (element present, position, state label, token applied) and, when a derived artifact exists (compiled CSS/JS, bundle, versioned asset), state explicitly that the artifact is regenerated and in sync with its source — a stale compiled file is the most common false-complete in frontend phases.
+  - Phases containing `Tela:` tasks get `Suite: completa`: browser-visible regressions rarely live in the tests the phase touched.
 
   Sub-lines indented under the checkbox (no leading `-`), so the checkbox count equals the task count. Content copied from the PLAN task, condensed — never diverging. `Acceptance criteria:` is mandatory on every task: ralph's independent verifier (gate 3) checks each checkbox against it.
 - `Testes:` is mandatory as a FIELD, not as a test. Emit `Testes: none — <motivo>` whenever the task fails the test triage below; gate 3 then verifies that task by code inspection against its acceptance criteria instead of demanding a test file. A test listed here is a commitment ralph will enforce — never list one to look thorough.
+- **A phase where every task carries `Testes: none` is a correct outcome, not a gap.** Mechanical phases (wiring, config, rename, view, DI binding) have no branch to protect, and `ralph.sh` does not ask them for a green suite: gate 3 verifies them by inspection. Planning a test there only to give the phase "something green" produces exactly the noise this triage exists to prevent — a permanent file in the repo that no code change can turn red.
 - Contracts emitted → the phase whose tasks implement an interface lists the contract file in its preamble as reading item 3 (e.g. `.spec/features/[slug]/openapi.yaml`).
 - Self-check before returning: `grep -Ec '^## Phase [0-9]+: '` equals the Execution Phases row count (or 1 for light); `grep -E '^## ' | grep -Ev '^## Phase [0-9]+: '` returns nothing; `grep -c '^- \[ \]'` equals the PLAN task count.
 
@@ -80,6 +91,7 @@ Format constraints (ralph's `split_phases` dictates them):
 - Distinguish confirmed facts from assumptions (`[UNVERIFIED]` marker) and inferred behavior.
 - **Test triage — a test is planned per BEHAVIOR, never per task.** Kill criterion: name, in one sentence, the code change that would turn the test red. Can't name it → don't plan it. Plan a test only for: business rule with a branch (calculation, value, state transition, eligibility); authorization (who may and who may **not**); edge contract (endpoint request → status + payload, job/queue, webhook, command, broadcast event); data invariant or destructive migration; a fixed bug (regression test — always mandatory); ONE happy-path E2E per feature. Never plan a test for: getters/setters, casts, declared ORM relations, enums, "class/file/route exists", implementation mirrors with everything mocked, cosmetic label/copy substrings, config defaults, or the same branch re-asserted in a second layer with no new risk. Mechanical tasks (wiring, config, rename, view, DI binding) → `Testes: none — <motivo>`, which is a correct outcome, not a gap.
 - New test files planned in a phase must not exceed the number of new behaviors it introduces. Uncovered behavior that already ships in the codebase → dedicated testing task; task that merely changes plumbing → no test.
+- **Never plan a test to satisfy a gate.** `ralph.sh` charges an intermediate phase only for the tests it touched, and skips the suite entirely on a phase that touched none — so a phase has nothing to "prove green" and needs no filler test. The full suite is charged once, on the last phase. A test exists to catch a specific future regression, never to make a phase look complete.
 - **Architecture is source of truth over description text**: when SPEC/task intent contradicts the resolved architecture (code + AGENTS tree), plan toward the architecture and raise a QUESTION under `## Open Questions` naming both sides — never plan the contradicting version silently.
 - Architecture references provided → PLAN MUST name the source files and preserve the documented layering/delegation rules inside task descriptions. Missing → explicit warning in `## Open Questions`; never present the plan as architecture-validated.
 - One targeted question max when a blocking ambiguity prevents a reliable plan — return it instead of a partial plan.
@@ -181,10 +193,20 @@ Antes de implementar, leia:
       ...
 
 ## Phase 2: <phase title>
-...
+
+Suite: completa
+
+Antes de implementar, leia:
+1. `.spec/features/[slug]/SPEC.md` — requisitos RIGID que esta fase cobre
+2. `.spec/features/[slug]/PLAN.md` — decomposição completa, dependências e riscos
+
+- [ ] T03 — <task title>
+      ...
 ```
 
 Every checkbox carries `Acceptance criteria:` — ralph's independent verifier (gate 3) checks each task against them.
+
+`Suite: completa` appears only on phases whose blast radius exceeds their own tests (schema, dependencies, global config, bootstrap, CI, a shared contract). Omit it everywhere else: intermediate phases run only the tests they touched, and the last phase runs the whole suite anyway.
 
 ## Output (summary only — never inline file content)
 

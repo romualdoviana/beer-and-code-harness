@@ -137,6 +137,9 @@ The self-checks in step 5 enforce this format mechanically.
 - **Business-logic tasks** (rules, calculations, state transitions, permissions, validations, workflows) **must** specify the **automated feature tests** to generate. Tests **primarily assert business rules** — the limits, states, and edge cases from the stories and schema.
 - **Frontend-only tasks** (building a screen/component with no business logic) **do not require tests**, but **must** have acceptance criteria that can be validated (matches design reference, renders required elements/states, responsive/interaction behavior), plus a **Design ref** pointing at the relevant `.spec/init/design/` artifact.
 - Keep every task traceable to a story (`US-x.y`), a schema table, a workflow, or a design artifact. No invented scope.
+- **Never add a test to give a phase something green.** `ralph.sh` charges an intermediate phase only for the tests it touched, and runs the full project suite once, on the last pending phase of the document. A phase made of mechanical tasks legitimately ships with no test at all; gate 3 verifies it by reading the code against its acceptance criteria.
+- **Order phases so the build is functionally complete at the last one** — that is where the whole suite runs. Never append a phase whose only job is "run the tests".
+- **`Suite: completa`** — put this literal line in a phase's body when its blast radius exceeds its own tests (schema/migrations, dependency manifests, global config, bootstrap/DI, container images, CI). `ralph.sh` then runs the whole suite on that phase. There is no line that asks for less.
 
 ### 4. Write the document
 

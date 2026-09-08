@@ -132,7 +132,7 @@ Key characteristics:
 
 - **Root cause, never symptom.** No root cause → no patch and no `PHASES.md`. The command reports the hypotheses and what data is missing.
 - **Red test first.** The test command is resolved with the exact same rules `ralph.sh` uses, so what the fix runs and what gate 2 runs are the same command. No test runner in the project → loud warning and manually verifiable ACs instead.
-- **The red test and the fix live in the same phase.** `ralph.sh` gate 2 runs the whole suite; a phase ending red would burn all its fix cycles and abort the run. Phase 1 is `reproduce and fix`; phase 2+ cover regression and edge cases. No phase ever ends with a red suite.
+- **The red test and the fix live in the same phase.** `ralph.sh` gate 2 runs the tests the phase touched (and the whole suite on the last one); a phase ending red would burn all its fix cycles and abort the run. Phase 1 is `reproduce and fix`; phase 2+ cover regression and edge cases. No phase ever ends with a red suite.
 - **Unreproduced bug stops at a checkpoint.** The developer chooses: stop and gather data, or proceed speculatively — in which case every artifact carries the `[NAO REPRODUZIDO]` marker and the ACs are explicitly not backed by a failing test.
 - **Non-blocking architecture gate**, unlike `/plan`: a defect is reactive and often urgent, so a missing `AGENTS.md` produces a warning and an `architecture_reference_status: missing` flag, never a block.
 - **Closes by registering the learning.** The root cause is classified one level above this instance, scoped (global vs `-project`), and proposed as a single `| bug | root cause | prevention |` line in English for the right agent file — written only after explicit confirmation.
@@ -199,12 +199,32 @@ With no argument, the input resolves in this order: `.spec/init/project-phases.m
 |---|---|---|
 | 0 | Did the engine actually finish? | claude: `is_error` in the result JSON; codex: exit code |
 | 1 | Did the session write code? | Tree signature before/after. **A signal, not a verdict** — an already-implemented phase makes the engine (correctly) write nothing; the signal feeds the fix-cycle cause |
-| 2 | Does the test suite pass? | Run **by ralph itself**, outside the agent session — the agent cannot "fake green" |
+| 2 | Do the project's tests pass? | Run **by ralph itself**, outside the agent session — the agent cannot "fake green". The **scope varies per phase**: see below |
 | 3 | Is each task actually in the code? | Independent read-only verifier session that emits `TASK <n>: DONE/INCOMPLETE` per task. Runs on every phase by default (`RALPH_VERIFY=always`); on the claude engine it uses `sonnet` |
 
 Any red gate → **fix cycle**: a fresh session receives the full phase + the real failure cause (never a generic "tests failed"). Default: 3 cycles per phase.
 
 Green gates with a clean tree → the phase was already implemented at HEAD: marked done, no commit.
+
+### Gate 2 scope — the full suite is the SPEC's gate, not each phase's
+
+Running the whole suite at the end of every phase costs minutes per phase, but the worse cost is the incentive: a mechanical phase (wiring, config, rename, view) that has to "close gate 2" pushes the engine to invent a test — a getter, a cast, "the class exists" — just to have something green in its own scope. A useless test is permanent noise in the repository.
+
+Per phase, gate 2 resolves one of three scopes, first rule that matches:
+
+| # | Condition | Scope |
+|---|---|---|
+| 1 | `--full-suite` / `RALPH_TEST_SCOPE=full` | whole suite |
+| 2 | **Last pending phase** of the document (the end of the spec) | whole suite |
+| 3 | Gate 3 disabled (`--no-verify`): gate 2 is the only mechanical proof left | whole suite |
+| 4 | The phase declares `Suite: completa` in its own text | whole suite |
+| 5 | The phase's diff touches a critical path (migrations, dependency manifests, config, bootstrap, images, CI — `RALPH_CRITICAL_PATHS`) | whole suite |
+| 6 | A test file was changed in the tree or named in the phase's `Testes:` field, and the runner accepts paths | only those tests |
+| 7 | None of the above | not run — gate 3 alone judges the phase |
+
+Fail-safe on every edge: a runner that does not take a path (`go`, `cargo`, an unknown command, a compound command) falls back to the whole suite, never to a scoped run. A phase may **escalate** rigor (`Suite: completa`), never lower it. And gate 3 — independent task-by-task verification — still runs in full on every phase: scope shortens gate 2, never the proof that the phase was done.
+
+`--full-suite` restores the previous behavior (whole suite on every phase).
 
 ### Surgical repair (before the cycle)
 
@@ -216,7 +236,7 @@ A fix cycle is expensive: a fresh session with the context preamble, the whole p
 
 **Fail-closed.** It only repairs what it can localize. Straight to the full cycle: a red gate 0 (the engine died), test output with no localizable failure, a failure spread across more than `RALPH_REPAIR_MAX_FILES` files, more than `RALPH_REPAIR_MAX_TASKS` incomplete tasks, and a gate 3 failed on verifier **protocol** (which is not missing code). The model can also bail out on its own by answering `REPAIR_ABORT: <reason>` — bailing out cheaply beats a blind patch, and ralph escalates immediately instead of spending the next round.
 
-**Revalidation.** Between rounds gate 3 runs **scoped**: only the tasks that were `INCOMPLETE`, at their original positions (nothing is renumbered). An `INCOMPLETE` outside the scope fails the gate — that is the repair having broken something that already stood. Scope green **does not close the phase**: the full chain (whole suite + verification of every task) runs before any commit. A repair never commits.
+**Revalidation.** Between rounds gate 3 runs **scoped**: only the tasks that were `INCOMPLETE`, at their original positions (nothing is renumbered). An `INCOMPLETE` outside the scope fails the gate — that is the repair having broken something that already stood. Scope green **does not close the phase**: the full chain (gate 2 at the phase's scope + verification of every task) runs before any commit. A repair never commits.
 
 `--no-repair` (or `--max-repairs 0`) turns it off and restores the old behavior: red gate → cycle.
 
@@ -250,6 +270,7 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `--max-repairs N` | Surgical repairs per cycle (default: 2; `0` disables) |
 | `--no-repair` | Disables surgical repair |
 | `--test-cmd "<cmd>"` | Project test command (gate 2) |
+| `--full-suite` | Gate 2 runs the whole suite on every phase (previous behavior) |
 | `--baseline` | Measures what is already red at HEAD and makes gate 2 charge only the **delta** (default: off) |
 | `--no-verify` | Disables gate 3 |
 | `--no-env-guard` | Disables environment-down detection: every failure is a red phase again |
@@ -259,6 +280,9 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | Variable | Effect |
 |---|---|
 | `RALPH_TEST_CMD` | Test command (gate 2) |
+| `RALPH_TEST_SCOPE` | Gate 2 scope: `auto` (default) \| `full` |
+| `RALPH_CRITICAL_PATHS` | ERE for critical paths: a phase whose diff matches runs the whole suite |
+| `RALPH_TEST_FILE_RE` | ERE that recognizes a test file |
 | `RALPH_BASELINE` | `on` enables the gate 2 baseline (same as `--baseline`; default: `off`) |
 | `RALPH_VERIFY` | Gate 3: `always` (default) \| `auto` (saves tokens: only when gate 2's verdict isn't enough) \| `off` |
 | `RALPH_VERIFY_MODEL` | Verifier model (claude default: `sonnet`) |

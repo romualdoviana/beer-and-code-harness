@@ -41,10 +41,16 @@
 #                            em fase cujo teste-alvo ja esta commitado vermelho,
 #                            porque o perdao seria permanente (RALPH_BASELINE=on)
 #   --no-verify              desliga o gate 3 (equivale a RALPH_VERIFY=off)
+#   --ui-shot-cmd "<cmd>"    comando que fotografa uma tela (evidencia visual
+#                            do gate 3; ver RALPH_UI_SHOT_CMD)
+#   --no-ui-verify           desliga a evidencia visual (RALPH_UI_VERIFY=off)
 #   --no-env-guard           desliga a deteccao de ambiente fora do ar no gate 2
 #                            (RALPH_ENV_GUARD=off): toda falha volta a ser
 #                            vermelho da fase
 #   --test-cmd "<cmd>"       comando de teste do projeto (gate 2)
+#   --full-suite             gate 2 roda a suite COMPLETA em toda fase
+#                            (comportamento anterior; equivale a
+#                            RALPH_TEST_SCOPE=full)
 #   --verbose                streama o progresso do engine no terminal
 #   --quiet                  so o placar do ralph no terminal (DEFAULT)
 #   --ui                     forca o painel ANSI (equivale a RALPH_UI=panel)
@@ -72,7 +78,8 @@
 #   1. a sessao escreveu codigo? SINAL, nao veredito — uma fase ja implementada
 #      faz o engine (corretamente) nao escrever nada. Alimenta a causa do ciclo
 #      de correcao quando um gate posterior reprova.
-#   2. suite de testes do projeto, rodada PELO ralph (fora da sessao do agente)
+#   2. testes do projeto, rodados PELO ralph (fora da sessao do agente). O
+#      ESCOPO varia por fase — veja "Escopo do gate 2" abaixo
 #   3. sessao verificadora independente, read-only, task a task — o gate final,
 #      roda em toda fase (RALPH_VERIFY=always, default). RALPH_VERIFY=auto
 #      economiza: so roda quando o veredito do gate 2 nao basta — sessao que
@@ -80,6 +87,28 @@
 #      gate 2 desabilitado. --no-verify / RALPH_VERIFY=off desliga. No engine
 #      claude o verificador usa RALPH_VERIFY_MODEL (default: sonnet) — e
 #      leitura + checklist, nao escreve codigo.
+#
+# Escopo do gate 2 — a suite inteira e o gate da SPEC, nao o de cada fase.
+#   Rodar a suite completa ao fim de toda fase custa minutos por fase, e o custo
+#   pior nem e o tempo: e o incentivo. Uma fase mecanica (fiacao, config,
+#   rename, view) que precisa "fechar o gate 2" empurra o engine a inventar
+#   teste — getter, cast, "a classe existe" — so para ter algo verde no proprio
+#   escopo. Teste inutil e ruido permanente no repositorio.
+#   Por fase o gate 2 resolve UM entre tres escopos, primeira regra que casar:
+#     1. modo suite completa (--full-suite / RALPH_TEST_SCOPE=full)  -> completo
+#     2. ULTIMA fase pendente do documento (fim da spec)             -> completo
+#     3. gate 3 desligado (--no-verify): o gate 2 vira a unica prova -> completo
+#     4. a fase declara `Suite: completa` no proprio texto           -> completo
+#     5. o diff da fase toca caminho critico (migration, schema,
+#        dependencias, config, bootstrap, CI — RALPH_CRITICAL_PATHS) -> completo
+#     6. ha arquivo de teste alterado na arvore ou citado no campo
+#        `Testes:` da fase, e o runner aceita escopo                 -> escopado
+#     7. nada disso                                                  -> pulado
+#   Fail-safe em toda borda: runner que nao aceita caminho (go, cargo, comando
+#   desconhecido) cai em completo, nunca em escopado. A fase pode DECLARAR mais
+#   rigor (`Suite: completa`), jamais menos. E o gate 3 — verificacao
+#   independente task a task — continua rodando inteiro em toda fase: escopo
+#   encurta o gate 2, nunca a prova de que a fase foi feita.
 #
 # Conserto cirurgico (repair) — acionamento independente entre o gate vermelho
 # e o ciclo de correcao:
@@ -226,8 +255,41 @@
 #
 # Variaveis de ambiente:
 #   RALPH_TEST_CMD           comando de teste (gate 2); --test-cmd tem prioridade
+#   RALPH_TEST_SCOPE         escopo do gate 2: auto (default) | full
+#   RALPH_CRITICAL_PATHS     regex ERE de caminho critico: diff da fase que
+#                            casa forca a suite completa naquela fase
+#   RALPH_TEST_FILE_RE       regex ERE que reconhece arquivo de teste
 #   RALPH_VERIFY             gate 3: always (default) | auto | off
 #   RALPH_VERIFY_MODEL       modelo do verificador (default: sonnet no claude)
+#   RALPH_VERIFY_EVIDENCE    required (default) | optional. Com required, um
+#                            `TASK n: DONE` sem `— <evidencia>` (arquivo:linha
+#                            ou caminho .png) reprova o gate 3 por protocolo:
+#                            veredito sem prova nao e veredito.
+#   RALPH_UI_VERIFY          evidencia visual: auto (default) | off. Em auto,
+#                            toda task com o campo `Tela:` exige que o RALPH
+#                            fotografe a rota antes do verificador julgar —
+#                            fase com `Tela:` e sem RALPH_UI_SHOT_CMD reprova
+#                            (fail-closed). off desliga de proposito.
+#   RALPH_UI_SHOT_CMD        comando de captura, chamado pelo ralph (nunca
+#                            pelo engine). Vazio => autodetecta no repo
+#                            scripts/ralph-ui-shot.{mjs,js,sh,py}. Chamada:
+#                              <cmd> <rota> <saida.png> [<seletores CSS>] [<tema>]
+#                            Deve sair 0 e gravar o PNG; deve sair != 0 se um
+#                            seletor obrigatorio nao existir na pagina. A
+#                            captura vai para .phases/evidence/<fase>/task-<n>.png
+#                            e o verificador compara com o PNG-alvo da task.
+#   RALPH_UI_SHOT_TIMEOUT    timeout da captura em segundos (default: 120)
+#
+# Campo `Tela:` (opcional, por task, dentro do bloco do checkbox):
+#   Tela: <rota> | <seletor CSS>[, <seletor>...] | <png-alvo> | <tema>
+#   ex.: Tela: /admin | [data-tc="health-strip"], .fi-header | .spec/features/x/artboards/01-main.png
+#        Tela: /admin | .fi-header | .spec/features/x/artboards/01-main.png | claro
+#   Rota e seletores sao obrigatorios; o PNG-alvo e opcional (sem ele o
+#   verificador julga so pela captura + seletores); o tema (4o campo) e
+#   opcional e vai ao comando de captura como 4o argumento (ex.: claro/light). O ralph fotografa, o
+#   verificador le a captura E o alvo (Read abre imagem) e decide. A evidencia
+#   nasce fora da sessao do agente: ele nao escreve, nao escolhe e nao edita
+#   o arquivo que o julga.
 #   RALPH_MODEL              modelo das sessoes de implementacao/correcao
 #                            (default: vazio = o da CLI do engine)
 #   RALPH_ENV_GUARD          on (default) | off — deteccao de ambiente caido
@@ -240,6 +302,12 @@
 #   RALPH_REPAIR             conserto cirurgico: on (default) | off
 #   RALPH_MAX_REPAIRS        consertos por ciclo (default: 2; 0 desliga)
 #   RALPH_REPAIR_MODEL       modelo do conserto (default: opus no claude)
+#   RALPH_CAVEMAN            nivel do plugin caveman nas sessoes claude que
+#                            escrevem codigo — implementacao e conserto
+#                            (default: ultra; `off` desliga). O verificador
+#                            fica sempre no formato normal: o output dele e
+#                            contrato de maquina. Sem o plugin instalado a
+#                            variavel e inerte.
 #   RALPH_REPAIR_MAX_FILES   acima de N arquivos distintos na assinatura da
 #                            falha, a falha e larga demais para conserto
 #                            cirurgico e vai direto ao ciclo (default: 5)
@@ -291,7 +359,7 @@ INPUT_FILE=""
 FROM_PHASE=0
 KEEP_GOING=false
 TEST_CMD_FLAG=""
-MAX_CYCLES="${RALPH_MAX_CYCLES:-3}"
+MAX_CYCLES="${RALPH_MAX_CYCLES:-5}"
 VERIFY_MODE="${RALPH_VERIFY:-always}"
 VERIFY_MODEL=""
 REPAIR_MODE="${RALPH_REPAIR:-on}"
@@ -327,11 +395,54 @@ ENV_GUARD=true
 ENV_RECOVER_TIMEOUT="${RALPH_ENV_RECOVER_TIMEOUT:-90}"
 GATE2_INFRA=0
 INFRA_RETRIED=0
+# Escopo do gate 2 (ver "Escopo do gate 2" no cabecalho).
+#   TEST_SCOPE_MODE   auto = resolve por fase | full = suite completa sempre
+#   GATE2_SCOPE       resultado da resolucao desta execucao: full|scoped|skip
+#   GATE2_SCOPE_CMD   comando efetivamente executado pelo gate
+#   GATE2_SCOPE_WHY   frase curta que explica a escolha (vai para o log)
+#   PHASE_IS_FINAL    1 na ultima fase pendente do documento — o fim da spec
+TEST_SCOPE_MODE="${RALPH_TEST_SCOPE:-auto}"
+GATE2_SCOPE=""
+GATE2_SCOPE_CMD=""
+GATE2_SCOPE_WHY=""
+# Fase corrente, para o gate 2 ler os testes que o documento declara.
+GATE2_PHASE_FILE=""
+PHASE_IS_FINAL=0
+FINAL_PHASE_FILE=""
+# Caminho critico: mudanca que pode quebrar teste que a fase nunca olhou —
+# schema, dependencia, config global, bootstrap, imagem, pipeline. Escopo ali
+# nao protege ninguem, entao a suite inteira roda na propria fase.
+CRITICAL_PATHS_RE="${RALPH_CRITICAL_PATHS:-(^|/)(database/migrations|migrations|db/migrate|prisma)/|(^|/)(composer\.(json|lock)|package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|go\.(mod|sum)|Cargo\.(toml|lock)|pyproject\.toml|Gemfile(\.lock)?)$|(^|/)(config|bootstrap)/|(^|/)\.env\.example$|(^|/)(Dockerfile|docker-compose\.ya?ml)$|(^|/)\.github/workflows/}"
+# O que conta como arquivo de teste, em qualquer stack.
+TEST_FILE_RE="${RALPH_TEST_FILE_RE:-(^|/)(tests?|spec|specs|__tests__)/|(Test|Spec)\.[A-Za-z0-9]+$|_test\.[A-Za-z0-9]+$|\.(test|spec)\.[A-Za-z0-9]+$}"
+# Gate 3 com prova: DONE sem evidencia e "linguagem confiante", nao veredito.
+VERIFY_EVIDENCE_MODE="${RALPH_VERIFY_EVIDENCE:-required}"
+# Evidencia visual: o ralph fotografa toda task com `Tela:` ANTES do
+# verificador. O agente nunca produz nem toca o arquivo que o julga.
+UI_VERIFY_MODE="${RALPH_UI_VERIFY:-auto}"
+UI_SHOT_CMD="${RALPH_UI_SHOT_CMD:-}"
+UI_SHOT_TIMEOUT="${RALPH_UI_SHOT_TIMEOUT:-120}"
+# Tasks `Tela:` da fase corrente, uma por linha: pos|rota|seletores|alvo.
+# Preenchido pela captura; lido pelo prompt do verificador.
+UI_SCREEN_TASKS=""
 ENV_ABORT=0
 # Desistencia explicita do conserto cirurgico (REPAIR_ABORT) e abortos de fase.
 REPAIR_ABORTED=0
 PHASE_ABORT_REASON=""
 REPAIR_MODEL=""
+# Caveman: o run e headless, ninguem le a prosa do engine. O plugin caveman
+# (se instalado) le CAVEMAN_DEFAULT_MODE no SessionStart, entao o ralph pede o
+# nivel maximo — `ultra` — nas sessoes que ESCREVEM codigo (implementacao e
+# conserto). O verificador fica de fora de proposito: o output dele e contrato
+# de maquina (`TASK <n>: DONE|INCOMPLETE`), ja e minimo, e comprimir prosa la
+# nao economiza nada enquanto arrisca o gate 3. Sem o plugin instalado a
+# variavel e inerte. `off` desliga.
+CAVEMAN_MODE="${RALPH_CAVEMAN:-ultra}"
+# Conteudo de ~/.claude/.caveman-active antes da sessao: o hook do plugin
+# reescreve esse arquivo global com o nivel pedido, e o run headless nao pode
+# arrastar a sessao interativa do dev para ultra.
+CAVEMAN_FLAG_FILE=""
+CAVEMAN_FLAG_BEFORE=""
 REPAIR_MAX_FILES="${RALPH_REPAIR_MAX_FILES:-5}"
 REPAIR_MAX_TASKS="${RALPH_REPAIR_MAX_TASKS:-3}"
 VERBOSE=false
@@ -360,8 +471,12 @@ while [[ $# -gt 0 ]]; do
     --no-baseline) BASELINE_MODE="off"; shift ;;
     --test-cmd)    TEST_CMD_FLAG="$2"; shift 2 ;;
     --test-cmd=*)  TEST_CMD_FLAG="${1#*=}"; shift ;;
+    --full-suite)  TEST_SCOPE_MODE="full"; shift ;;
     --keep-going)  KEEP_GOING=true; shift ;;
     --no-verify)   VERIFY_MODE="off"; shift ;;
+    --ui-shot-cmd) UI_SHOT_CMD="$2"; shift 2 ;;
+    --ui-shot-cmd=*) UI_SHOT_CMD="${1#*=}"; shift ;;
+    --no-ui-verify) UI_VERIFY_MODE="off"; shift ;;
     --no-env-guard) ENV_GUARD=false; shift ;;
     --verbose)     VERBOSE=true; shift ;;
     --quiet)       VERBOSE=false; shift ;;
@@ -388,6 +503,8 @@ PROGRESS_FILE="$PHASES_DIR/.progress"
 STATE_FILE="$PHASES_DIR/state.json"
 EVENTS_FILE="$PHASES_DIR/events.jsonl"
 UI_DIR="$PHASES_DIR/ui"
+# Capturas de tela do gate 3 (evidencia visual): <fase>/task-<n>.png
+EVIDENCE_DIR="$PHASES_DIR/evidence"
 UI_MSG_FILE="$UI_DIR/messages.log"
 # Inferencia por task. Em --attach vai para um arquivo proprio: o pintor do run
 # original continua escrevendo o dele, e dois processos disputando o mesmo
@@ -2448,6 +2565,26 @@ preflight_checks() {
 
   log "Modelos — implementacao: ${IMPL_MODEL:-default da CLI}; verificacao: ${VERIFY_MODEL:-default da CLI}; conserto: ${REPAIR_MODEL:-default da CLI}"
 
+  case "$TEST_SCOPE_MODE" in
+    auto|full) ;;
+    *)
+      fail "Valor invalido para RALPH_TEST_SCOPE: '$TEST_SCOPE_MODE'. Use auto ou full."
+      exit 1
+      ;;
+  esac
+
+  case "$CAVEMAN_MODE" in
+    off|lite|full|ultra|wenyan-lite|wenyan|wenyan-full|wenyan-ultra) ;;
+    *)
+      fail "Valor invalido para RALPH_CAVEMAN: '$CAVEMAN_MODE'. Use off, lite, full, ultra, wenyan-lite, wenyan, wenyan-full ou wenyan-ultra."
+      exit 1
+      ;;
+  esac
+
+  if [[ "$ENGINE" == "claude" && "$CAVEMAN_MODE" != "off" ]]; then
+    log "Caveman — nivel '$CAVEMAN_MODE' nas sessoes de implementacao e conserto (verificador fica no formato normal)"
+  fi
+
   if ! command -v "$ENGINE" &> /dev/null; then
     if [[ "$ENGINE" == "codex" ]]; then
       fail "codex CLI nao encontrado. Instale com: npm install -g @openai/codex"
@@ -2495,7 +2632,9 @@ split_phases() {
   log "Quebrando $INPUT_FILE em fases..."
 
   local new_stamp old_stamp="" progress_backup=""
-  new_stamp="$(basename "$INPUT_FILE")@sha256:$(sha256sum "$INPUT_FILE" | cut -c1-12)"
+  # O stamp ignora o estado dos checkboxes: o ralph marca `[x]` no input ao
+  # fechar cada fase (sync_input_checkboxes) e isso NAO e mudanca do documento.
+  new_stamp="$(basename "$INPUT_FILE")@sha256:$(sed -E 's/^([[:space:]]*- )\[[xX]\]/\1[ ]/' "$INPUT_FILE" | sha256sum | cut -c1-12)"
 
   if [ -f "$MANIFEST" ]; then
     old_stamp=$(sed -n '1s/^# stamp: //p' "$MANIFEST")
@@ -2647,6 +2786,10 @@ PREAMBLE
     echo
     echo "Este e o comando exato usado para validar a fase. Nao use outro runner"
     echo "nem rode os testes por fora dele."
+    echo
+    echo "Durante a fase, rode-o ESCOPADO — passe o caminho do arquivo de teste"
+    echo "(ex: '$TEST_CMD caminho/do/Teste.ext', ou o filtro equivalente do"
+    echo "runner). A suite inteira e cara e o ralph so a roda no fim da spec."
     if [ -n "$SAIL_BIN" ]; then
       echo "O projeto usa Laravel Sail: artisan, composer, php e testes rodam DENTRO"
       echo "do container, via '$SAIL_BIN <cmd>'. Nunca rode essas ferramentas no host."
@@ -2674,11 +2817,12 @@ Para cada item:
    verificacao dela e por inspecao do codigo contra os acceptance criteria
 3. Rode SO os testes daquela task (o runner do projeto aceita caminho ou
    filtro). A suite completa e cara: rodar ela a cada item queima minutos e
-   memoria da maquina — e o ralph a roda por fora de qualquer jeito
+   memoria da maquina
 4. Se um teste falhar, corrija o codigo e rode novamente
 5. So passe pro proximo item quando os testes DA TASK passarem
-6. Ao terminar todos os itens, rode a suite completa UMA vez para confirmar que
-   nada mais quebrou
+6. NAO rode a suite completa. Quem a roda e o ralph, e so no fim da spec —
+   a ultima fase do documento e o gate da suite inteira. No meio do caminho o
+   ralph cobra apenas os testes que esta fase alterou
 
 ## Regras obrigatorias
 - Use SEMPRE os comandos, o runner de testes e as ferramentas ja adotados pelo
@@ -2692,9 +2836,12 @@ Para cada item:
 - Nomes de classes, arquivos e metodos devem seguir EXATAMENTE o que esta descrito
 - Nao pule nenhum item marcado com [ ]
 - Nao pare, reinicie nem derrube containers/servicos do ambiente para "liberar
-  recurso": o gate 2 roda a suite depois de voce e um servico fora do ar
+  recurso": o gate 2 roda os testes depois de voce e um servico fora do ar
   interrompe o run inteiro
-- Ao final, valide que toda a suite de testes da fase passa
+- Fase inteira com `Testes: none` em todas as tasks e resultado CORRETO, nao
+  lacuna: quer dizer que a fase e mecanica. Nao invente teste para ter o que
+  mostrar
+- Ao final, valide que os testes DESTA fase passam
 
 ## Fase a implementar
 TASK
@@ -2724,7 +2871,10 @@ antes de mudar qualquer coisa.
 ## Regras obrigatorias
 - Corrija APENAS o que falta. Nao reimplemente o que ja esta correto e testado.
 - Nao deixe TODOs, placeholders ou testes pulados.
-- Rode a suite de testes do projeto ao final e garanta que ela passa.
+- Rode ao final os testes desta fase (por caminho ou filtro) e garanta que
+  passam. Nao rode a suite completa: o ralph a roda no fim da spec.
+- Nao crie teste que a fase nao pediu para "cobrir mais": teste extra nao fecha
+  gate nenhum e sobra no repositorio.
 INTRO
     echo
     echo "## Motivo da falha ($gate)"
@@ -2800,7 +2950,7 @@ Para CADA task marcada com `- [ ]` ou `- [x]` na fase abaixo, na ordem em que
 aparecem, confira os acceptance criteria contra o codigo real (arquivos, classes,
 testes, rotas, migrations — o que a task exigir) e emita EXATAMENTE UMA linha:
 
-TASK <n>: DONE
+TASK <n>: DONE — <evidencia: arquivo:linha[; arquivo:linha] ou caminho da captura .png>
 TASK <n>: INCOMPLETE — <o que falta>
 
 Regras:
@@ -2811,12 +2961,18 @@ Regras:
 - Nao repita um indice e nao pule nenhum: exatamente uma linha por task, na
   ordem, sem resumo nem repeticao do bloco no final.
 - Nao emita nenhum outro texto alem das linhas TASK.
-- Comandos de suite podem demorar VARIOS minutos. Rode cada um com o maior
-  timeout que a ferramenta permitir e ESPERE terminar antes de dar veredito.
-  Nao rode em background, nao abandone processo em execucao.
-- JAMAIS encerre com relatorio parcial ou texto tipo "aguardando": enquanto
-  um comando exigido por uma task nao terminou, a verificacao nao acabou.
+- Voce NAO executa comandos: esta sessao so le (Read/Glob/Grep). A suite de
+  testes ja foi executada pelo orquestrador antes de voce (gate 2). Julgue
+  pelo codigo real e pelos arquivos de evidencia listados — nunca pelo relato
+  de quem implementou, nunca pelo checkbox, nunca por "parece completo".
+- Todo DONE carrega prova: `TASK <n>: DONE — <arquivo:linha>` apontando o
+  trecho que satisfaz o acceptance criteria (varios separados por `;`), ou o
+  caminho da captura .png nas tasks com tela. DONE sem `— evidencia` e
+  tratado como NAO verificado e reprova a fase.
 - Codigo ausente, TODO ou placeholder => INCOMPLETE.
+- Artefato derivado (CSS/JS compilado, bundle, asset versionado) citado nos
+  acceptance criteria: confira que o artefato reflete a fonte — fonte alterada
+  com artefato antigo => INCOMPLETE.
 - Teste: cobre so o que a task LISTA no campo `Testes:`. Teste listado e que nao
   existe (ou nao passa) => INCOMPLETE. Task com `Testes: none` => verifique os
   acceptance criteria lendo o codigo real; ausencia de teste NAO e motivo de
@@ -2838,6 +2994,25 @@ VERIFY
       echo "Esta instrucao SUBSTITUI a regra 'uma linha TASK para cada task':"
       echo "aqui e uma linha TASK para cada task DO ESCOPO, e nenhuma alem delas."
       echo "Use o numero da POSICAO ORIGINAL na fase — nao renumere, nao comece do 1."
+    fi
+    # Evidencia visual: capturas feitas pelo ralph (gate3_capture_ui_evidence)
+    # antes desta sessao. O verificador le imagem com Read e compara com o
+    # alvo — e a unica prova que nasce fora do relato do implementador.
+    if [ -n "$UI_SCREEN_TASKS" ]; then
+      echo
+      echo "## Evidencia visual (produzida pelo orquestrador, fora da sessao de implementacao)"
+      echo "Para cada task abaixo, abra com Read a CAPTURA e, quando houver, o ALVO."
+      echo "Compare estrutura, hierarquia, tokens (superficies, acento, tipografia),"
+      echo "estados e textos visiveis. Divergencia que o usuario notaria => INCOMPLETE,"
+      echo "dizendo O QUE difere. Task com tela so e DONE citando o caminho da captura."
+      local pos route sel target theme
+      while IFS='|' read -r pos route sel target theme; do
+        [ -n "$pos" ] || continue
+        echo "- TASK $pos — rota \`$route\`${theme:+ (tema: $theme)} — seletores confirmados na pagina pela captura: \`$sel\`"
+        [ -n "$target" ] && echo "  Se a task disser que a tela NAO tem artboard proprio e segue o padrao de outra, compare com o alvo SO tokens, tipografia, cabecalho de tabela, selos e layout de coluna — nunca conteudo, abas ou dados do desenho."
+        echo "  captura: \`$EVIDENCE_DIR/${phase_file%.md}/task-${pos}.png\`"
+        [ -n "$target" ] && echo "  alvo:    \`$target\`"
+      done <<< "$UI_SCREEN_TASKS"
     fi
     echo
     echo "## Fase a verificar"
@@ -3157,6 +3332,52 @@ wait_for_reset() {
 # Engine
 # ---------------------------------------------------------------------------
 
+# O plugin caveman grava o nivel ativo em ~/.claude/.caveman-active no
+# SessionStart. O arquivo e GLOBAL: a sessao interativa do dev le o mesmo byte.
+# Uma sessao headless do ralph pedindo `ultra` reescreveria esse arquivo e a
+# proxima mensagem do dev no terminal dele viria comprimida sem ninguem ter
+# pedido. Snapshot antes, restauracao depois: o run nao vaza o proprio nivel.
+caveman_flag_snapshot() {
+  CAVEMAN_FLAG_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.caveman-active"
+  CAVEMAN_FLAG_BEFORE=""
+
+  # Symlink nao e nosso: nao le, nao escreve, nao restaura.
+  if [ -L "$CAVEMAN_FLAG_FILE" ]; then
+    CAVEMAN_FLAG_FILE=""
+    return 0
+  fi
+
+  if [ -f "$CAVEMAN_FLAG_FILE" ]; then
+    CAVEMAN_FLAG_BEFORE="$(cat "$CAVEMAN_FLAG_FILE" 2> /dev/null || true)"
+  fi
+}
+
+caveman_flag_restore() {
+  local flag="$CAVEMAN_FLAG_FILE"
+  CAVEMAN_FLAG_FILE=""
+  [ -n "$flag" ] || return 0
+  if [ -L "$flag" ]; then
+    return 0
+  fi
+
+  local now=""
+  if [ -f "$flag" ]; then
+    now="$(cat "$flag" 2> /dev/null || true)"
+  fi
+
+  if [ -n "$CAVEMAN_FLAG_BEFORE" ]; then
+    if [ "$now" != "$CAVEMAN_FLAG_BEFORE" ]; then
+      printf '%s' "$CAVEMAN_FLAG_BEFORE" > "$flag" 2> /dev/null || true
+    fi
+    return 0
+  fi
+
+  # Nao existia antes da sessao: so apaga o que ESTA sessao criou.
+  if [ "$now" = "$CAVEMAN_MODE" ]; then
+    rm -f "$flag" 2> /dev/null || true
+  fi
+}
+
 # run_engine <prompt_file> <log_file> <mode: impl|verify>
 # Loop de resiliencia a limite de uso: nao consome ciclo de correcao.
 run_engine() {
@@ -3175,6 +3396,14 @@ run_engine() {
   # Expandido como ${model_args[@]+"..."}: sob `set -u`, "${arr[@]}" de array
   # VAZIO e "unbound variable" em bash < 4.4 (o bash 3.2 do macOS incluso).
   local model_args=()
+
+  # Caveman so nas sessoes que escrevem codigo. O verificador emite contrato de
+  # maquina (`TASK <n>: DONE|INCOMPLETE`), ja e minimo, e comprimir prosa la
+  # arriscaria o gate 3 sem economizar nada.
+  local cave_env=()
+  if [[ "$ENGINE" == "claude" && "$mode" != "verify" && "$CAVEMAN_MODE" != "off" ]]; then
+    cave_env=(CAVEMAN_DEFAULT_MODE="$CAVEMAN_MODE")
+  fi
   if [[ "$mode" == "verify" ]]; then
     if [ -n "$VERIFY_MODEL" ]; then
       model_args=(--model "$VERIFY_MODEL")
@@ -3205,6 +3434,10 @@ run_engine() {
     : > "$err_log"
     start_heartbeat "$err_log" "$hb_label"
 
+    if [[ "$ENGINE" == "claude" && "$mode" != "verify" && "$CAVEMAN_MODE" != "off" ]]; then
+      caveman_flag_snapshot
+    fi
+
     # stdout e stderr vao para arquivos DIFERENTES. Unir os dois (2>&1) fazia
     # o progresso do engine entrar no log parseado pelos gates — e no codex a
     # resposta final aparece nos dois streams, duplicando as linhas TASK.
@@ -3231,7 +3464,8 @@ run_engine() {
       else
         # JSON: o exit code do CLI e sinal fraco; o gate 0 le is_error.
         run_split "$log_file" "$err_log" /dev/null \
-          env -u CLAUDECODE claude --dangerously-skip-permissions \
+          env -u CLAUDECODE ${cave_env[@]+"${cave_env[@]}"} \
+          claude --dangerously-skip-permissions \
           ${model_args[@]+"${model_args[@]}"} \
           -p "$(cat "$prompt_file")" \
           --output-format json || rc=$?
@@ -3239,6 +3473,7 @@ run_engine() {
     fi
 
     stop_heartbeat
+    caveman_flag_restore
 
     local reset_epoch
     if reset_epoch=$(detect_usage_limit "$log_file"); then
@@ -3479,7 +3714,179 @@ recover_env() {
   return 1
 }
 
-# Gate 2 — a suite do projeto passa, rodada PELO ralph (fora da sessao do agente)?
+
+# ---------------------------------------------------------------------------
+# Escopo do gate 2
+#
+# A suite inteira e o gate da SPEC; a fase paga so pelo que ela mexeu. Ver
+# "Escopo do gate 2" no cabecalho para a ordem das regras e o porque.
+# ---------------------------------------------------------------------------
+
+# Arquivos que ESTA fase alterou. A fase parte de arvore limpa (o preflight
+# exige, e cada fase anterior fechou em commit), entao o diff contra HEAD e
+# exatamente o trabalho da fase corrente.
+phase_changed_files() {
+  {
+    git diff --name-only HEAD 2> /dev/null || true
+    git ls-files --others --exclude-standard 2> /dev/null || true
+  } | awk 'NF && !seen[$0]++'
+}
+
+phase_changed_tests() {
+  phase_changed_files | grep -aE "$TEST_FILE_RE" || true
+}
+
+phase_changed_critical() {
+  phase_changed_files | grep -aE "$CRITICAL_PATHS_RE" || true
+}
+
+# Arquivos de teste que o proprio documento da fase nomeia (campo `Testes:`).
+# Entram no escopo mesmo sem aparecer no diff: um teste ja commitado que a fase
+# precisa fazer passar continua sendo alvo dela.
+phase_declared_tests() {
+  local phase_file="$1"
+  [ -n "$phase_file" ] && [ -f "$PHASES_DIR/$phase_file" ] || return 0
+  grep -aoE '`[^`]+`' "$PHASES_DIR/$phase_file" 2> /dev/null \
+    | tr -d '`' | grep -aE "$TEST_FILE_RE" | awk 'NF && !seen[$0]++' || true
+}
+
+# A fase pede a suite completa? Escalada explicita do planejamento. So existe
+# neste sentido: uma fase pode exigir MAIS rigor, nunca desligar a suite.
+phase_declares_full_suite() {
+  local phase_file="$1"
+  [ -n "$phase_file" ] && [ -f "$PHASES_DIR/$phase_file" ] || return 1
+  grep -aqiE '^[[:space:]]*Suite([[:space:]]+de[[:space:]]+testes)?:[[:space:]]*(completa|full|inteira)' \
+    "$PHASES_DIR/$phase_file"
+}
+
+# Comando escopado para <paths>, ou VAZIO quando o runner nao aceita escopo por
+# caminho. Vazio nunca significa "roda menos": quem chama cai na suite completa.
+scoped_test_cmd() {
+  [ $# -gt 0 ] || return 0
+  # Comando composto (pipe, &&, ;) nao tem "ultimo argumento" previsivel:
+  # anexar caminho ali muda o comando errado.
+  case "$TEST_CMD" in
+    *';'*|*'&&'*|*'||'*|*'|'*) return 0 ;;
+  esac
+
+  local paths="" p
+  for p in "$@"; do
+    paths="$paths \"$p\""
+  done
+
+  local exe base
+  exe="${TEST_CMD%% *}"
+  base="$(basename -- "$exe")"
+
+  case "$base" in
+    # Runners que recebem caminho como argumento posicional.
+    sail|artisan|php|pest|phpunit|pytest|py.test|jest|vitest|bun|mocha|rspec|deno)
+      printf '%s%s' "$TEST_CMD" "$paths"
+      ;;
+    # Wrappers de script: o caminho so chega ao runner depois de `--`.
+    composer|npm|pnpm|yarn)
+      printf '%s --%s' "$TEST_CMD" "$paths"
+      ;;
+    # go, cargo, make e desconhecidos: escopo por caminho nao e confiavel.
+    *) return 0 ;;
+  esac
+}
+
+# A ultima fase que este run vai executar de verdade — pulando as ja completas
+# e as anteriores a --from. E nela que a suite COMPLETA roda: o fim da spec.
+# Nenhuma fase pendente => nenhuma fase final; o run nao roda suite nenhuma e
+# avisa, em vez de inventar um gate que ninguem pediu.
+resolve_final_phase() {
+  FINAL_PHASE_FILE=""
+  local file num _title
+  while IFS='|' read -r file num _title; do
+    if [ "$num" -lt "$FROM_PHASE" ]; then
+      continue
+    fi
+    if is_phase_done "$file"; then
+      continue
+    fi
+    FINAL_PHASE_FILE="$file"
+  done < <(manifest_entries)
+}
+
+# Numero da fase final, so para o log inicial.
+final_phase_num() {
+  [ -n "$FINAL_PHASE_FILE" ] || return 0
+  local file num _title
+  while IFS='|' read -r file num _title; do
+    if [ "$file" = "$FINAL_PHASE_FILE" ]; then
+      printf '%s' "$num"
+      return 0
+    fi
+  done < <(manifest_entries)
+}
+
+# Resolve o escopo do gate 2 DESTA execucao. Roda depois da sessao do engine —
+# so entao a arvore mostra o que a fase mexeu.
+resolve_gate2_scope() {
+  local phase_file="${1:-}"
+
+  GATE2_SCOPE="full"
+  GATE2_SCOPE_CMD="$TEST_CMD"
+  GATE2_SCOPE_WHY=""
+
+  if [ "$TEST_SCOPE_MODE" = "full" ]; then
+    GATE2_SCOPE_WHY="modo suite completa (--full-suite / RALPH_TEST_SCOPE=full)"
+    return 0
+  fi
+
+  if [ "$PHASE_IS_FINAL" -eq 1 ]; then
+    GATE2_SCOPE_WHY="ultima fase do documento — gate final da spec"
+    return 0
+  fi
+
+  # Sem gate 3 o gate 2 e a UNICA prova mecanica da fase. Escopar ou pular ali
+  # deixaria a fase fechar e commitar sem validacao nenhuma.
+  if [ "$VERIFY_MODE" = "off" ]; then
+    GATE2_SCOPE_WHY="gate 3 desligado — a suite completa e a unica validacao restante"
+    return 0
+  fi
+
+  if phase_declares_full_suite "$phase_file"; then
+    GATE2_SCOPE_WHY="a fase declara 'Suite: completa'"
+    return 0
+  fi
+
+  local crit
+  crit="$(phase_changed_critical | head -n 3 | tr '\n' ' ' || true)"
+  if [ -n "${crit//[[:space:]]/}" ]; then
+    GATE2_SCOPE_WHY="mudanca critica na fase: ${crit% }"
+    return 0
+  fi
+
+  local targets=() t
+  while IFS= read -r t; do
+    [ -n "$t" ] && [ -f "$t" ] && targets+=("$t")
+  done < <( { phase_changed_tests; phase_declared_tests "$phase_file"; } | awk 'NF && !seen[$0]++' )
+
+  if [ "${#targets[@]}" -eq 0 ]; then
+    GATE2_SCOPE="skip"
+    GATE2_SCOPE_CMD=""
+    GATE2_SCOPE_WHY="a fase nao alterou nem citou arquivo de teste e nao tocou caminho critico"
+    return 0
+  fi
+
+  local cmd
+  cmd="$(scoped_test_cmd "${targets[@]}")"
+  if [ -z "$cmd" ]; then
+    GATE2_SCOPE_WHY="o runner ('$TEST_CMD') nao aceita escopo por caminho"
+    return 0
+  fi
+
+  GATE2_SCOPE="scoped"
+  GATE2_SCOPE_CMD="$cmd"
+  GATE2_SCOPE_WHY="${#targets[@]} arquivo(s) de teste desta fase"
+}
+
+# Gate 2 — os testes do projeto passam, rodados PELO ralph (fora da sessao do
+# agente)? O ESCOPO e resolvido por fase: escopado no meio da spec, completo no
+# fim dela e em toda mudanca critica.
 gate2_tests_pass() {
   local test_log="$1"
 
@@ -3490,25 +3897,39 @@ gate2_tests_pass() {
     return 0
   fi
 
+  resolve_gate2_scope "${GATE2_PHASE_FILE:-}"
+
+  if [ "$GATE2_SCOPE" = "skip" ]; then
+    log "Gate 2 — nao executado: $GATE2_SCOPE_WHY"
+    log "Gate 2 — a suite completa roda na ultima fase (gate final da spec); aqui quem julga e o gate 3"
+    gate_end 2 skip
+    return 0
+  fi
+
+  local run_cmd="$GATE2_SCOPE_CMD" scope_label="rodando a suite do projeto"
+  [ "$GATE2_SCOPE" = "scoped" ] && scope_label="rodando os testes desta fase"
+
   # Arvore identica a da ultima execucao => a suite responderia a mesma coisa.
   # Foi exatamente isso que queimou 3 min por ciclo em quatro ciclos seguidos:
   # sessoes que nao escreveram nada, e a suite reexecutada para reafirmar o
   # mesmo veredito. So o VERDE e reaproveitado; o vermelho segue para o guarda
   # de ciclo improdutivo, que aborta a fase em vez de repetir a rodada.
+  # O escopo entra na assinatura: um verde ESCOPADO nao pode ser reaproveitado
+  # como veredito da suite COMPLETA na fase final.
   local sig
-  sig="$(tree_signature)"
+  sig="$(tree_signature)|$GATE2_SCOPE|$run_cmd"
   if [ -n "$GATE2_LAST_SIG" ] && [ "$sig" = "$GATE2_LAST_SIG" ] && [ "$GATE2_LAST_VERDICT" = "pass" ]; then
     log "Gate 2 — arvore identica a ultima execucao; veredito verde reaproveitado"
     gate_end 2 pass
     return 0
   fi
 
-  set_activity "executando a suite do projeto"
-  log "Gate 2 — rodando a suite do projeto: $TEST_CMD"
+  set_activity "executando os testes do projeto"
+  log "Gate 2 — $scope_label ($GATE2_SCOPE_WHY): $run_cmd"
   local rc=0
   # < /dev/null: sail test (docker compose exec) anexa stdin e consumiria o
   # stream de quem chamou, alem de poder travar esperando input.
-  bash -c "$TEST_CMD" < /dev/null > "$test_log" 2>&1 || rc=$?
+  bash -c "$run_cmd" < /dev/null > "$test_log" 2>&1 || rc=$?
 
   # Ambiente fora do ar antes de qualquer outro julgamento: sem servico de pe a
   # suite nao mediu o codigo, e o baseline / o ponto fixo / o conserto estariam
@@ -3523,7 +3944,7 @@ gate2_tests_pass() {
       log "Gate 2 — reexecutando a suite uma vez (unica reexecucao desta fase)"
       set_activity "reexecutando a suite apos recuperar o ambiente"
       rc=0
-      bash -c "$TEST_CMD" < /dev/null > "$test_log" 2>&1 || rc=$?
+      bash -c "$run_cmd" < /dev/null > "$test_log" 2>&1 || rc=$?
     fi
     if [ "$rc" -ne 0 ] && gate2_infra_failure "$test_log"; then
       GATE2_INFRA=1
@@ -3557,12 +3978,18 @@ gate2_tests_pass() {
       GATE2_STALE_RED=0
     fi
     GATE2_LAST_SIG="$sig"; GATE2_LAST_VERDICT="fail"
-    GATE_CAUSE="O comando de teste do projeto ('$TEST_CMD') falhou com codigo $rc.${GATE2_DELTA_NOTE:- Saida:}"$'\n'"$(tail -n 200 "$test_log")"
+    local scope_note=""
+    [ "$GATE2_SCOPE" = "scoped" ] && scope_note=" (escopo desta fase: $GATE2_SCOPE_WHY)"
+    GATE_CAUSE="O comando de teste do projeto ('$run_cmd')$scope_note falhou com codigo $rc.${GATE2_DELTA_NOTE:- Saida:}"$'\n'"$(tail -n 200 "$test_log")"
     gate_end 2 fail
     return 1
   fi
 
-  success "Gate 2 — suite verde"
+  if [ "$GATE2_SCOPE" = "scoped" ]; then
+    success "Gate 2 — testes da fase verdes (suite completa fica para a ultima fase)"
+  else
+    success "Gate 2 — suite verde"
+  fi
   GATE2_LAST_SIG="$sig"; GATE2_LAST_VERDICT="pass"
   gate_end 2 pass
   return 0
@@ -3617,6 +4044,123 @@ GATE3_RAN=0
 # reparavel por patch.
 GATE3_INCOMPLETE_IDX=""
 GATE3_INCOMPLETE_LINES=""
+
+# Tasks com campo `Tela:` da fase, uma por linha: pos|rota|seletores|alvo|tema.
+# A posicao e a mesma que o verificador usa (indice do checkbox, a partir de 1).
+phase_screen_tasks() {
+  local phase_file="$1"
+  [ -n "$phase_file" ] && [ -f "$PHASES_DIR/$phase_file" ] || return 0
+  awk '
+    /^[[:space:]]*- \[[ xX]\]/ { pos++; next }
+    pos > 0 && /^[[:space:]]*(\*\*)?Tela(\*\*)?[[:space:]]*:/ {
+      line = $0
+      sub(/^[[:space:]]*(\*\*)?Tela(\*\*)?[[:space:]]*:[[:space:]]*/, "", line)
+      n = split(line, f, /[[:space:]]*\|[[:space:]]*/)
+      route = f[1]; sel = (n >= 2) ? f[2] : ""; target = (n >= 3) ? f[3] : ""; theme = (n >= 4) ? f[4] : ""
+      gsub(/`/, "", route); gsub(/`/, "", sel); gsub(/`/, "", target); gsub(/`/, "", theme)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", route)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", sel)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", target)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", theme)
+      print pos "|" route "|" sel "|" target "|" theme
+    }
+  ' "$PHASES_DIR/$phase_file"
+}
+
+# Comando de captura por convencao do repo. Vazio quando nao ha script.
+detect_ui_shot_cmd() {
+  local f
+  for f in scripts/ralph-ui-shot.mjs scripts/ralph-ui-shot.js; do
+    [ -f "$f" ] && { printf 'node %s' "$f"; return 0; }
+  done
+  [ -f scripts/ralph-ui-shot.sh ] && { printf 'bash scripts/ralph-ui-shot.sh'; return 0; }
+  [ -f scripts/ralph-ui-shot.py ] && { printf 'python3 scripts/ralph-ui-shot.py'; return 0; }
+  return 0
+}
+
+# Evidencia visual do gate 3: o RALPH fotografa cada task `Tela:` da fase
+# antes de o verificador julgar. A prova nasce fora da sessao do engine — ele
+# nao escreve, nao escolhe e nao edita o arquivo que o julga (o mesmo motivo
+# pelo qual o gate 2 roda a suite fora da sessao). Fail-closed: fase com
+# `Tela:` e sem comando de captura reprova, a menos que --no-ui-verify diga
+# explicitamente que a prova visual nao e exigida.
+# Retorna 1 com GATE_CAUSE preenchido quando a prova nao pode ser produzida.
+gate3_capture_ui_evidence() {
+  local phase_file="$1" cycle="$2"
+  UI_SCREEN_TASKS="$(phase_screen_tasks "$phase_file")"
+  [ -n "$UI_SCREEN_TASKS" ] || return 0
+
+  local count
+  count=$(printf '%s\n' "$UI_SCREEN_TASKS" | grep -c . || true)
+
+  if [ "$UI_VERIFY_MODE" = "off" ]; then
+    warn "Evidencia visual DESLIGADA (--no-ui-verify): $count task(s) com 'Tela:' serao julgadas so pelo codigo"
+    UI_SCREEN_TASKS=""
+    return 0
+  fi
+  # Convencao por repositorio: sem RALPH_UI_SHOT_CMD, um script
+  # scripts/ralph-ui-shot.{mjs,js,sh,py} na raiz do projeto e o comando de
+  # captura — a configuracao vive no repo, nunca no shell do operador.
+  if [ -z "$UI_SHOT_CMD" ]; then
+    UI_SHOT_CMD="$(detect_ui_shot_cmd)"
+    [ -n "$UI_SHOT_CMD" ] && log "Evidencia visual — comando de captura detectado: $UI_SHOT_CMD"
+  fi
+  if [ -z "$UI_SHOT_CMD" ]; then
+    GATE_CAUSE="A fase tem $count task(s) com campo 'Tela:' e nenhum comando de captura configurado (RALPH_UI_SHOT_CMD / --ui-shot-cmd) nem script scripts/ralph-ui-shot.{mjs,js,sh,py} no repo. Sem a foto da rota nao ha prova visual, e sem prova o gate 3 nao aceita DONE. Configure o comando ou desligue de proposito com --no-ui-verify."
+    return 1
+  fi
+
+  local dir="$EVIDENCE_DIR/${phase_file%.md}"
+  mkdir -p "$dir"
+  log "Evidencia visual — fotografando $count tela(s) via: $UI_SHOT_CMD"
+
+  local pos route sel target theme out shot_log rc
+  while IFS='|' read -r pos route sel target theme; do
+    [ -n "$pos" ] || continue
+    if [ -z "$route" ] || [ -z "$sel" ]; then
+      GATE_CAUSE="Task $pos: campo 'Tela:' malformado — esperado 'Tela: <rota> | <seletores CSS> | <png-alvo>' (rota e seletores obrigatorios)."
+      return 1
+    fi
+    if [ -n "$target" ] && [ ! -f "$target" ]; then
+      GATE_CAUSE="Task $pos: o PNG-alvo '$target' citado em 'Tela:' nao existe. Exporte o artboard antes de rodar a fase."
+      return 1
+    fi
+    out="$dir/task-${pos}.png"
+    shot_log="$dir/task-${pos}.shot.log"
+    rm -f "$out"
+    rc=0
+    if command -v timeout > /dev/null 2>&1; then
+      timeout "$UI_SHOT_TIMEOUT" bash -c "$UI_SHOT_CMD \"\$@\"" _ "$route" "$out" "$sel" "$theme" \
+        < /dev/null > "$shot_log" 2>&1 || rc=$?
+    else
+      bash -c "$UI_SHOT_CMD \"\$@\"" _ "$route" "$out" "$sel" "$theme" \
+        < /dev/null > "$shot_log" 2>&1 || rc=$?
+    fi
+    if [ "$rc" -ne 0 ] || [ ! -s "$out" ]; then
+      GATE_CAUSE="Evidencia visual da task $pos falhou (rota '$route', seletores '$sel', exit $rc): a pagina nao renderizou ou um seletor obrigatorio nao existe. Saida da captura:"$'\n'"$(tail -n 40 "$shot_log" 2> /dev/null)"
+      return 1
+    fi
+    log "  task $pos — $route${theme:+ ($theme)} -> $out"
+  done <<< "$UI_SCREEN_TASKS"
+
+  return 0
+}
+
+# Fase verde => o ralph marca `[x]` nas tasks daquela fase no DOCUMENTO DE
+# ENTRADA. Mecanico e pos-gate: o checkbox do PHASES.md vira registro do que
+# os gates provaram, nunca declaracao do engine (que so marca a copia em
+# .phases/). Roda antes do commit para entrar nele quando o arquivo e versionado.
+sync_input_checkboxes() {
+  local phase_num="$1"
+  [ -n "$INPUT_FILE" ] && [ -f "$INPUT_FILE" ] || return 0
+  local tmp="$INPUT_FILE.ralph.$$"
+  awk -v want="$phase_num" '
+    /^## Phase [0-9]+: / { split($0, h, /[ :]+/); inside = (h[3] + 0 == want + 0); print; next }
+    /^## / { inside = 0 }
+    inside && /^[[:space:]]*- \[ \]/ { sub(/- \[ \]/, "- [x]") }
+    { print }
+  ' "$INPUT_FILE" > "$tmp" && mv -f "$tmp" "$INPUT_FILE" || rm -f "$tmp"
+}
 
 gate3_independent_verify() {
   local phase_file="$1" cycle="$2" session_wrote="$3"
@@ -3675,6 +4219,13 @@ gate3_independent_verify() {
     log "Gate 3 — sessao verificadora independente ($expected tasks${VERIFY_MODEL:+, modelo: $VERIFY_MODEL})"
   fi
 
+  # A prova visual vem ANTES do verificador: se a captura nao existe, nao ha o
+  # que julgar — e a fase reprova sem gastar uma sessao.
+  if ! gate3_capture_ui_evidence "$phase_file" "$cycle"; then
+    gate_end 3 fail
+    return 1
+  fi
+
   local prompt_file
   prompt_file=$(build_verify_prompt "$phase_file" "$cycle")
   run_engine "$prompt_file" "$verify_log" verify || true
@@ -3693,6 +4244,21 @@ gate3_independent_verify() {
     GATE_CAUSE="O verificador independente nao emitiu nenhuma linha 'TASK <n>: DONE|INCOMPLETE' — nao foi possivel confirmar que a fase esta completa. Ultimas linhas do verificador:"$'\n'"$(engine_tail "$verify_log" 40)"
     gate_end 3 fail
     return 1
+  fi
+
+  # DONE sem evidencia e linguagem confiante, nao veredito. Um verificador que
+  # leu o codigo sabe apontar arquivo:linha; um que nao leu so sabe dizer DONE.
+  # Reprova por protocolo (nao alimenta o conserto cirurgico: nao falta codigo,
+  # falta prova).
+  if [ "$VERIFY_EVIDENCE_MODE" = "required" ]; then
+    local bare
+    bare=$(printf '%s\n' "$task_lines" | grep -E 'DONE' \
+      | grep -vE 'DONE[[:space:]]*[—–-]+.*([^[:space:]]+:[0-9]+|\.(png|jpe?g|webp))' || true)
+    if [ -n "$bare" ]; then
+      GATE_CAUSE="O verificador deu DONE sem evidencia (arquivo:linha ou captura .png) — veredito sem prova nao fecha task:"$'\n'"$bare"
+      gate_end 3 fail
+      return 1
+    fi
   fi
 
   # Cobertura se mede em INDICES UNICOS, nao em linhas. O modelo repete linha
@@ -4038,6 +4604,13 @@ run_phase() {
   GATE2_INFRA=0
   # A reexecucao pos-recuperacao e por FASE: cada fase tem direito a uma.
   INFRA_RETRIED=0
+  # Escopo do gate 2: qual fase e esta, e se ela e a ultima do documento — a
+  # unica em que a suite completa roda no fluxo normal.
+  GATE2_PHASE_FILE="$phase_file"
+  PHASE_IS_FINAL=0
+  if [ -n "$FINAL_PHASE_FILE" ] && [ "$phase_file" = "$FINAL_PHASE_FILE" ]; then
+    PHASE_IS_FINAL=1
+  fi
   REPAIR_ABORTED=0
   PHASE_ABORT_REASON=""
 
@@ -4226,9 +4799,20 @@ run_phase() {
 
       # Gates verdes e nada a commitar => a fase ja estava implementada em HEAD
       # (run anterior commitada, tasks [x], codigo escrito a mao).
+      # Checkbox do documento de entrada = registro dos gates, nao do engine.
+      # Sincroniza ANTES de olhar a arvore: se o PHASES.md e versionado, a
+      # marcacao entra no commit da fase.
+      # Fase ja implementada com input versionado: marcar agora criaria um
+      # commit que o run nao teve — a marcacao fica para o proximo commit de
+      # fase. Input fora do git (ex.: .spec ignorado) marca sempre.
+      if [ -n "$(git status --porcelain)" ] || ! git ls-files --error-unmatch -- "$INPUT_FILE" > /dev/null 2>&1; then
+        sync_input_checkboxes "$phase_num"
+      fi
       if [ -z "$(git status --porcelain)" ]; then
         success "Phase $phase_num: $phase_title — JA IMPLEMENTADA (nada a commitar)"
-        if [ "$GATE3_RAN" -eq 1 ]; then
+        if [ "$GATE3_RAN" -eq 1 ] && [ "$ST_GATE2" = "skip" ]; then
+          log "Gate 3 verde contra o codigo em HEAD; nenhum commit criado."
+        elif [ "$GATE3_RAN" -eq 1 ]; then
           log "Gates 2 e 3 verdes contra o codigo em HEAD; nenhum commit criado."
         else
           log "Gate 2 verde contra o codigo em HEAD; nenhum commit criado."
@@ -4340,6 +4924,8 @@ main() {
   # Depois de split_phases: ele faz `rm -rf .phases` e levaria junto o baseline.
   measure_baseline
 
+  resolve_final_phase
+
   local total_phases
   total_phases=$(manifest_entries | wc -l)
 
@@ -4355,6 +4941,16 @@ main() {
 
   echo ""
   log "$total_phases fases para implementar (engine: $ENGINE, max-cycles: $MAX_CYCLES)"
+  if [ -n "$TEST_CMD" ]; then
+    if [ "$TEST_SCOPE_MODE" = "full" ]; then
+      log "Gate 2 — suite completa em toda fase (--full-suite)"
+    elif [ -n "$FINAL_PHASE_FILE" ]; then
+      log "Gate 2 — escopado por fase; a suite completa roda na fase $(final_phase_num) (fim da spec)"
+    else
+      warn "Nenhuma fase pendente: a suite completa nao sera executada neste run."
+      warn "Para rodar o gate final da spec por fora: $TEST_CMD"
+    fi
+  fi
   [ "$FROM_PHASE" -gt 1 ] && log "Iniciando a partir da fase $FROM_PHASE"
   [ -n "$SERVE_URL" ] && success "Dashboard web: $SERVE_URL"
   echo ""
