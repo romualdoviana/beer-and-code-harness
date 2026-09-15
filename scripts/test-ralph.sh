@@ -2327,19 +2327,47 @@ if case_enabled ui-shot-ok; then
   d=$(CASE_PHASES="$PHASES_FIXTURE_UI" new_case ui-shot-ok)
   cat > "$d/shot.sh" <<'SHOT'
 #!/usr/bin/env bash
-echo "$1|$2|$3|$4" >> "${MOCK_STATE}/shot_args"
+echo "$1|$2|$3|$4|${RALPH_UI_VIEWPORT:-}" >> "${MOCK_STATE}/shot_args"
 printf 'PNG-FAKE' > "$2"
 SHOT
   chmod +x "$d/shot.sh"
   rc=$(CASE_UI_SHOT_CMD="$d/shot.sh" run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
   assert_eq 0 "$rc" "exit 0"
   test -s "$d/repo/.phases/evidence/phase-01/task-1.png" && ok "captura gravada em .phases/evidence/<fase>/task-1.png" || bad "captura gravada em .phases/evidence/<fase>/task-1.png"
+  test -s "$d/repo/.phases/evidence/phase-01/task-1-mobile.png" && ok "captura de celular gravada em task-1-mobile.png" || bad "captura de celular gravada em task-1-mobile.png"
   test -e "$d/repo/.phases/evidence/phase-01/task-2.png" && bad "task sem 'Tela:' nao e fotografada" || ok "task sem 'Tela:' nao e fotografada"
   assert_contains "$d/state/shot_args" '/admin|' "o comando recebe a rota"
   assert_contains "$d/state/shot_args" '|.fi-header, [data-x="y"]|claro' "o comando recebe os seletores e o tema (4o campo)"
+  assert_contains "$d/state/shot_args" 'task-1.png|.fi-header, [data-x="y"]|claro|desktop' "a captura principal roda com RALPH_UI_VIEWPORT=desktop"
+  assert_contains "$d/state/shot_args" 'task-1-mobile.png|.fi-header, [data-x="y"]|claro|mobile' "a captura de celular roda com RALPH_UI_VIEWPORT=mobile"
   assert_contains "$d/repo/.phases/prompts/phase-01.verify-1.txt" "(tema: claro)" "o verificador sabe em que tema a captura foi feita"
   assert_contains "$d/repo/.phases/prompts/phase-01.verify-1.txt" "Evidencia visual" "o verificador recebe a secao de evidencia"
   assert_contains "$d/repo/.phases/prompts/phase-01.verify-1.txt" "evidence/phase-01/task-1.png" "o verificador recebe o caminho da captura"
+  assert_contains "$d/repo/.phases/prompts/phase-01.verify-1.txt" "evidence/phase-01/task-1-mobile.png" "o verificador recebe a captura de celular"
+  assert_contains "$d/repo/.phases/prompts/phase-01.verify-1.txt" "Defeitos visuais objetivos" "o verificador recebe a regua de defeitos visuais"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-1.txt" "Tasks de tela desta fase" "o executor recebe a secao de design da tela"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-1.txt" "Defeitos visuais objetivos" "o executor recebe a mesma regua do verificador"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-1.txt" "RALPH_UI_VIEWPORT=mobile" "o executor sabe se fotografar no celular"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-1.txt" ".phases/selfcheck/" "a autocaptura vai para selfcheck, nunca para a evidencia do gate"
+fi
+
+if case_enabled ui-design-brief-absent; then
+  header "G3-C3. fase sem 'Tela:' -> prompts sem secao de design nem regua visual"
+  d=$(new_case ui-design-brief-absent)
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 0 "$rc" "exit 0"
+  assert_not_contains "$d/repo/.phases/prompts/phase-01.cycle-1.txt" "Tasks de tela desta fase" "fase de logica nao recebe secao de design"
+  assert_not_contains "$d/repo/.phases/prompts/phase-01.verify-1.txt" "Defeitos visuais objetivos" "verificador de fase sem tela nao recebe regua visual"
+fi
+
+if case_enabled ui-design-brief-fix; then
+  header "G3-C4. ciclo de correcao de fase com 'Tela:' mantem a secao de design"
+  d=$(CASE_PHASES="$PHASES_FIXTURE_UI" new_case ui-design-brief-fix)
+  printf '#!/usr/bin/env bash\necho "seletor .fi-header nao encontrado" >&2\nexit 3\n' > "$d/shot.sh"
+  chmod +x "$d/shot.sh"
+  rc=$(CASE_UI_SHOT_CMD="$d/shot.sh" run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --max-cycles 2 --no-repair)
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-2.txt" "Tasks de tela desta fase" "o prompt de correcao carrega a secao de design"
 fi
 
 if case_enabled ui-shot-autodetect; then

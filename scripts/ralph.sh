@@ -278,6 +278,13 @@
 #                            seletor obrigatorio nao existir na pagina. A
 #                            captura vai para .phases/evidence/<fase>/task-<n>.png
 #                            e o verificador compara com o PNG-alvo da task.
+#   RALPH_UI_VIEWPORT        exportada pelo ralph para o comando de captura:
+#                            desktop (task-<n>.png) ou mobile
+#                            (task-<n>-mobile.png). O script do projeto escolhe
+#                            o tamanho (sugestao: 1440x900 / 400x900); script
+#                            que ignora a variavel grava duas fotos iguais.
+#                            O executor usa o mesmo comando para se fotografar
+#                            em .phases/selfcheck/ antes de entregar a fase.
 #   RALPH_UI_SHOT_TIMEOUT    timeout da captura em segundos (default: 120)
 #
 # Campo `Tela:` (opcional, por task, dentro do bloco do checkbox):
@@ -422,7 +429,7 @@ VERIFY_EVIDENCE_MODE="${RALPH_VERIFY_EVIDENCE:-required}"
 UI_VERIFY_MODE="${RALPH_UI_VERIFY:-auto}"
 UI_SHOT_CMD="${RALPH_UI_SHOT_CMD:-}"
 UI_SHOT_TIMEOUT="${RALPH_UI_SHOT_TIMEOUT:-120}"
-# Tasks `Tela:` da fase corrente, uma por linha: pos|rota|seletores|alvo.
+# Tasks `Tela:` da fase corrente, uma por linha: pos|rota|seletores|alvo|tema.
 # Preenchido pela captura; lido pelo prompt do verificador.
 UI_SCREEN_TASKS=""
 ENV_ABORT=0
@@ -505,6 +512,8 @@ EVENTS_FILE="$PHASES_DIR/events.jsonl"
 UI_DIR="$PHASES_DIR/ui"
 # Capturas de tela do gate 3 (evidencia visual): <fase>/task-<n>.png
 EVIDENCE_DIR="$PHASES_DIR/evidence"
+# Autocaptura do executor: rascunho dele, nunca lido pelo gate 3.
+SELFCHECK_DIR="$PHASES_DIR/selfcheck"
 UI_MSG_FILE="$UI_DIR/messages.log"
 # Inferencia por task. Em --attach vai para um arquivo proprio: o pintor do run
 # original continua escrevendo o dele, e dois processos disputando o mesmo
@@ -2797,6 +2806,97 @@ PREAMBLE
   fi
 }
 
+# Regua visual unica: o executor se corrige contra ela e o verificador reprova
+# por ela. Sem artboard, "os seletores existem" era a unica prova — e uma tela
+# crua com os data-test certos passava como DONE. So entra defeito que se
+# aponta na captura; gosto nao reprova (evita ciclo de correcao por estetica).
+ui_defect_rubric() {
+  cat <<'RUBRIC'
+### Defeitos visuais objetivos
+Cada item abaixo, visivel na captura (computador OU celular), e defeito:
+1. Rotulo repetido: titulo e label do mesmo campo dizendo a mesma coisa.
+2. Texto cortado, sobreposto ou vazando do conteiner; elemento escondido
+   atras de outro.
+3. Celular: rolagem horizontal, conteudo espremido ou ilegivel.
+4. Hierarquia invertida: titulo menor ou mais fraco que o texto abaixo dele;
+   o valor principal da tela (total, resultado, KPI) sem destaque.
+5. Controle cru: input/select/botao sem o estilo do design system do projeto,
+   ou componente que destoa das telas irmas.
+6. Desalinhamento: valores/rotulos equivalentes fora do mesmo eixo;
+   espacamento irregular entre blocos equivalentes.
+7. Layout quebrado: bloco orfao sozinho numa linha de grade, faixa vazia larga
+   no meio do conteudo, card dentro de card com moldura dupla.
+8. Parede de texto: explicacao longa em paragrafos corridos, sem blocos,
+   listas ou destaque que permitam escanear.
+9. Estado sem tratamento: zero/vazio/carregando/erro exibindo lixo (NaN,
+   undefined, [object Object], placeholder).
+10. Contraste ilegivel: texto claro sobre fundo claro (ou escuro sobre escuro).
+NAO e defeito: preferencia de cor, estilo ou escolha de componente fora desta
+lista.
+RUBRIC
+}
+
+# Secao de design do executor, so em fase com `Tela:`. Fase de logica recebe o
+# prompt de sempre. Carrega a regua e a ordem de se fotografar antes de
+# entregar: sem olhar a tela, o executor implementa no escuro.
+ui_design_brief() {
+  local phase_file="$1"
+  local screens
+  screens="$(phase_screen_tasks "$phase_file")"
+  [ -n "$screens" ] || return 0
+
+  local cmd="$UI_SHOT_CMD"
+  [ -n "$cmd" ] || cmd="$(detect_ui_shot_cmd)"
+  local shots="$SELFCHECK_DIR/${phase_file%.md}"
+
+  echo
+  echo "## Tasks de tela desta fase"
+  echo "Estas tasks mudam o que o usuario ve. O gate 3 fotografa cada rota no"
+  echo "computador e no celular e reprova a fase por qualquer defeito da regua abaixo."
+  local pos route sel target theme
+  while IFS='|' read -r pos route sel target theme; do
+    [ -n "$pos" ] || continue
+    if [ -n "$target" ]; then
+      echo "- TASK $pos — rota \`$route\` — alvo \`$target\`"
+    else
+      echo "- TASK $pos — rota \`$route\` — sem artboard: siga a \`Referencia visual:\` e o \`Layout:\` da task (ausentes => a tela existente mais proxima da mesma area)"
+    fi
+  done <<< "$screens"
+  cat <<'BRIEF'
+
+### Antes de escrever a tela
+1. Abra o alvo (Read abre imagem) ou a tela de referencia e reuse os mesmos
+   componentes, tokens, espacamentos e padroes do design system do projeto.
+   Nao invente estilo novo e nao entregue marcacao crua.
+2. Se o ambiente oferecer skill ou agente de UI/design (ex.: frontend-design,
+   ui-ux-pro-max, um agente de frontend do projeto), use-o nesta tela.
+3. Decida o layout antes do markup: o foco principal, o que agrupa com o que,
+   o que fica em destaque e como a tela empilha em 400px de largura.
+
+BRIEF
+  ui_defect_rubric
+  echo
+  echo "### Autocaptura (obrigatoria antes de encerrar)"
+  if [ -n "$cmd" ]; then
+    echo "Fotografe cada tela voce mesmo, no computador e no celular:"
+    echo
+    echo "    mkdir -p $shots"
+    while IFS='|' read -r pos route sel target theme; do
+      [ -n "$pos" ] || continue
+      echo "    RALPH_UI_VIEWPORT=desktop $cmd '$route' $shots/task-$pos.png '$sel'${theme:+ $theme}"
+      echo "    RALPH_UI_VIEWPORT=mobile $cmd '$route' $shots/task-$pos-mobile.png '$sel'${theme:+ $theme}"
+    done <<< "$screens"
+    echo
+    echo "Abra as fotos com Read, procure cada defeito da regua, corrija e fotografe"
+    echo "de novo ate nao sobrar nenhum. Grave SO em \`$SELFCHECK_DIR/\`: \`$EVIDENCE_DIR/\`"
+    echo "e do ralph, refeita por ele no gate 3."
+  else
+    echo "Nenhum comando de captura configurado (RALPH_UI_SHOT_CMD ou"
+    echo "scripts/ralph-ui-shot.{mjs,js,sh,py}): nao ha como se fotografar. Revise a"
+    echo "tela contra a regua lendo o codigo com atencao redobrada."
+  fi
+}
+
 build_impl_prompt() {
   local phase_file="$1" cycle="$2"
   local prompt_file="$PROMPT_DIR/${phase_file%.md}.cycle-${cycle}.txt"
@@ -2805,6 +2905,7 @@ build_impl_prompt() {
     echo "Voce e um desenvolvedor senior implementando uma fase deste projeto."
     echo
     context_preamble "$phase_file"
+    ui_design_brief "$phase_file"
     cat <<'TASK'
 
 ## Sua tarefa agora
@@ -2861,6 +2962,7 @@ build_fix_prompt() {
     echo "Voce e um desenvolvedor senior corrigindo uma fase parcialmente implementada."
     echo
     context_preamble "$phase_file"
+    ui_design_brief "$phase_file"
     cat <<'INTRO'
 
 ## Situacao
@@ -3001,18 +3103,25 @@ VERIFY
     if [ -n "$UI_SCREEN_TASKS" ]; then
       echo
       echo "## Evidencia visual (produzida pelo orquestrador, fora da sessao de implementacao)"
-      echo "Para cada task abaixo, abra com Read a CAPTURA e, quando houver, o ALVO."
-      echo "Compare estrutura, hierarquia, tokens (superficies, acento, tipografia),"
-      echo "estados e textos visiveis. Divergencia que o usuario notaria => INCOMPLETE,"
-      echo "dizendo O QUE difere. Task com tela so e DONE citando o caminho da captura."
+      echo "Para cada task abaixo, abra com Read as DUAS CAPTURAS (computador e celular)"
+      echo "e, quando houver, o ALVO. Compare estrutura, hierarquia, tokens (superficies,"
+      echo "acento, tipografia), estados e textos visiveis. Divergencia que o usuario"
+      echo "notaria => INCOMPLETE, dizendo O QUE difere. Task com tela so e DONE citando"
+      echo "o caminho da captura."
       local pos route sel target theme
       while IFS='|' read -r pos route sel target theme; do
         [ -n "$pos" ] || continue
         echo "- TASK $pos — rota \`$route\`${theme:+ (tema: $theme)} — seletores confirmados na pagina pela captura: \`$sel\`"
         [ -n "$target" ] && echo "  Se a task disser que a tela NAO tem artboard proprio e segue o padrao de outra, compare com o alvo SO tokens, tipografia, cabecalho de tabela, selos e layout de coluna — nunca conteudo, abas ou dados do desenho."
         echo "  captura: \`$EVIDENCE_DIR/${phase_file%.md}/task-${pos}.png\`"
+        echo "  captura celular: \`$EVIDENCE_DIR/${phase_file%.md}/task-${pos}-mobile.png\`"
         [ -n "$target" ] && echo "  alvo:    \`$target\`"
       done <<< "$UI_SCREEN_TASKS"
+      echo
+      ui_defect_rubric
+      echo "Com ou sem alvo, qualquer defeito da regua visivel numa das capturas =>"
+      echo "INCOMPLETE, nomeando o defeito e onde ele aparece. Duvida sobre GOSTO nao"
+      echo "reprova; duvida sobre um defeito da regua, sim."
     fi
     echo
     echo "## Fase a verificar"
@@ -3221,7 +3330,11 @@ detect_usage_limit() {
   )
 
   if [[ "$ENGINE" == "claude" ]]; then
-    pattern='usage limit reached'
+    # CLI 2.x trocou o texto para "You've hit your session limit · resets 5:40am"
+    # e expoe o sinal estruturado "api_error_status":429 no JSON de resultado.
+    # A chave JSON e especifica do resultado do claude -p: nao casa com "429" solto
+    # de output de teste do projeto.
+    pattern='usage limit reached|hit your ([a-z]+ )?limit|"api_error_status": ?429'
   else
     pattern='rate limit reached|quota exceeded|usage limit reached'
   fi
@@ -4114,7 +4227,7 @@ gate3_capture_ui_evidence() {
   mkdir -p "$dir"
   log "Evidencia visual — fotografando $count tela(s) via: $UI_SHOT_CMD"
 
-  local pos route sel target theme out shot_log rc
+  local pos route sel target theme out shot_log rc viewport suffix
   while IFS='|' read -r pos route sel target theme; do
     [ -n "$pos" ] || continue
     if [ -z "$route" ] || [ -z "$sel" ]; then
@@ -4125,22 +4238,28 @@ gate3_capture_ui_evidence() {
       GATE_CAUSE="Task $pos: o PNG-alvo '$target' citado em 'Tela:' nao existe. Exporte o artboard antes de rodar a fase."
       return 1
     fi
-    out="$dir/task-${pos}.png"
-    shot_log="$dir/task-${pos}.shot.log"
-    rm -f "$out"
-    rc=0
-    if command -v timeout > /dev/null 2>&1; then
-      timeout "$UI_SHOT_TIMEOUT" bash -c "$UI_SHOT_CMD \"\$@\"" _ "$route" "$out" "$sel" "$theme" \
-        < /dev/null > "$shot_log" 2>&1 || rc=$?
-    else
-      bash -c "$UI_SHOT_CMD \"\$@\"" _ "$route" "$out" "$sel" "$theme" \
-        < /dev/null > "$shot_log" 2>&1 || rc=$?
-    fi
-    if [ "$rc" -ne 0 ] || [ ! -s "$out" ]; then
-      GATE_CAUSE="Evidencia visual da task $pos falhou (rota '$route', seletores '$sel', exit $rc): a pagina nao renderizou ou um seletor obrigatorio nao existe. Saida da captura:"$'\n'"$(tail -n 40 "$shot_log" 2> /dev/null)"
-      return 1
-    fi
-    log "  task $pos — $route${theme:+ ($theme)} -> $out"
+    # Computador e celular: a regua visual cobre quebra de layout em 400px, que
+    # a foto larga nunca mostra.
+    for viewport in desktop mobile; do
+      suffix=""
+      [ "$viewport" = "mobile" ] && suffix="-mobile"
+      out="$dir/task-${pos}${suffix}.png"
+      shot_log="$dir/task-${pos}${suffix}.shot.log"
+      rm -f "$out"
+      rc=0
+      if command -v timeout > /dev/null 2>&1; then
+        RALPH_UI_VIEWPORT="$viewport" timeout "$UI_SHOT_TIMEOUT" bash -c "$UI_SHOT_CMD \"\$@\"" _ "$route" "$out" "$sel" "$theme" \
+          < /dev/null > "$shot_log" 2>&1 || rc=$?
+      else
+        RALPH_UI_VIEWPORT="$viewport" bash -c "$UI_SHOT_CMD \"\$@\"" _ "$route" "$out" "$sel" "$theme" \
+          < /dev/null > "$shot_log" 2>&1 || rc=$?
+      fi
+      if [ "$rc" -ne 0 ] || [ ! -s "$out" ]; then
+        GATE_CAUSE="Evidencia visual da task $pos falhou (rota '$route', seletores '$sel', viewport $viewport, exit $rc): a pagina nao renderizou ou um seletor obrigatorio nao existe. Saida da captura:"$'\n'"$(tail -n 40 "$shot_log" 2> /dev/null)"
+        return 1
+      fi
+      log "  task $pos — $route${theme:+ ($theme)} [$viewport] -> $out"
+    done
   done <<< "$UI_SCREEN_TASKS"
 
   return 0
