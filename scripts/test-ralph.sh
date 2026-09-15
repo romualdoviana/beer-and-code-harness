@@ -268,6 +268,13 @@ if [ "$write" -eq 1 ]; then
   echo "impl $n" > "src/impl-$n.txt"
 fi
 
+# O Codex pode concluir uma task com um commit proprio. O Gate 1 precisa
+# reconhecer esse HEAD novo como escrita da sessao, mesmo com a arvore limpa.
+if [ "$scenario" = "self-commit" ] && [ "$write" -eq 1 ]; then
+  git add "src/impl-$n.txt"
+  git commit -q -m "feat: mock implementa fase $n"
+fi
+
 # scoped-tests: so a fase 2 (2a sessao de implementacao) cria arquivo de teste.
 # critical-change: so a fase 2 mexe em migration — caminho critico.
 if [ "$scenario" = "scoped-tests" ] && [ "$n" -eq 2 ]; then
@@ -823,6 +830,40 @@ if case_enabled already-done; then
   assert_eq "$before" "$(commits "$d")" "nenhum commit criado (nada a commitar)"
   assert_contains "$d/repo/.phases/.progress" "phase-01.md" "progresso registra a fase"
   assert_contains "$d/repo/.phases/.progress" "phase-02.md" "progresso registra a fase seguinte"
+fi
+
+# ---------------------------------------------------------------------------
+# 17b. Engine que commita dentro da propria sessao ainda escreveu codigo: o
+#      Gate 1 compara tambem o HEAD, nao apenas a arvore que ficou limpa.
+# ---------------------------------------------------------------------------
+if case_enabled gate1-self-commit; then
+  header "17b. commit do engine conta como escrita da sessao"
+  d=$(new_case gate1-self-commit)
+  rc=$(run_ralph "$d" self-commit --engine codex --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 0 "$rc" "exit 0"
+  assert_not_contains "$d/out.log" "Gate 1 — a sessao nao escreveu nada" "gate 1 reconheceu o commit do engine"
+  assert_eq 3 "$(commits "$d")" "fixture e dois commits do engine, sem commit duplicado do ralph"
+fi
+
+# ---------------------------------------------------------------------------
+# 17c. Monorepo sem manifesto na raiz pode declarar o comando no cabecalho do
+#      plano; ele e o fallback explicito depois de flag e variavel de ambiente.
+# ---------------------------------------------------------------------------
+if case_enabled gate2-plan-command; then
+  header "17c. comando RALPH_TEST_CMD declarado no plano alimenta o gate 2"
+  d=$(new_case gate2-plan-command)
+  cat > "$d/repo/ralph-test" <<'TESTCMD'
+#!/usr/bin/env bash
+exec "${MOCK_TEST_CMD:?}" "$@"
+TESTCMD
+  chmod +x "$d/repo/ralph-test"
+  sed -i "1iRALPH_TEST_CMD='./ralph-test'" "$d/repo/.spec/init/project-phases.md"
+  git -C "$d/repo" add -A && git -C "$d/repo" commit -q -m "test: declara comando no plano"
+
+  rc=$(run_ralph "$d" ok --engine codex --max-cycles 1)
+  assert_eq 0 "$rc" "exit 0"
+  assert_contains "$d/out.log" "comando de teste (declarado no plano): ./ralph-test" "gate 2 leu o comando declarado"
+  assert_eq 1 "$(cat "$d/state/test_calls")" "suite executada na fase final"
 fi
 
 # ---------------------------------------------------------------------------

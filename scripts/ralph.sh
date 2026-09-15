@@ -2441,6 +2441,23 @@ check_sail_running() {
   log "Sail: containers de pe"
 }
 
+# Alguns monorepos nao tem manifesto na raiz para a deteccao convencional, mas
+# o plano gerado conhece a suite correta. Aceita apenas a declaracao explicita
+# `RALPH_TEST_CMD='...'` (ou com aspas duplas), sem avaliar o Markdown como
+# shell. Flag e ambiente continuam tendo precedencia sobre esse fallback.
+declared_test_cmd() {
+  [ -f "$INPUT_FILE" ] || return 1
+
+  local command
+  command=$(sed -n "s/.*RALPH_TEST_CMD='\(.*\)'.*/\1/p" "$INPUT_FILE" | head -n 1)
+  if [ -z "$command" ]; then
+    command=$(sed -n 's/.*RALPH_TEST_CMD="\(.*\)".*/\1/p' "$INPUT_FILE" | head -n 1)
+  fi
+
+  [ -n "$command" ] || return 1
+  printf '%s\n' "$command"
+}
+
 resolve_test_cmd() {
   SAIL_BIN="$(detect_sail || true)"
 
@@ -2454,6 +2471,15 @@ resolve_test_cmd() {
   if [ -n "${RALPH_TEST_CMD:-}" ]; then
     TEST_CMD="$RALPH_TEST_CMD"
     log "Gate 2 — comando de teste (RALPH_TEST_CMD): $TEST_CMD"
+    check_sail_running
+    return 0
+  fi
+
+  local plan_test_cmd
+  plan_test_cmd=$(declared_test_cmd || true)
+  if [ -n "$plan_test_cmd" ]; then
+    TEST_CMD="$plan_test_cmd"
+    log "Gate 2 — comando de teste (declarado no plano): $TEST_CMD"
     check_sail_running
     return 0
   fi
@@ -3640,6 +3666,18 @@ tree_signature() {
   } 2> /dev/null | sha256sum | cut -c1-16
 }
 
+# Assinatura da sessao: alem da arvore, inclui HEAD porque alguns engines
+# concluem uma task com git commit. Nesse caso a arvore volta a limpa, mas a
+# sessao escreveu codigo e o Gate 1 nao pode confundi-la com fase preexistente.
+# Nao substitui tree_signature(): os caches do Gate 2 continuam interessados
+# somente no conteudo atualmente testavel, nao na mensagem ou no hash do commit.
+session_signature() {
+  {
+    git rev-parse HEAD 2> /dev/null || true
+    tree_signature
+  } | sha256sum | cut -c1-16
+}
+
 # Gate 1 — esta sessao escreveu codigo?
 #
 # SINAL, nao veredito. Uma fase pode ja estar implementada antes da sessao
@@ -3651,7 +3689,7 @@ tree_signature() {
 # nada") quando algum gate posterior reprova.
 gate1_session_wrote() {
   local sig_before="$1"
-  [ "$(tree_signature)" != "$sig_before" ]
+  [ "$(session_signature)" != "$sig_before" ]
 }
 
 # Identificadores dos testes vermelhos num log de suite, normalizados e unicos.
@@ -4765,7 +4803,7 @@ run_phase() {
       prompt_file=$(build_fix_prompt "$phase_file" "$cycle" "$LAST_GATE" "$GATE_CAUSE")
     fi
 
-    sig_before=$(tree_signature)
+    sig_before=$(session_signature)
     if [ "$cycle" -eq 1 ]; then
       set_activity "implementando a fase"
     else
