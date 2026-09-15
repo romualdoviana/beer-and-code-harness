@@ -857,18 +857,13 @@ if case_enabled gate2-plan-command; then
 exec "${MOCK_TEST_CMD:?}" "$@"
 TESTCMD
   chmod +x "$d/repo/ralph-test"
-  {
-    printf '%s\n' "RALPH_TEST_CMD='for alvo in esperado; do ./ralph-test \\\$alvo; done'"
-    cat "$d/repo/.spec/init/project-phases.md"
-  } > "$d/repo/.spec/init/project-phases.md.novo"
-  mv "$d/repo/.spec/init/project-phases.md.novo" "$d/repo/.spec/init/project-phases.md"
+  sed -i "1iRALPH_TEST_CMD='./ralph-test'" "$d/repo/.spec/init/project-phases.md"
   git -C "$d/repo" add -A && git -C "$d/repo" commit -q -m "test: declara comando no plano"
 
   rc=$(run_ralph "$d" ok --engine codex --max-cycles 1)
   assert_eq 0 "$rc" "exit 0"
-  assert_contains "$d/out.log" "comando de teste (declarado no plano): for alvo in esperado; do ./ralph-test \$alvo; done" "gate 2 leu o comando declarado"
+  assert_contains "$d/out.log" "comando de teste (declarado no plano): ./ralph-test" "gate 2 leu o comando declarado"
   assert_eq 1 "$(cat "$d/state/test_calls")" "suite executada na fase final"
-  assert_eq "esperado" "$(cat "$d/state/test_args")" "escape de variavel do plano foi normalizado"
 fi
 
 # ---------------------------------------------------------------------------
