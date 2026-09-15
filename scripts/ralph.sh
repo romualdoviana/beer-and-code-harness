@@ -2455,6 +2455,13 @@ declared_test_cmd() {
   fi
 
   [ -n "$command" ] || return 1
+
+  # O plano e Markdown: a geracao escapa `$variavel` para documentar um laço
+  # interno. Quando o valor e entregue depois a `bash -c`, a barra impediria a
+  # expansao na sub-shell e faria o runner receber o texto literal `$variavel`.
+  # A normalizacao e exclusiva deste fallback; flag e ambiente sao shell do
+  # operador e permanecem verbatim.
+  command="${command//\\\$/\$}"
   printf '%s\n' "$command"
 }
 
