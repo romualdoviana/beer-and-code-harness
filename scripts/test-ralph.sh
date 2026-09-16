@@ -126,6 +126,7 @@ fi
 # implementacao no repo, a fase esta incompleta.
 if [ "$verify" -eq 1 ]; then
   n=$(bump verify_calls)
+  printf '%s' "$prompt" > "$state/verify_prompt"
   tasks=$(grep -cE '^[[:space:]]*- \[[ x]\]' <<< "$prompt")
 
   implemented=0
@@ -864,6 +865,23 @@ TESTCMD
   assert_eq 0 "$rc" "exit 0"
   assert_contains "$d/out.log" "comando de teste (declarado no plano): ./ralph-test" "gate 2 leu o comando declarado"
   assert_eq 1 "$(cat "$d/state/test_calls")" "suite executada na fase final"
+fi
+
+# ---------------------------------------------------------------------------
+# 17d. O Codex recebe shell em sandbox read-only, nao as ferramentas nomeadas
+#      Read/Glob/Grep do Claude. O prompt precisa permitir essa inspecao.
+# ---------------------------------------------------------------------------
+if case_enabled verify-codex-readonly; then
+  header "17d. verificador Codex recebe instrucoes de leitura compativeis"
+  d=$(new_case verify-codex-readonly)
+  mkdir -p "$d/repo/src"
+  echo "implementacao previa" > "$d/repo/src/impl-1.txt"
+  git -C "$d/repo" add -A && git -C "$d/repo" commit -q -m "test: fase ja implementada"
+
+  rc=$(run_ralph "$d" already-done --engine codex --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 0 "$rc" "exit 0"
+  assert_contains "$d/state/verify_prompt" "No Codex, inspecione somente com comandos de leitura" "prompt Codex libera leitura no sandbox"
+  assert_not_contains "$d/state/verify_prompt" "Voce NAO executa comandos: esta sessao so le (Read/Glob/Grep)" "prompt nao exige ferramentas ausentes no Codex"
 fi
 
 # ---------------------------------------------------------------------------

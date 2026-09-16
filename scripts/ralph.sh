@@ -3090,10 +3090,6 @@ Regras:
 - Nao repita um indice e nao pule nenhum: exatamente uma linha por task, na
   ordem, sem resumo nem repeticao do bloco no final.
 - Nao emita nenhum outro texto alem das linhas TASK.
-- Voce NAO executa comandos: esta sessao so le (Read/Glob/Grep). A suite de
-  testes ja foi executada pelo orquestrador antes de voce (gate 2). Julgue
-  pelo codigo real e pelos arquivos de evidencia listados — nunca pelo relato
-  de quem implementou, nunca pelo checkbox, nunca por "parece completo".
 - Todo DONE carrega prova: `TASK <n>: DONE — <arquivo:linha>` apontando o
   trecho que satisfaz o acceptance criteria (varios separados por `;`), ou o
   caminho da captura .png nas tasks com tela. DONE sem `— evidencia` e
@@ -3111,6 +3107,21 @@ Regras:
   estar pronta. So o codigo real decide.
 - Na duvida, INCOMPLETE.
 VERIFY
+    if [[ "$ENGINE" == "codex" ]]; then
+      cat <<'CODEX_VERIFY'
+- No Codex, inspecione somente com comandos de leitura (`rg`, `sed`, `git
+  diff`, `git status`) dentro do sandbox read-only. Nao crie, edite, mova ou
+  apague arquivos; nao rode testes nem comandos que alterem estado. A suite ja
+  foi executada pelo orquestrador no gate 2.
+CODEX_VERIFY
+    else
+      cat <<'CLAUDE_VERIFY'
+- Voce NAO executa comandos: esta sessao so le (Read/Glob/Grep). A suite de
+  testes ja foi executada pelo orquestrador antes de voce. Julgue pelo codigo
+  real e pelos arquivos de evidencia listados — nunca pelo relato de quem
+  implementou, nunca pelo checkbox, nunca por "parece completo".
+CLAUDE_VERIFY
+    fi
     # Verificacao escopada (revalidacao entre rounds de conserto cirurgico): as
     # POSICOES continuam as originais da fase. Renumerar de 1..k e o caminho
     # curto para o bug de indice que ja custou uma fase reprovada de graca.
