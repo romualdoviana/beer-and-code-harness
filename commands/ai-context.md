@@ -99,7 +99,7 @@ Trust but verify — run these checks yourself (parallel `Bash` calls) on every 
 
 ```bash
 # size checks ignore foreign marker blocks (third-party <tag>...</tag> regions, e.g. Laravel Boost)
-strip_foreign() { awk '/^<[A-Za-z][-A-Za-z0-9]*>$/{skip=1} !skip{print} /^<\/[A-Za-z][-A-Za-z0-9]*>$/{skip=0}' "$1"; }
+strip_foreign() { awk '!tag && /^<[A-Za-z][-A-Za-z0-9]*>$/{tag=substr($0,2,length($0)-2); next} tag && $0=="</" tag ">"{tag=""; next} !tag{print}' "$1"; }
 
 test -f <path>                                      # exists
 [ "$(wc -c < <path>)" -ge 120 ]                     # non-trivial body (skip for CLAUDE.md)

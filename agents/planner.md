@@ -186,13 +186,13 @@ Antes de implementar, leia:
 1. `.spec/features/[slug]/SPEC.md` — requisitos RIGID que esta fase cobre
 2. `.spec/features/[slug]/PLAN.md` — decomposição completa, dependências e riscos
 
-- [ ] T01 — <task title>
+- [ ] T01 — <task title> (PLAN: T01)
       Arquivos: `path/to/file.ext`
       Mudança: <what to do>
       Cobre: RF-XX
       Acceptance criteria: <condição verificável>
       Testes: `path/to/test.ext` — <test case>   |   none — <motivo>
-- [ ] T02 — <task title>
+- [ ] T02 — <task title> (PLAN: T02)
       ...
 
 ## Phase 2: <phase title>
@@ -203,9 +203,11 @@ Antes de implementar, leia:
 1. `.spec/features/[slug]/SPEC.md` — requisitos RIGID que esta fase cobre
 2. `.spec/features/[slug]/PLAN.md` — decomposição completa, dependências e riscos
 
-- [ ] T03 — <task title>
+- [ ] T01 — <task title> (PLAN: T03)
       ...
 ```
+
+Checkbox numbering RESTARTS AT `T01` INSIDE EVERY PHASE, and the PLAN.md id it comes from goes in the trailing `(PLAN: TNN)` tag. ralph's gate 3 indexes the tasks of a phase BY POSITION (`1..N` within that phase) and expects the verifier to answer `TASK <position>: DONE`. A continuous numbering across phases (`T04` alone inside a phase that holds one task) makes the verifier answer `TASK 4` against a `1..1` range, so gate 3 turns red on a phase whose code is complete and committed — three correction cycles get burned re-verifying finished work, and the run stops before the phases that follow. The `(PLAN: TNN)` tag is what keeps PHASES.md traceable to PLAN.md once the ids no longer match one to one; the router's parity check counts `- [ ]` against `### T`, never the ids themselves.
 
 Every checkbox carries `Acceptance criteria:` — ralph's independent verifier (gate 3) checks each task against them.
 

@@ -196,7 +196,7 @@ Sem argumento, resolve o input nesta ordem: `.spec/init/project-phases.md` → `
 | 0 | O engine terminou de verdade? | claude: `is_error` no JSON de resultado; codex: exit code |
 | 1 | A sessão escreveu código? | Assinatura da árvore antes/depois. **Sinal, não veredito** — fase já implementada faz o engine (corretamente) não escrever nada; o sinal alimenta a causa do ciclo de correção |
 | 2 | Os testes do projeto passam? | Rodados **pelo ralph**, fora da sessão do agente — o agente não pode "mentir verde". O **escopo varia por fase**: veja abaixo |
-| 3 | Cada task está de fato no código? | Sessão verificadora independente, read-only, que emite `TASK <n>: DONE/INCOMPLETE` por task. Roda em toda fase por default (`RALPH_VERIFY=always`); no engine claude usa `sonnet` |
+| 3 | Cada task está de fato no código? | Sessão verificadora independente, read-only, que emite `TASK <n>: DONE/INCOMPLETE` por task. Roda quando o gate 2 nao basta — fase que a suite nao cobriu, sessao sem escrita, ciclo de correcao (`RALPH_VERIFY=auto`, default); `always` roda em toda fase. No engine claude usa `sonnet` |
 
 Qualquer gate vermelho → **ciclo de correção**: sessão nova recebe a fase inteira + a causa real da falha (nunca "os testes falharam" genérico). Default: 3 ciclos por fase.
 
@@ -224,7 +224,7 @@ Fail-safe em toda borda: runner que não aceita caminho (`go`, `cargo`, comando 
 
 ### Conserto cirúrgico (antes do ciclo)
 
-Um ciclo de correção é caro: sessão nova com preâmbulo de contexto, a fase inteira no prompt e acesso total ao projeto. Pagar isso porque **uma** assertion ficou vermelha é desperdício. Antes de gastar um ciclo, o ralph tenta até **2 consertos cirúrgicos** (`RALPH_MAX_REPAIRS`):
+Um ciclo de correção é caro: sessão nova com preâmbulo de contexto, a fase inteira no prompt e acesso total ao projeto. Pagar isso porque **uma** assertion ficou vermelha é desperdício. Antes de gastar um ciclo, o ralph pode tentar **consertos cirúrgicos** (`RALPH_MAX_REPAIRS`, default `0` — desligado; `RALPH_REPAIR=on` religa):
 
 - **Prompt mínimo**: só a assinatura da falha — teste que quebrou, `arquivo:linha`, mensagem da assertion — ou só as linhas `INCOMPLETE` do verificador. Sem preâmbulo, sem a fase.
 - **Modelo próprio e forte** (`RALPH_REPAIR_MODEL`, default `opus` no claude): é a única etapa que escreve código com contexto mínimo e a única que pode abortar a fase sozinha (`REPAIR_ABORT`). Patch cego e desistência errada custam mais que a diferença de modelo.
@@ -235,6 +235,24 @@ Um ciclo de correção é caro: sessão nova com preâmbulo de contexto, a fase 
 **Revalidação.** Entre rounds, o gate 3 roda **escopado**: só as tasks que estavam `INCOMPLETE`, nas posições originais (nada é renumerado). Um `INCOMPLETE` fora do escopo reprova — é o conserto tendo quebrado algo que já estava de pé. Verde no escopo **não fecha a fase**: a cadeia completa (gate 2 no escopo da fase + verificação de todas as tasks) roda antes de qualquer commit. O conserto nunca commita.
 
 `--no-repair` (ou `--max-repairs 0`) desliga e devolve o comportamento antigo: gate vermelho → ciclo.
+
+### Sessão de resgate (antes de dar a fase por perdida)
+
+Quando a fase trava — o conserto desiste com `REPAIR_ABORT`, os consertos esgotam, o ciclo fica improdutivo ou os `--max-cycles` acabam — o ralph parava e o dev recebia um log. Mas o motivo real do travamento quase nunca é falta de força do modelo: é que **todas as etapas anteriores trabalham com autoridade estreita**. O ciclo corrige "o que falta"; o conserto mexe só no arquivo da assinatura; nenhum dos dois pode reorganizar a implementação nem encostar num teste existente que passou a contradizer a fase.
+
+O resgate é a etapa com a autoridade que faltava — **1 sessão por fase** por default (`RALPH_MAX_RESCUES`):
+
+- **Prompt largo e auto-contido**: preâmbulo de contexto + a fase inteira + o motivo do travamento + o veredito bruto do último gate + a desistência do conserto **verbatim** + o `git diff` do trabalho parcial na árvore.
+- **Modelo próprio e forte** (`RALPH_RESCUE_MODEL`, default `opus` no claude).
+- **Pode** reorganizar a implementação entre arquivos e camadas, e **pode** ajustar teste existente que contradiz o comportamento exigido pela fase — a única hipótese de encostar em teste que já existia.
+- **Não pode** afrouxar teste para ficar verde (apagar, pular, comentar, enfraquecer assert, mudar runner ou config), nem criar teste que a fase não pediu. Toda alteração de teste sai justificada por escrito (`TESTE ALTERADO: ...`).
+- **Não consome ciclo nem conserto**: orçamento próprio, por fase.
+
+**Não substitui gate.** Depois do resgate roda a cadeia **completa** — gate 2 no escopo da fase + gate 3 de todas as tasks — e só então a fase commita, como qualquer outra. Verde de resgate é verde igual; o commit registra a origem (`Fechada pela sessão de resgate (round N)`), porque essa fase merece revisão humana com prioridade.
+
+**Desistência honesta.** Se o bloqueio for contradição da **própria especificação** (a fase exige A, outra regra acordada exige não-A), o resgate para sem editar nada e responde `RESCUE_BLOCKED: <conflito>`. Nenhum round adicional é gasto: a decisão é humana. Ambiente fora do ar também **não** aciona resgate — serviço morto não é defeito de código.
+
+`--no-rescue` (ou `--max-rescues 0`) desliga e devolve o comportamento anterior: fase travada → run para.
 
 ### Ambiente fora do ar (veredito próprio do gate 2)
 
@@ -262,9 +280,12 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | `--model NOME` | Modelo das sessões de implementação e correção (default: o da CLI do engine) |
 | `--from N` | Começa na fase N (limpa o progresso das fases ≥ N) |
 | `--keep-going` | Continua após fase falhar (cria commit `wip(phase-N)`; default: para) |
-| `--max-cycles N` | Ciclos de correção por fase (default: 3) |
+| `--max-cycles N` | Ciclos de correção por fase (default: 2) |
 | `--max-repairs N` | Consertos cirúrgicos por ciclo (default: 2; `0` desliga) |
 | `--no-repair` | Desliga o conserto cirúrgico |
+| `--max-rescues N` | Sessões de resgate por fase (default: 2; `0` desliga) |
+| `--no-rescue` | Desliga a sessão de resgate |
+| `--rescue-model NOME` | Modelo da sessão de resgate (default no claude: `opus`) |
 | `--test-cmd "<cmd>"` | Comando de teste do projeto (gate 2) |
 | `--full-suite` | Gate 2 roda a suite completa em toda fase (comportamento anterior) |
 | `--baseline` | Mede em HEAD o que já está vermelho e faz o gate 2 cobrar só o **delta** (default: desligado) |
@@ -280,15 +301,18 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | `RALPH_CRITICAL_PATHS` | ERE de caminho crítico: fase cujo diff casa roda a suite completa |
 | `RALPH_TEST_FILE_RE` | ERE que reconhece arquivo de teste |
 | `RALPH_BASELINE` | `on` liga o baseline do gate 2 (mesmo que `--baseline`; default: `off`) |
-| `RALPH_VERIFY` | Gate 3: `always` (default) \| `auto` (economiza: só quando o gate 2 não basta) \| `off` |
+| `RALPH_VERIFY` | Gate 3: `auto` (default: só quando o gate 2 não basta) \| `always` \| `off` |
 | `RALPH_VERIFY_MODEL` | Modelo do verificador (default no claude: `sonnet`) |
 | `RALPH_MODEL` | Modelo das sessões de implementação/correção (vazio = o da CLI) |
 | `RALPH_ENV_GUARD` | Detecção de ambiente fora do ar: `on` (default) \| `off` |
 | `RALPH_ENV_RECOVER_TIMEOUT` | Segundos de espera pelos serviços ao tentar levantá-los (default: 90) |
-| `RALPH_MAX_CYCLES` | Ciclos de correção por fase (default: 3) |
+| `RALPH_MAX_CYCLES` | Ciclos de correção por fase (default: 2) |
 | `RALPH_REPAIR` | Conserto cirúrgico: `on` (default) \| `off` |
-| `RALPH_MAX_REPAIRS` | Consertos por ciclo (default: 2; `0` desliga) |
+| `RALPH_MAX_REPAIRS` | Consertos por ciclo (default: `0` = desligado) |
 | `RALPH_REPAIR_MODEL` | Modelo do conserto cirúrgico (default no claude: `opus`) |
+| `RALPH_RESCUE` | Sessão de resgate: `on` (default) \| `off` |
+| `RALPH_MAX_RESCUES` | Sessões de resgate por fase (default: 1; `0` desliga) |
+| `RALPH_RESCUE_MODEL` | Modelo do resgate (default no claude: `opus`) |
 | `RALPH_REPAIR_MAX_FILES` | Acima de N arquivos na assinatura da falha, vai direto ao ciclo (default: 5) |
 | `RALPH_REPAIR_MAX_TASKS` | Acima de N tasks incompletas, idem (default: 3) |
 | `RALPH_MAX_LIMIT_WAITS` | Esperas consecutivas por limite de uso, por fase (default: 20) |
@@ -301,7 +325,7 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | `RALPH_UI_KEYS` | Navegação por teclado na tabela do painel: `1` (default) \| `0` desliga |
 | `RALPH_SERVE_PORT` | Primeira porta tentada pelo `--serve` (default: 7433) |
 
-Durante cada sessão, o ralph exporta `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, `RALPH_PHASE_MAX_ATTEMPTS` e `RALPH_PHASE_REPAIR` (round de conserto; `0` = nenhum).
+Durante cada sessão, o ralph exporta `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, `RALPH_PHASE_MAX_ATTEMPTS` `RALPH_PHASE_REPAIR` (round de conserto; `0` = nenhum) e `RALPH_PHASE_RESCUE` (round de resgate; `0` = nenhum).
 
 ### Painel visual e dashboard web
 
@@ -358,7 +382,7 @@ Uma sessão do engine dura minutos e a CLI pode não emitir nada legível nesse 
 | Arquivos tocados | `git status --porcelain`, recalculado a cada ~3s | mostra o trabalho aparecendo na árvore |
 | Última linha de progresso | `tail` do `.stderr.log`, lido a cada frame | quando a CLI streama, é o que ela está fazendo |
 
-Quando a CLI não streama progresso (`claude -p --output-format json` não escreve no stderr), a linha vira `engine em silêncio há Xs` em vez de repetir "aguardando" — a taxa de saída e a contagem de arquivos continuam sendo a prova de vida.
+A linha mostra a última ação do engine lida ao vivo do stream (`claude -p --output-format stream-json`): a ferramenta e o alvo, por exemplo `Edit app/Models/RemittanceBatch.php`. Enquanto o engine ainda não usou ferramenta nenhuma, a linha diz há quanto tempo está nessa etapa. O contador de ações e a contagem de arquivos tocados são a prova de vida.
 
 ### Qual task está sendo trabalhada
 

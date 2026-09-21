@@ -33,7 +33,7 @@ Third-party tools (e.g. Laravel Boost) inject machine-managed blocks into AGENTS
 </laravel-boost-guidelines>
 ```
 
-A **foreign block** is any region from a line matching `^<[A-Za-z][-A-Za-z0-9]*>$` to the matching `^</tag>$` line. HTML comments (`<!-- -->`) are not foreign blocks.
+A **foreign block** is any region from a line matching `^<[A-Za-z][-A-Za-z0-9]*>$` to the line that closes **that same tag name** (`^</tag>$`). Inner lines like `</code-snippet>` or `<example>` inside a block belong to it and never open or close anything — match by name, never "next closing tag". HTML comments (`<!-- -->`) are not foreign blocks.
 
 - Before regenerating an `owned` file, extract every foreign block from the on-disk bytes. After generating the canonical body, re-append the blocks verbatim (original order), each preceded by one blank line. Never reword, reformat, or merge them.
 - In AGENTS.md, `_End of AGENTS.md_` closes the canonical body; preserved foreign blocks come after it.
@@ -100,7 +100,7 @@ When adopting a `not-owned` CLAUDE.md: migrate its concrete rules (outside forei
 
 ```bash
 # size checks ignore foreign marker blocks
-strip_foreign() { awk '/^<[A-Za-z][-A-Za-z0-9]*>$/{skip=1} !skip{print} /^<\/[A-Za-z][-A-Za-z0-9]*>$/{skip=0}' "$1"; }
+strip_foreign() { awk '!tag && /^<[A-Za-z][-A-Za-z0-9]*>$/{tag=substr($0,2,length($0)-2); next} tag && $0=="</" tag ">"{tag=""; next} !tag{print}' "$1"; }
 
 test -f <target>/AGENTS.md
 [ "$(wc -c < <target>/AGENTS.md)" -ge 120 ]

@@ -200,7 +200,7 @@ With no argument, the input resolves in this order: `.spec/init/project-phases.m
 | 0 | Did the engine actually finish? | claude: `is_error` in the result JSON; codex: exit code |
 | 1 | Did the session write code? | Tree signature before/after. **A signal, not a verdict** — an already-implemented phase makes the engine (correctly) write nothing; the signal feeds the fix-cycle cause |
 | 2 | Do the project's tests pass? | Run **by ralph itself**, outside the agent session — the agent cannot "fake green". The **scope varies per phase**: see below |
-| 3 | Is each task actually in the code? | Independent read-only verifier session that emits `TASK <n>: DONE/INCOMPLETE` per task. Runs on every phase by default (`RALPH_VERIFY=always`); on the claude engine it uses `sonnet` |
+| 3 | Is each task actually in the code? | Independent read-only verifier session that emits `TASK <n>: DONE/INCOMPLETE` per task. Runs when gate 2's verdict isn't enough — a phase the suite did not cover, a session that wrote nothing, a fix cycle (`RALPH_VERIFY=auto`, default); `always` runs it on every phase. On the claude engine it uses `sonnet` |
 
 Any red gate → **fix cycle**: a fresh session receives the full phase + the real failure cause (never a generic "tests failed"). Default: 3 cycles per phase.
 
@@ -228,7 +228,7 @@ Fail-safe on every edge: a runner that does not take a path (`go`, `cargo`, an u
 
 ### Surgical repair (before the cycle)
 
-A fix cycle is expensive: a fresh session with the context preamble, the whole phase in the prompt, and full project access. Paying that because **one** assertion went red is waste. Before spending a cycle, ralph tries up to **2 surgical repairs** (`RALPH_MAX_REPAIRS`):
+A fix cycle is expensive: a fresh session with the context preamble, the whole phase in the prompt, and full project access. Paying that because **one** assertion went red is waste. Before spending a cycle, ralph can try **surgical repairs** (`RALPH_MAX_REPAIRS`, default `0` — off; `RALPH_REPAIR=on` re-enables):
 
 - **Minimal prompt**: only the failure signature — the failing test, `file:line`, the assertion message — or only the verifier's `INCOMPLETE` lines. No preamble, no phase.
 - **Its own strong model** (`RALPH_REPAIR_MODEL`, claude default `opus`): it is the only step that writes code from a minimal context, and the only one that can abort the phase on its own (`REPAIR_ABORT`). A blind patch and a wrong bail-out both cost more than the model difference.
@@ -239,6 +239,24 @@ A fix cycle is expensive: a fresh session with the context preamble, the whole p
 **Revalidation.** Between rounds gate 3 runs **scoped**: only the tasks that were `INCOMPLETE`, at their original positions (nothing is renumbered). An `INCOMPLETE` outside the scope fails the gate — that is the repair having broken something that already stood. Scope green **does not close the phase**: the full chain (gate 2 at the phase's scope + verification of every task) runs before any commit. A repair never commits.
 
 `--no-repair` (or `--max-repairs 0`) turns it off and restores the old behavior: red gate → cycle.
+
+### Rescue session (before giving the phase up)
+
+When a phase gets stuck — the repair bails out with `REPAIR_ABORT`, the repairs run out, a cycle turns unproductive, or `--max-cycles` is exhausted — ralph used to stop and hand the developer a log. But the real reason for the deadlock is almost never model horsepower: it is that **every earlier step works with narrow authority**. The cycle fixes "what is missing"; the repair only touches the file in the signature; neither may reorganize the implementation or touch an existing test that now contradicts the phase.
+
+The rescue is the step with the authority that was missing — **1 session per phase** by default (`RALPH_MAX_RESCUES`):
+
+- **Wide, self-contained prompt**: context preamble + the whole phase + why it got stuck + the raw verdict of the last gate + the repair's bail-out **verbatim** + the `git diff` of the partial work in the tree.
+- **Its own strong model** (`RALPH_RESCUE_MODEL`, claude default `opus`).
+- **May** reorganize the implementation across files and layers, and **may** adjust an existing test that contradicts the behavior the phase requires — the only case for touching a pre-existing test.
+- **May not** loosen a test to go green (delete, skip, comment out, weaken an assert, change the runner or config), nor create a test the phase did not ask for. Every test change is justified in writing (`TESTE ALTERADO: ...`).
+- **Consumes neither cycle nor repair**: its own budget, per phase.
+
+**It does not replace a gate.** After the rescue the **full** chain runs — gate 2 at the phase's scope + gate 3 over every task — and only then does the phase commit, like any other. Rescue green is the same green; the commit records where it came from, because that phase deserves human review first.
+
+**Honest bail-out.** If the blocker is a contradiction in the **spec itself** (the phase requires A, another agreed rule requires not-A), the rescue stops without editing anything and answers `RESCUE_BLOCKED: <conflict>`. No extra round is spent: that call is human. An environment that is down also does **not** trigger a rescue — a dead service is not a code defect.
+
+`--no-rescue` (or `--max-rescues 0`) turns it off and restores the previous behavior: stuck phase → the run stops.
 
 ### Environment down (gate 2's own verdict)
 
@@ -266,9 +284,12 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `--model NAME` | Model for the implementation/fix sessions (default: the engine CLI's own) |
 | `--from N` | Starts at phase N (clears progress for phases ≥ N) |
 | `--keep-going` | Continues after a phase fails (creates a `wip(phase-N)` commit; default: stop) |
-| `--max-cycles N` | Fix cycles per phase (default: 3) |
+| `--max-cycles N` | Fix cycles per phase (default: 2) |
 | `--max-repairs N` | Surgical repairs per cycle (default: 2; `0` disables) |
 | `--no-repair` | Disables surgical repair |
+| `--max-rescues N` | Rescue sessions per phase (default: 2; `0` disables) |
+| `--no-rescue` | Disables the rescue session |
+| `--rescue-model NAME` | Rescue session model (claude default: `opus`) |
 | `--test-cmd "<cmd>"` | Project test command (gate 2) |
 | `--full-suite` | Gate 2 runs the whole suite on every phase (previous behavior) |
 | `--baseline` | Measures what is already red at HEAD and makes gate 2 charge only the **delta** (default: off) |
@@ -284,15 +305,18 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `RALPH_CRITICAL_PATHS` | ERE for critical paths: a phase whose diff matches runs the whole suite |
 | `RALPH_TEST_FILE_RE` | ERE that recognizes a test file |
 | `RALPH_BASELINE` | `on` enables the gate 2 baseline (same as `--baseline`; default: `off`) |
-| `RALPH_VERIFY` | Gate 3: `always` (default) \| `auto` (saves tokens: only when gate 2's verdict isn't enough) \| `off` |
+| `RALPH_VERIFY` | Gate 3: `auto` (default: only when gate 2's verdict isn't enough) \| `always` \| `off` |
 | `RALPH_VERIFY_MODEL` | Verifier model (claude default: `sonnet`) |
 | `RALPH_MODEL` | Model for the implementation/fix sessions (empty = the CLI's own) |
 | `RALPH_ENV_GUARD` | Environment-down detection: `on` (default) \| `off` |
 | `RALPH_ENV_RECOVER_TIMEOUT` | Seconds to wait for services when bringing them up (default: 90) |
-| `RALPH_MAX_CYCLES` | Fix cycles per phase (default: 3) |
+| `RALPH_MAX_CYCLES` | Fix cycles per phase (default: 2) |
 | `RALPH_REPAIR` | Surgical repair: `on` (default) \| `off` |
-| `RALPH_MAX_REPAIRS` | Repairs per cycle (default: 2; `0` disables) |
+| `RALPH_MAX_REPAIRS` | Repairs per cycle (default: `0` = off) |
 | `RALPH_REPAIR_MODEL` | Surgical repair model (claude default: `opus`) |
+| `RALPH_RESCUE` | Rescue session: `on` (default) \| `off` |
+| `RALPH_MAX_RESCUES` | Rescue sessions per phase (default: 1; `0` disables) |
+| `RALPH_RESCUE_MODEL` | Rescue session model (claude default: `opus`) |
 | `RALPH_REPAIR_MAX_FILES` | Above N files in the failure signature, go straight to the cycle (default: 5) |
 | `RALPH_REPAIR_MAX_TASKS` | Above N incomplete tasks, same (default: 3) |
 | `RALPH_MAX_LIMIT_WAITS` | Consecutive usage-limit waits, per phase (default: 20) |
@@ -305,7 +329,7 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `RALPH_UI_KEYS` | Keyboard navigation in the panel table: `1` (default) \| `0` disables |
 | `RALPH_SERVE_PORT` | First port `--serve` tries (default: 7433) |
 
-During each session, ralph exports `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, `RALPH_PHASE_MAX_ATTEMPTS`, and `RALPH_PHASE_REPAIR` (repair round; `0` = none).
+During each session, ralph exports `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, `RALPH_PHASE_MAX_ATTEMPTS`, `RALPH_PHASE_REPAIR` (repair round; `0` = none), and `RALPH_PHASE_RESCUE` (rescue round; `0` = none).
 
 ### Visual panel and web dashboard
 
@@ -362,7 +386,7 @@ An engine session runs for minutes and the CLI may emit nothing readable in that
 | Files touched | `git status --porcelain`, recomputed every ~3s | shows the work landing in the tree |
 | Last progress line | `tail` of the `.stderr.log`, read every frame | when the CLI streams, this is what it is doing |
 
-When the CLI does not stream progress (`claude -p --output-format json` writes nothing to stderr), the line becomes `engine em silêncio há Xs` instead of repeating "waiting" — the output rate and the file count stay as the proof of life.
+The line shows the engine's last action, read live from the stream (`claude -p --output-format stream-json`): the tool and its target, e.g. `Edit app/Models/RemittanceBatch.php`. While the engine has not used a tool yet, the line says how long it has been on that step. The action counter and the touched-file count are the proof of life.
 
 ### Which task is being worked on
 

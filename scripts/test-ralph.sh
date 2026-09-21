@@ -67,6 +67,22 @@ bump() {
   echo "$n"
 }
 
+MOCK_WROTE=()
+
+# NDJSON como o `claude -p --output-format stream-json` real: um evento por
+# acao e o veredito no evento final. O ralph le o `result` para os gates e os
+# `tool_use` para o painel e para o progresso por task.
+emit_claude_ndjson() {
+  local text="$1" err="${2:-false}" sub="${3:-success}"
+  local f
+  for f in "${MOCK_WROTE[@]:-}"; do
+    [ -n "$f" ] || continue
+    printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"%s"}}]}}\n' "$f"
+  done
+  printf '{"type":"result","subtype":"%s","is_error":%s,"result":"%s"}\n' \
+    "$sub" "$err" "$(printf '%s' "$text" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN{ORS="\\n"}{print}' | sed 's/\\n$//')"
+}
+
 model=""
 
 if [ "$name" = "claude" ]; then
@@ -125,6 +141,10 @@ fi
 # Verifica o CODIGO REAL, como o verificador de verdade: sem arquivo de
 # implementacao no repo, a fase esta incompleta.
 if [ "$verify" -eq 1 ]; then
+  # O bloco inteiro roda num subshell e a saida e capturada: o claude real
+  # devolve a resposta do verificador dentro do `result` do NDJSON, nunca como
+  # texto solto. Os `exit 0` internos encerram o subshell, nao o mock.
+  verify_out=$(
   n=$(bump verify_calls)
   printf '%s' "$prompt" > "$state/verify_prompt"
   tasks=$(grep -cE '^[[:space:]]*- \[[ x]\]' <<< "$prompt")
@@ -174,8 +194,21 @@ if [ "$verify" -eq 1 ]; then
       ;;
   esac
 
+  if [ "$scenario" = "rescue-fix" ]; then
+    # A task 1 so fica pronta depois que a SESSAO DE RESGATE roda: e o cenario
+    # do travamento real — nem o ciclo nem o conserto davam conta.
+    if [ -f "$state/rescue_calls" ]; then
+      for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
+    else
+      echo "TASK 1: INCOMPLETE — a regra nasce no lugar errado do fluxo"
+      for i in $(seq 2 "$tasks"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
+    fi
+    exit 0
+  fi
+
   if [ "$scenario" = "verify-incomplete-always" ] \
-    || [ "$scenario" = "repair-abort" ] || [ "$scenario" = "repair-nochange" ]; then
+    || [ "$scenario" = "repair-abort" ] || [ "$scenario" = "repair-nochange" ] \
+    || [ "$scenario" = "rescue-blocked" ]; then
     # Task 1 nunca fica pronta: da o gate 3 vermelho que aciona o conserto e
     # exercita o esgotamento / a desistencia.
     echo "TASK 1: INCOMPLETE — o arquivo nao foi criado"
@@ -186,11 +219,80 @@ if [ "$verify" -eq 1 ]; then
   else
     for i in $(seq 1 "$tasks"); do echo "TASK $i: DONE — src/impl-$i.txt:1"; done
   fi
+  )
+  if [ "$name" = "claude" ]; then
+    emit_claude_ndjson "$verify_out"
+  else
+    printf '%s\n' "$verify_out"
+  fi
   exit 0
 fi
 
-emit_claude_ok()    { echo '{"type":"result","subtype":"success","is_error":false,"result":"implementado"}'; }
-emit_claude_limit() { echo "{\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true,\"result\":\"Claude AI usage limit reached|$1\"}"; }
+emit_claude_ok()    { emit_claude_ndjson "implementado"; }
+emit_claude_limit() { emit_claude_ndjson "Claude AI usage limit reached|$1" true error; }
+
+# --- saneamento do HEAD ------------------------------------------------------
+# Vem antes de todas: e a unica sessao que roda ANTES da fase 1, e o prompt dela
+# carrega o mandato de guarda obsoleta que tambem vai no conserto e no resgate.
+if grep -q '^RALPH_HEAL' <<< "$prompt"; then
+  n=$(bump heal_calls)
+  [ -n "$model" ] && echo "$model" > "$state/heal_model"
+  printf '%s' "$prompt" > "$state/heal_prompt_$n.txt"
+
+  case "$scenario" in
+    heal-blocked)
+      # Os dois lados sao decisoes vivas: a sessao para sem editar nada.
+      if [ "$name" = "claude" ]; then
+        emit_claude_ndjson "HEAL_ABORT: a guarda cobra comportamento que ninguem implementou"
+      else
+        echo "HEAL_ABORT: a guarda cobra comportamento que ninguem implementou"
+      fi
+      exit 0
+      ;;
+    *)
+      # Atualiza a guarda obsoleta: o arquivo que a suite mock olha.
+      mkdir -p tests
+      echo "guarda atualizada" > "tests/GuardaVelhaTest.txt"
+      touch "$state/healed"
+      ;;
+  esac
+
+  if [ "$name" = "claude" ]; then emit_claude_ok; else echo "Done."; fi
+  exit 0
+fi
+
+# --- sessao de resgate -------------------------------------------------------
+# TEM que vir antes do conserto: o prompt de resgate carrega a desistencia do
+# conserto verbatim, e com ela a string REPAIR_ABORT. Classificar pelo conserto
+# primeiro faria o mock (e qualquer parser) trocar as duas etapas.
+if grep -q '^RALPH_RESCUE' <<< "$prompt"; then
+  n=$(bump rescue_calls)
+  [ -n "$model" ] && echo "$model" > "$state/rescue_model"
+  printf '%s' "$prompt" > "$state/rescue_prompt_$n.txt"
+
+  case "$scenario" in
+    rescue-blocked)
+      # Contradicao de especificacao: o resgate para sem editar nada.
+      if [ "$name" = "claude" ]; then
+        emit_claude_ndjson "RESCUE_BLOCKED: a fase exige recusar no comando e a importacao da WABA exige aceitar o mesmo nome"
+      else
+        echo "RESCUE_BLOCKED: a fase exige recusar no comando e a importacao da WABA exige aceitar o mesmo nome"
+      fi
+      exit 0
+      ;;
+    rescue-fix)
+      # A autoridade que faltou ao conserto: reorganiza e entrega.
+      mkdir -p src
+      echo "rescue $n" > "src/rescue-$n.txt"
+      ;;
+    *)
+      : # nao resolve nada: a fase segue vermelha e o orcamento se esgota
+      ;;
+  esac
+
+  if [ "$name" = "claude" ]; then emit_claude_ok; else echo "Done."; fi
+  exit 0
+fi
 
 # --- conserto cirurgico ------------------------------------------------------
 # O prompt de conserto e o unico que carrega a clausula REPAIR_ABORT. Grava o
@@ -201,10 +303,10 @@ if grep -q 'REPAIR_ABORT' <<< "$prompt"; then
   printf '%s' "$prompt" > "$state/repair_prompt_$n.txt"
 
   case "$scenario" in
-    repair-abort)
+    repair-abort|rescue-fix|rescue-blocked)
       # Desistencia explicita, sem tocar em arquivo nenhum.
       if [ "$name" = "claude" ]; then
-        echo '{"type":"result","subtype":"success","is_error":false,"result":"REPAIR_ABORT: causa nao localizavel no erro"}'
+        emit_claude_ndjson "REPAIR_ABORT: causa nao localizavel no erro"
       else
         echo "REPAIR_ABORT: causa nao localizavel no erro"
       fi
@@ -267,6 +369,7 @@ write=1
 if [ "$write" -eq 1 ]; then
   mkdir -p src
   echo "impl $n" > "src/impl-$n.txt"
+  MOCK_WROTE+=("src/impl-$n.txt")
 fi
 
 # O Codex pode concluir uma task com um commit proprio. O Gate 1 precisa
@@ -342,6 +445,19 @@ if [ "$scenario" = "baseline-inherited" ] || [ "$scenario" = "baseline-regressio
     echo "  Tests:    2 failed, 3 passed"
     exit 1
   fi
+  echo "  Tests:    1 failed, 3 passed"
+  exit 1
+fi
+
+# heal-*: vermelho herdado de HEAD, o gatilho do saneamento. A 1a chamada e a
+# medicao em HEAD; heal-head fica verde depois que a sessao de saneamento escreve
+# (o proprio arquivo que ela cria e a chave), heal-blocked nunca fecha.
+if [ "$scenario" = "heal-head" ] || [ "$scenario" = "heal-blocked" ]; then
+  if [ "$scenario" = "heal-head" ] && [ -f "$state/healed" ]; then
+    echo "  Tests:    4 passed"
+    exit 0
+  fi
+  echo "   FAIL  Tests\\Feature\\GuardaVelhaTest"
   echo "  Tests:    1 failed, 3 passed"
   exit 1
 fi
@@ -522,6 +638,13 @@ new_case() {
 }
 
 # run_ralph <dir> <scenario> [args...] -> ecoa o exit code; log em <dir>/out.log
+# Os casos testam o MECANISMO (conserto, resgate, gate 3), nao a POLITICA de
+# quanto gastar. Por isso o helper fixa o orcamento antigo e generoso: gate 3
+# em toda fase, conserto ligado, 2 consertos, 2 resgates. Os defaults de
+# producao sao curtos e tem caso proprio (`budget-defaults`).
+#
+# Expansao com `-` e nao `:-`: assim um caso que quer o default REAL do ralph
+# passa a variavel VAZIA (CASE_VERIFY=) e o helper nao injeta nada.
 run_ralph() {
   local dir="$1" scenario="$2"; shift 2
   local rc=0
@@ -536,11 +659,17 @@ run_ralph() {
     RALPH_LIMIT_BUFFER=1 \
     RALPH_VERBOSE="${CASE_VERBOSE:-0}" \
     RALPH_HEARTBEAT="${CASE_HEARTBEAT:-0}" \
-    RALPH_VERIFY="${CASE_VERIFY:-}" \
+    RALPH_VERIFY="${CASE_VERIFY-always}" \
+    RALPH_REPAIR="${CASE_REPAIR-on}" \
+    RALPH_MAX_REPAIRS="${CASE_MAX_REPAIRS-2}" \
+    RALPH_MAX_RESCUES="${CASE_MAX_RESCUES-2}" \
     RALPH_VERIFY_MODEL="${CASE_VERIFY_MODEL:-}" \
     RALPH_UI_SHOT_CMD="${CASE_UI_SHOT_CMD:-}" \
     RALPH_UI_VERIFY="${CASE_UI_VERIFY:-}" \
     RALPH_REPAIR_MODEL="${CASE_REPAIR_MODEL:-}" \
+    RALPH_RESCUE="${CASE_RESCUE-off}" \
+    RALPH_HEAL_HEAD="${CASE_HEAL_HEAD:-off}" \
+    RALPH_RESCUE_MODEL="${CASE_RESCUE_MODEL:-}" \
     RALPH_CAVEMAN="${CASE_CAVEMAN:-}" \
     RALPH_NOTIFY_CMD="${CASE_NOTIFY_CMD:-}" \
       bash "$RALPH" "$@" > "$dir/out.log" 2>&1
@@ -919,13 +1048,38 @@ fi
 #     pula o gate 3; a fase ainda commita.
 # ---------------------------------------------------------------------------
 if case_enabled verify-auto; then
-  header "20. RALPH_VERIFY=auto pula o gate 3 no caminho feliz"
+  header "20. RALPH_VERIFY=auto pula o gate 3 quando a suite cobriu a fase"
   d=$(new_case verify-auto)
-  rc=$(CASE_VERIFY=auto run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  # --full-suite: a condicao do `auto` e o gate 2 ter julgado ESTA fase. Sem
+  # isso o escopo do gate 2 e `skip` e o gate 3 passa a ser obrigatorio.
+  rc=$(CASE_VERIFY=auto run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --full-suite)
   assert_eq 0 "$rc" "exit 0"
   assert_eq 3 "$(commits "$d")" "fases commitadas"
-  assert_contains "$d/out.log" "Gate 3 pulado: a sessao escreveu codigo" "skip logado com a causa"
+  assert_contains "$d/out.log" "Gate 3 pulado: a suite cobriu esta fase" "skip logado com a causa"
   test -f "$d/state/verify_calls" && bad "nenhuma sessao verificadora gasta" || ok "nenhuma sessao verificadora gasta"
+fi
+
+# ---------------------------------------------------------------------------
+# 20b. RALPH_VERIFY=auto NAO pula o gate 3 quando a suite nao cobriu a fase.
+#
+# Fase de fiacao/view/config nao altera nem cita arquivo de teste: o gate 2
+# resolve o escopo como `skip` e nao executa nada. Pular o gate 3 ali fechava e
+# commitava a fase sem validacao mecanica nenhuma — o `auto` olhava para
+# "o projeto TEM suite", nao para "esta fase foi testada".
+#
+# Fica vermelho se a condicao do `auto` voltar a depender so de $TEST_CMD.
+# ---------------------------------------------------------------------------
+if case_enabled verify-auto-uncovered; then
+  header "20b. auto NAO pula o gate 3 em fase que a suite nao cobriu"
+  d=$(new_case verify-auto-uncovered)
+  rc=$(CASE_VERIFY=auto run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  assert_contains "$d/out.log" "Gate 2 — nao executado" "o gate 2 nao cobriu a fase"
+  # Duas fases: a ultima e o gate final da spec (suite completa -> gate 3
+  # pulado); a primeira nao foi coberta e TEM que gastar o verificador.
+  # Exatamente 1 sessao prova as duas metades da regra de uma vez.
+  assert_eq 1 "$(cat "$d/state/verify_calls" 2>/dev/null || echo 0)" \
+    "gate 3 gasto so na fase que a suite nao cobriu"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1438,7 +1592,7 @@ if case_enabled ui-tty; then
     assert_contains "$d/out.log" "AO VIVO" "secao de atividade ao vivo desenhada"
     # Prova de vida medida pelo pintor: sem isso a tela fica estatica durante a
     # sessao do engine, que e justamente a etapa mais longa do run.
-    assert_contains "$d/out.log" "Saída do engine:" "taxa de saida do engine no painel"
+    assert_contains "$d/out.log" "Ações do engine:" "contador de acoes do engine no painel"
     assert_contains "$d/out.log" "Etapa:" "etapa corrente com tempo proprio"
     assert_contains "$d/out.log" "RELATORIO FINAL" "relatorio final impresso apos desmontar"
     # O painel viveu numa tela descartada: sem reimprimir, o placar do run some.
@@ -1827,31 +1981,31 @@ UISTATE
     # A janela desenhada em cada frame, sem os escapes de cor.
     ui_keys_windows() {
       sed -r 's/\x1B\[[0-9;?]*[A-Za-z]//g' "$1" \
-        | grep -oE 'mostrando [0-9]+–[0-9]+' | uniq | tr '\n' ' ' | sed 's/ *$//'
+        | grep -oE 'mostrando [0-9]+[-–][0-9]+' | sed 's/–/-/' | uniq | tr '\n' ' ' | sed 's/ *$//'
     }
 
     ui_keys_run "$d/down.raw" '\033[B\033[B\033[B'
-    assert_eq "mostrando 14–19 mostrando 15–20 mostrando 16–21 mostrando 17–22" \
+    assert_eq "mostrando 14-19 mostrando 15-20 mostrando 16-21 mostrando 17-22" \
       "$(ui_keys_windows "$d/down.raw")" \
       "cada seta para baixo anda UMA linha (rajada de CSI nao pode virar uma tecla so)"
 
     ui_keys_run "$d/end.raw" 'G'
-    assert_eq "mostrando 14–19 mostrando 27–32" "$(ui_keys_windows "$d/end.raw")" \
+    assert_eq "mostrando 14-19 mostrando 27-32" "$(ui_keys_windows "$d/end.raw")" \
       "G vai para o fim e para na ultima linha (sem linha vazia no rodape)"
 
     # `uniq` colapsa frames iguais: subir no topo NAO pode gerar janela nova.
     ui_keys_run "$d/top.raw" 'gk'
-    assert_eq "mostrando 14–19 mostrando 1–6" "$(ui_keys_windows "$d/top.raw")" \
+    assert_eq "mostrando 14-19 mostrando 1-6" "$(ui_keys_windows "$d/top.raw")" \
       "g vai para o topo e subir dali nao move a janela"
 
     ui_keys_run "$d/auto.raw" 'Ga'
-    assert_eq "mostrando 14–19 mostrando 27–32 mostrando 14–19" "$(ui_keys_windows "$d/auto.raw")" \
+    assert_eq "mostrando 14-19 mostrando 27-32 mostrando 14-19" "$(ui_keys_windows "$d/auto.raw")" \
       "'a' devolve a janela ao modo automatico, centrada na fase corrente"
 
     assert_contains "$d/end.raw" "manual" "rodape avisa que a janela esta no modo manual"
 
     ui_keys_run "$d/off.raw" 'jjjG' RALPH_UI_KEYS=0
-    assert_eq "mostrando 14–19" "$(ui_keys_windows "$d/off.raw")" \
+    assert_eq "mostrando 14-19" "$(ui_keys_windows "$d/off.raw")" \
       "RALPH_UI_KEYS=0 desliga a rolagem"
     assert_not_contains "$d/off.raw" "↑↓ rolar" "sem teclado o rodape nao promete navegacao"
 
@@ -2073,11 +2227,20 @@ if case_enabled baseline-inherited; then
   assert_contains "$d/out.log" "Gate 2 — sem regressao" "o gate 2 cobrou so o delta"
   assert_eq 3 "$(commits "$d")" "1 commit por fase, apesar da suite vermelha"
 
-  # Sem a flag, o mesmo cenario reprova: o default nao pode perdoar nada.
+  # Sem a flag E sem saneamento, o mesmo cenario reprova: o default nao perdoa.
   d2=$(new_case baseline-off)
   rc=$(run_ralph "$d2" baseline-inherited --engine claude --test-cmd "$d2/test.sh" --max-cycles 1)
   assert_eq 1 "$rc" "exit 1 sem --baseline (default nao perdoa vermelho)"
   assert_contains "$d2/out.log" "Gate 2 vermelho" "sem a flag o gate 2 reprova"
+
+  # --baseline tem precedencia sobre o saneamento: quem declara "herde o
+  # vermelho" esta dizendo que ele e intencional, e sanear consertaria justamente
+  # o teste que a fase existe para fechar.
+  d3=$(new_case baseline-precedencia)
+  rc=$(CASE_HEAL_HEAD=on run_ralph "$d3" baseline-inherited --engine claude \
+    --test-cmd "$d3/test.sh" --baseline --max-cycles 2)
+  assert_eq 0 "$rc" "exit 0 (herdou o vermelho, como pedido)"
+  test -f "$d3/state/heal_calls" && bad "--baseline nao dispara saneamento" || ok "--baseline nao dispara saneamento"
 fi
 
 # ---------------------------------------------------------------------------
@@ -2468,6 +2631,472 @@ if case_enabled checkbox-sync; then
   assert_eq 3 "$(grep -c -- '- \[x\]' "$d/repo/.spec/init/project-phases.md")" "as 3 tasks do documento marcadas"
   assert_eq 0 "$(grep -c -- '- \[ \]' "$d/repo/.spec/init/project-phases.md")" "nenhum checkbox aberto sobrou"
   assert_eq 0 "$(git -C "$d/repo" status --porcelain | wc -l)" "a marcacao entrou no commit da fase (arvore limpa)"
+fi
+
+# ---------------------------------------------------------------------------
+# R1. Sessao de resgate: a fase travou (conserto desistiu) e a etapa larga
+#     assume, fecha os gates COMPLETOS e commita. E o caso que antes terminava
+#     em "FALHOU" com o dev lendo log.
+# ---------------------------------------------------------------------------
+if case_enabled rescue-green; then
+  header "R1. resgate assume a fase travada, fecha os gates e commita"
+  d=$(new_case rescue-green)
+  rc=$(CASE_RESCUE=on run_ralph "$d" rescue-fix --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --max-repairs 2)
+  assert_eq 0 "$rc" "exit 0 — a fase que travava agora fecha"
+  assert_eq 1 "$(cat "$d/state/rescue_calls")" "uma sessao de resgate gasta"
+  assert_contains "$d/out.log" "Sessao de resgate 1/2" "o resgate foi anunciado"
+  assert_contains "$d/out.log" "fechou a fase — gates completos verdes" "resgate nao substitui gate"
+  test -f "$d/repo/.phases/logs/phase-01.rescue-1.log" && ok "log proprio do resgate" || bad "log proprio do resgate"
+  test -f "$d/repo/.phases/logs/phase-01.verify-rescue1.log" && ok "gate 3 do resgate com log proprio (nao sobrescreve o do ciclo)" || bad "gate 3 do resgate com log proprio (nao sobrescreve o do ciclo)"
+  test -f "$d/repo/.phases/logs/phase-01.verify-1.log" && ok "o log do ciclo anterior continua la" || bad "o log do ciclo anterior continua la"
+  git -C "$d/repo" log --format=%B > "$d/commitmsg.txt"
+  assert_contains "$d/commitmsg.txt" "sessao de resgate (round 1)" "o commit registra a origem do verde"
+  assert_contains "$d/repo/.phases/events.jsonl" "rescue_start" "evento de inicio do resgate"
+  assert_contains "$d/repo/.phases/events.jsonl" '"verdict": "green"' "evento de desfecho do resgate"
+fi
+
+# ---------------------------------------------------------------------------
+# R2. O prompt de resgate e o OPOSTO do conserto: carrega contexto, a fase
+#     inteira, a desistencia verbatim e as regras de teste. Sem isso a sessao
+#     larga repete o caminho da estreita.
+# ---------------------------------------------------------------------------
+if case_enabled rescue-prompt; then
+  header "R2. prompt de resgate carrega contexto, fase e a desistencia verbatim"
+  d=$(new_case rescue-prompt)
+  rc=$(CASE_RESCUE=on run_ralph "$d" rescue-fix --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --max-repairs 2)
+  assert_eq 0 "$rc" "exit 0"
+  pf="$d/state/rescue_prompt_1.txt"
+  assert_contains "$pf" "Acceptance criteria" "o resgate recebe a fase inteira"
+  assert_contains "$pf" "REPAIR_ABORT: causa nao localizavel no erro" "recebe a desistencia do conserto verbatim"
+  assert_contains "$pf" "Por que a fase parou" "recebe o motivo do travamento"
+  assert_contains "$pf" "TASK 1: INCOMPLETE" "recebe o veredito bruto do ultimo gate"
+  assert_contains "$pf" "Afrouxar teste para ficar verde" "proibicao de afrouxar teste no prompt"
+  assert_contains "$pf" "TESTE ALTERADO:" "exige justificativa escrita para mexer em teste"
+  assert_contains "$pf" "RESCUE_BLOCKED:" "oferece a saida honesta do conflito de spec"
+  assert_contains "$pf" "Task com \`Testes: none\` NAO leva teste" "politica de teste minimo no prompt"
+fi
+
+# ---------------------------------------------------------------------------
+# R3. --no-rescue devolve exatamente o comportamento anterior: a fase trava e
+#     o run para. A etapa nova e opcional, nao obrigatoria.
+# ---------------------------------------------------------------------------
+if case_enabled rescue-off; then
+  header "R3. --no-rescue devolve o comportamento anterior"
+  d=$(new_case rescue-off)
+  rc=$(CASE_RESCUE=on run_ralph "$d" rescue-fix --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --max-repairs 2 --no-rescue)
+  assert_eq 1 "$rc" "exit 1 (a fase continua travada)"
+  test -f "$d/state/rescue_calls" && bad "nenhuma sessao de resgate gasta" || ok "nenhuma sessao de resgate gasta"
+  assert_contains "$d/out.log" "Abortando a fase" "o abort de hoje continua valendo"
+
+  # --max-rescues 0 e a mesma porta
+  d2=$(new_case rescue-zero)
+  rc=$(CASE_RESCUE=on run_ralph "$d2" rescue-fix --engine claude --test-cmd "$d2/test.sh" --max-cycles 1 --max-repairs 2 --max-rescues 0)
+  assert_eq 1 "$rc" "exit 1 com --max-rescues 0"
+  test -f "$d2/state/rescue_calls" && bad "--max-rescues 0 nao gasta resgate" || ok "--max-rescues 0 nao gasta resgate"
+fi
+
+# ---------------------------------------------------------------------------
+# R4. O resgate vem LIGADO por default: quem nao souber que a etapa existe
+#     ainda assim recebe a fase salva.
+# ---------------------------------------------------------------------------
+if case_enabled rescue-default-on; then
+  header "R4. resgate ligado por default"
+  d=$(new_case rescue-default-on)
+  rc=$(CASE_RESCUE= run_ralph "$d" rescue-fix --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --max-repairs 2)
+  assert_eq 0 "$rc" "exit 0 sem passar flag nenhuma de resgate"
+  assert_eq 1 "$(cat "$d/state/rescue_calls")" "o resgate rodou por default"
+fi
+
+# ---------------------------------------------------------------------------
+# R5. RESCUE_BLOCKED: contradicao de especificacao nao se resolve gastando
+#     outra sessao. Encerra na hora, com o conflito no relatorio.
+# ---------------------------------------------------------------------------
+if case_enabled rescue-blocked; then
+  header "R5. RESCUE_BLOCKED encerra a fase sem gastar o round seguinte"
+  d=$(new_case rescue-blocked)
+  rc=$(CASE_RESCUE=on run_ralph "$d" rescue-blocked --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --max-repairs 2 --max-rescues 2)
+  assert_eq 1 "$rc" "exit 1 (decisao humana pendente)"
+  assert_eq 1 "$(cat "$d/state/rescue_calls")" "so um round gasto, mesmo com orcamento de 2"
+  assert_contains "$d/out.log" "bloqueio de especificacao" "o bloqueio foi reportado"
+  assert_contains "$d/out.log" "a importacao da WABA exige aceitar o mesmo nome" "o conflito sai verbatim no relatorio"
+  assert_contains "$d/repo/.phases/events.jsonl" '"verdict": "blocked"' "evento de bloqueio no log de eventos"
+fi
+
+# ---------------------------------------------------------------------------
+# R6. Resgate vermelho gasta o orcamento e reprova a fase: verde de resgate
+#     e verde de gate, nunca de insistencia.
+# ---------------------------------------------------------------------------
+if case_enabled rescue-exhausted; then
+  header "R6. resgate que nao resolve esgota o orcamento e reprova"
+  d=$(new_case rescue-exhausted)
+  rc=$(CASE_RESCUE=on run_ralph "$d" verify-incomplete-always --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --max-repairs 1)
+  assert_eq 1 "$rc" "exit 1"
+  assert_eq 2 "$(cat "$d/state/rescue_calls")" "os 2 rounds de resgate foram gastos"
+  assert_contains "$d/out.log" "Sessoes de resgate esgotadas" "o esgotamento foi reportado"
+  assert_contains "$d/out.log" "sessao(oes) de resgate" "o relatorio final conta o que foi gasto"
+  assert_eq 1 "$(commits "$d")" "nenhum commit de fase com gate vermelho"
+fi
+
+# ---------------------------------------------------------------------------
+# R7. Modelo proprio: o resgate e a sessao de maior autoridade do harness e nao
+#     pode herdar o modelo da implementacao por acidente.
+# ---------------------------------------------------------------------------
+if case_enabled rescue-model; then
+  header "R7. --rescue-model vale so para a sessao de resgate"
+  d=$(new_case rescue-model)
+  rc=$(CASE_RESCUE=on run_ralph "$d" rescue-fix --engine claude --test-cmd "$d/test.sh" \
+    --max-cycles 1 --max-repairs 2 --model modelo-impl --rescue-model modelo-resgate)
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq "modelo-resgate" "$(cat "$d/state/rescue_model")" "o resgate usa o modelo proprio"
+  assert_eq "modelo-impl" "$(cat "$d/state/impl_model")" "a implementacao mantem o dela"
+fi
+
+# ---------------------------------------------------------------------------
+# H1. Vermelho herdado de HEAD e saneado ANTES da fase 1. O run real: duas
+#     guardas de higiene de features antigas estavam vermelhas em HEAD, a fase em
+#     curso nao tocava nenhuma, e o ralph gastou 5 ciclos + 2 consertos + 2
+#     resgates (16 min) para concluir "isto nao se conserta escrevendo codigo".
+# ---------------------------------------------------------------------------
+if case_enabled heal-head; then
+  header "H1. HEAD vermelho e saneado antes da fase 1"
+  d=$(new_case heal-head)
+  rc=$(CASE_HEAL_HEAD=on run_ralph "$d" heal-head --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 0 "$rc" "exit 0 (HEAD saneado, fases seguiram)"
+  assert_contains "$d/out.log" "GuardaVelhaTest" "o baseline nomeou o teste vermelho em HEAD"
+  assert_contains "$d/out.log" "Saneamento do HEAD 1/1" "a sessao de saneamento rodou"
+  assert_contains "$d/out.log" "suite verde em HEAD" "a suite fechou verde antes da fase 1"
+  assert_eq 1 "$(cat "$d/state/heal_calls")" "exatamente 1 sessao de saneamento"
+  assert_eq "test(baseline): sanea o vermelho herdado de HEAD" \
+    "$(git -C "$d/repo" log --pretty=%s | tail -n 2 | head -n 1)" \
+    "o saneamento tem commit proprio, antes do commit da fase 1"
+  # Nenhum ciclo de correcao foi gasto com o vermelho alheio.
+  assert_not_contains "$d/out.log" "Ciclo de correcao" "nenhum ciclo gasto com vermelho herdado"
+  test -f "$d/state/repair_calls" && bad "nenhum conserto cirurgico gasto" || ok "nenhum conserto cirurgico gasto"
+fi
+
+# ---------------------------------------------------------------------------
+# H2. O saneamento que nao fecha PARA o run antes da fase 1. O custo do erro
+#     passa a ser uma rodada de suite, nao uma fase inteira.
+# ---------------------------------------------------------------------------
+if case_enabled heal-blocked; then
+  header "H2. saneamento bloqueado aborta antes da fase 1"
+  d=$(new_case heal-blocked)
+  rc=$(CASE_HEAL_HEAD=on run_ralph "$d" heal-blocked --engine claude --test-cmd "$d/test.sh" --max-cycles 3)
+  assert_eq 1 "$rc" "exit 1 (o run nao comeca sobre gate vermelho)"
+  assert_contains "$d/out.log" "HEAL_ABORT" "a desistencia da sessao aparece no log"
+  assert_contains "$d/out.log" "HEAD vermelho nao sanado" "o motivo do abort e explicito"
+  assert_contains "$d/out.log" "GuardaVelhaTest" "o abort nomeia o teste vermelho"
+  assert_contains "$d/out.log" "--baseline" "o abort oferece a saida de herdar o vermelho"
+  assert_eq 1 "$(commits "$d")" "so o commit da fixture: nenhuma fase comecou"
+  test -f "$d/state/impl_calls" && bad "nenhuma sessao de fase foi gasta" || ok "nenhuma sessao de fase foi gasta"
+fi
+
+# ---------------------------------------------------------------------------
+# H3. --no-heal-head devolve o comportamento anterior: mede, avisa e segue.
+# ---------------------------------------------------------------------------
+if case_enabled heal-off; then
+  header "H3. --no-heal-head nao mede nem sanea"
+  d=$(new_case heal-off)
+  rc=$(CASE_HEAL_HEAD=on run_ralph "$d" heal-blocked --engine claude --test-cmd "$d/test.sh" \
+    --max-cycles 1 --no-heal-head)
+  assert_eq 1 "$rc" "exit 1 (o gate 2 da fase reprova, como antes)"
+  assert_not_contains "$d/out.log" "Saneamento do HEAD" "nenhuma sessao de saneamento"
+  assert_contains "$d/out.log" "Gate 2 vermelho" "o vermelho volta a ser julgado pela fase"
+fi
+
+# ---------------------------------------------------------------------------
+# H4. Mandato de guarda obsoleta nos tres prompts que ja desistiram dele. O
+#     conserto e o resgate declararam "afrouxar contrato de outra feature e
+#     decisao humana" sobre guarda que so estava velha.
+# ---------------------------------------------------------------------------
+if case_enabled heal-mandate; then
+  header "H4. o mandato de guarda obsoleta vai nos 3 prompts"
+  d=$(new_case heal-mandate)
+  rc=$(CASE_HEAL_HEAD=on run_ralph "$d" heal-head --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 0 "$rc" "exit 0"
+  assert_contains "$d/state/heal_prompt_1.txt" "Guarda obsoleta de OUTRA feature" \
+    "o prompt de saneamento carrega o mandato"
+  assert_contains "$d/state/heal_prompt_1.txt" "git log -S" \
+    "o mandato manda provar pelo commit que mudou o texto"
+  assert_contains "$d/state/heal_prompt_1.txt" "Proibido: apagar a guarda" \
+    "o mandato proibe apagar a guarda"
+
+  # Conserto e resgate: mesmo mandato, num cenario que chega aos dois.
+  d2=$(new_case heal-mandate-repair)
+  rc=$(CASE_RESCUE=on run_ralph "$d2" rescue-fix --engine claude --test-cmd "$d2/test.sh" \
+    --max-cycles 1 --max-repairs 1)
+  assert_eq 0 "$rc" "exit 0"
+  assert_contains "$d2/state/repair_prompt_1.txt" "Guarda obsoleta de OUTRA feature" \
+    "o conserto cirurgico recebeu o mandato"
+  assert_contains "$d2/state/rescue_prompt_1.txt" "Guarda obsoleta NAO e conflito de especificacao" \
+    "o resgate recebeu o limite do RESCUE_BLOCKED por guarda"
+fi
+
+# ---------------------------------------------------------------------------
+# Painel: toda linha de caixa fecha na largura da janela.
+#
+# `${#s}` conta CARACTERE, o terminal desenha COLUNA. Marca East-Asian
+# Ambiguous que a fonte do terminal nao tem (▶ U+25B6, ◐ U+25D0, █ U+2588,
+# … U+2026, — U+2014) cai em fallback de emoji e ocupa 2 colunas: a borda
+# direita anda para fora da janela e a caixa aparece cortada.
+#
+# Fica vermelho se alguem devolver marca de largura ambigua para uma CELULA do
+# painel. A moldura (U+2500-2524) e isenta: se ela medisse 2 o painel inteiro
+# colapsaria, nao so a linha com a marca.
+# ---------------------------------------------------------------------------
+if case_enabled ui-box-width; then
+  header "painel: largura das caixas em toda janela"
+
+  ub="$TMP/uibox"
+  mkdir -p "$ub/.phases/ui"
+  # ralph.sh sem a ultima linha (`main`): da para sourcear so as funcoes.
+  sed '$d' "$RALPH" > "$ub/ui.sh"
+
+  cat > "$ub/.phases/manifest.txt" <<'MAN'
+phase-01.md|1|Estrutura e exposição do dado legado
+phase-02.md|2|Download de lote e recusa de exclusão
+MAN
+  cat > "$ub/.phases/ui/phases.txt" <<'PH'
+1|running|Estrutura e exposição do dado legado
+2|pending|Download de lote e recusa de exclusão
+PH
+  cat > "$ub/.phases/ui/tasks.txt" <<'TK'
+1|1|pending|Migrations de estrutura: marca de origem, data aproximada e disco
+1|2|pending|Flags de origem e disponibilidade no model `RemittanceBatch`
+1|3|declared|Eager loading de `uploads` na listagem administrativa
+2|1|pending|VO e resolver de arquivo de lote (`payload` ou metadado)
+TK
+  printf '1|0|0\n2|75|0\n3|100|1\n' > "$ub/.phases/ui/taskprog.txt"
+  cat > "$ub/.phases/ui/state.env" <<ENV
+run_status=running
+phase_num=1
+phase_seq=1
+phase_total=2
+phase_title=Estrutura e exposição do dado legado
+cycle=1
+max_cycles=5
+phase_start=$(($(date +%s) - 37))
+gate0=pass
+gate1=pass
+gate2=running
+gate3=pending
+activity=implementando a fase
+last_error=
+pid=$$
+run_id=run-$$
+started=$(($(date +%s) - 37))
+stage_start=$(($(date +%s) - 36))
+engine=claude
+project=bench
+ENV
+
+  cat > "$ub/render.sh" <<'REN'
+W="$2"; H="$3"
+source "$1" > /dev/null 2>&1
+set +eu
+ui_term_cols()  { echo "$W"; }
+ui_term_lines() { echo "$H"; }
+ui_frame 0 2> /dev/null
+REN
+
+  # Mede a largura RENDERIZADA: ambiguo fora da moldura conta 2 colunas, que e
+  # o pior caso real (Windows Terminal sobre WSL com fallback de fonte).
+  cat > "$ub/check.py" <<'CHK'
+import re, sys, unicodedata as u
+FRAME = set('─│┌┐└┘├┤')
+ESC = re.compile(r'\x1b\[[0-9;]*m')
+W = int(sys.argv[1])
+
+def cols(p):
+    n = 0
+    for c in p:
+        o = ord(c)
+        # ASCII, moldura, meio-ponto e Latin-1 acentuado: 1 coluna em qualquer
+        # fonte monoespacada — sao os que o terminal sempre tem.
+        if o < 128 or c in FRAME or o == 0xB7 or 0xC0 <= o <= 0xFF:
+            n += 1
+        elif u.east_asian_width(c) in ('A', 'W', 'F'):
+            n += 2
+        else:
+            n += 1
+    return n
+
+bad = []
+for raw in sys.stdin.read().split('\n'):
+    p = ESC.sub('', raw)
+    if not p.strip() or p[0] not in FRAME:
+        continue
+    if len(p) != W or cols(p) != W:
+        bad.append('%d/%d %s' % (len(p), cols(p), p[:50]))
+print(len(bad))
+for b in bad[:3]:
+    print('    ' + b, file=sys.stderr)
+CHK
+
+  (
+    cd "$ub" || exit 1
+    for w in 74 80 96 100 120 160 200; do
+      printf '%s\n' "$(bash "$ub/render.sh" "$ub/ui.sh" "$w" 45 | python3 "$ub/check.py" "$w")" \
+        > "$ub/out-$w.txt" 2> "$ub/err-$w.txt"
+    done
+    # Prova red: com o conjunto antigo de marcas o mesmo painel estoura.
+    RALPH_UI_GLYPHS=unicode bash "$ub/render.sh" "$ub/ui.sh" 120 45 \
+      | python3 "$ub/check.py" 120 > "$ub/out-legacy.txt" 2> /dev/null
+  )
+
+  for w in 74 80 96 100 120 160 200; do
+    assert_eq 0 "$(cat "$ub/out-$w.txt")" "painel fecha em $w colunas"
+  done
+  # Sem isso o teste passaria mesmo se o medidor estivesse quebrado.
+  if [ "$(cat "$ub/out-legacy.txt")" -gt 0 ]; then
+    ok "o medidor pega o conjunto antigo de marcas (prova red)"
+  else
+    bad "o medidor NAO pega o conjunto antigo: o teste nao prova nada"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Defaults de producao do orcamento de recuperacao.
+#
+# O helper run_ralph fixa o orcamento antigo e generoso para todos os outros
+# casos — eles testam o MECANISMO. Este testa a POLITICA: o que acontece com o
+# ralph recem-instalado, sem env nenhuma. As variaveis vao VAZIAS de proposito
+# (expansao com `-` no helper), e ai o ralph usa os proprios defaults.
+#
+# Fica vermelho se alguem mexer nos defaults sem decidir mexer.
+# ---------------------------------------------------------------------------
+if case_enabled budget-defaults; then
+  header "defaults de producao: 2 ciclos, sem conserto, 1 resgate, gate 3 auto"
+
+  d=$(new_case budget-defaults)
+  # Cenario que nunca fecha: exercita o orcamento inteiro ate a reprovacao.
+  rc=$(CASE_VERIFY='' CASE_REPAIR='' CASE_MAX_REPAIRS='' CASE_MAX_RESCUES='' CASE_RESCUE='' \
+    run_ralph "$d" verify-incomplete-always --engine claude --test-cmd "$d/test.sh")
+
+  assert_eq 1 "$rc" "a fase reprova depois de esgotar o orcamento"
+  assert_contains "$d/out.log" "max-cycles: 2" "2 ciclos por fase"
+  assert_contains "$d/out.log" "Ciclo de correcao 2/2" "o segundo ciclo e o ultimo"
+  assert_not_contains "$d/out.log" "Ciclo de correcao 3" "nao existe terceiro ciclo"
+  assert_not_contains "$d/out.log" "Conserto cirurgico" "conserto cirurgico fora do default"
+  assert_contains "$d/out.log" "Sessao de resgate 1/1" "um unico resgate"
+  assert_not_contains "$d/out.log" "Sessao de resgate 2" "nao existe segundo resgate"
+
+  # O teto de sessoes por fase e o numero que motivou o corte: o orcamento
+  # antigo chegava a ~29 no pior caso. Os contadores do mock sao separados —
+  # ciclo e resgate nao caem no mesmo balde.
+  assert_eq 2 "$(cat "$d/state/impl_calls" 2>/dev/null || echo 0)" \
+    "2 sessoes de ciclo por fase, nao 5"
+  assert_eq 1 "$(cat "$d/state/rescue_calls" 2>/dev/null || echo 0)" \
+    "1 sessao de resgate por fase, nao 2"
+  assert_eq 0 "$(cat "$d/state/repair_calls" 2>/dev/null || echo 0)" \
+    "nenhuma sessao de conserto cirurgico"
+fi
+
+# ---------------------------------------------------------------------------
+# Stream do engine: NDJSON real, capturado do `claude -p --output-format
+# stream-json --verbose`.
+#
+# O mock nao serve aqui. Ele emite o NDJSON que o ralph espera, entao um erro
+# de premissa sobre o formato passaria despercebido nos dois lados. A fixture
+# abaixo tem a forma que a CLI de verdade produz — eventos system/hook, um
+# rate_limit_event no meio, tool_use dentro de message.content, e o veredito so
+# no evento final.
+#
+# Fica vermelho se alguem voltar a ler o stream com grep em vez de jq, ou
+# mudar a extracao sem acertar todos os consumidores.
+# ---------------------------------------------------------------------------
+if case_enabled engine-stream; then
+  header "stream do engine: NDJSON real"
+
+  es="$TMP/engine-stream"
+  mkdir -p "$es"
+  sed '$d' "$RALPH" > "$es/ui.sh"
+
+  # Fixture: a forma real, com o texto do verificador dentro de `.result` —
+  # \n e aspas escapados, que e o que quebrava o `^TASK` do gate 3.
+  cat > "$es/ok.log" <<'NDJSON'
+{"type":"system","subtype":"hook_started","hook":"SessionStart"}
+{"type":"system","subtype":"init","session_id":"abc","tools":["Bash","Edit"]}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"app/Models/RemittanceBatch.php"}}]}}
+{"type":"rate_limit_event","status":"allowed"}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"app/Models/RemittanceBatch.php"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"database/migrations/2026_01_01_add_origin.php"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"php artisan test","description":"Run tests"}}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"TASK 1: DONE — app/Models/RemittanceBatch.php:12\nTASK 2: DONE — database/migrations/2026_01_01_add_origin.php:1","usage":{"input_tokens":4,"output_tokens":111},"total_cost_usd":0.26}
+NDJSON
+
+  cat > "$es/err.log" <<'NDJSON'
+{"type":"system","subtype":"init","session_id":"abc"}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"bash: is_error: true — o comando do projeto falhou"}]}}
+{"type":"result","subtype":"error_during_execution","is_error":true,"result":"a sessao terminou com erro"}
+NDJSON
+
+  # Engine morto no meio: ultima linha truncada, nenhum evento result.
+  printf '%s\n' \
+    '{"type":"system","subtype":"init"}' \
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"a.php"}}]}}' \
+    '{"type":"result","subtype":"suc' > "$es/trunc.log"
+
+  cat > "$es/probe.sh" <<'PROBE'
+# Os posicionais TEM que ser lidos antes do source: o ralph faz o proprio
+# parse de "$@" e $2 deixa de ser o diretorio depois que ele roda.
+es="$2"
+source "$1" > /dev/null 2>&1
+set +eu
+ENGINE=claude
+engine_materialize_text "$es/ok.log"
+engine_materialize_text "$es/err.log"
+engine_materialize_text "$es/trunc.log"
+{
+  echo "=text="
+  cat "$(engine_text_for "$es/ok.log")" 2>/dev/null
+  echo "=last="
+  engine_last_action "$es/ok.log"
+  echo "=written="
+  engine_written_files "$es/ok.log"
+  echo "=count="
+  engine_action_count "$es/ok.log"
+  echo "=gate_ok="
+  GATE_CAUSE=""; gate0_engine_finished "$es/ok.log" 0 && echo PASS || echo FAIL
+  echo "=gate_err="
+  GATE_CAUSE=""; gate0_engine_finished "$es/err.log" 0 && echo PASS || echo FAIL
+  echo "=gate_trunc="
+  GATE_CAUSE=""; gate0_engine_finished "$es/trunc.log" 0 && echo PASS || echo FAIL
+  echo "=trunc_written="
+  engine_written_files "$es/trunc.log"
+}
+PROBE
+
+  bash "$es/probe.sh" "$es/ui.sh" "$es" > "$es/out.txt" 2>&1
+
+  sec() { awk -v s="=$1=" '$0 == s { f = 1; next } /^=[a-z_]+=$/ { f = 0 } f' "$es/out.txt"; }
+
+  # O texto sai desescapado, com as linhas TASK separadas de verdade.
+  assert_eq "TASK 1: DONE — app/Models/RemittanceBatch.php:12" \
+    "$(sec text | sed -n 1p)" "o texto do result vira linha propria"
+  assert_eq 2 "$(sec text | grep -c '^TASK ')" "as 2 linhas TASK saem separadas por \\n"
+
+  # Painel: ultima acao e contagem.
+  assert_eq "Bash php artisan test" "$(sec last)" "ultima acao e o tool_use mais recente"
+  assert_eq 4 "$(sec count)" "conta todas as ferramentas usadas"
+
+  # Progresso por task: so Edit/Write contam, nunca Read nem Bash.
+  assert_eq "app/Models/RemittanceBatch.php database/migrations/2026_01_01_add_origin.php" \
+    "$(sec written | tr '\n' ' ' | sed 's/ *$//')" "so Edit/Write entram nos arquivos escritos"
+
+  # Gate 0 le o evento final, nao o arquivo inteiro.
+  assert_eq PASS "$(sec gate_ok)"    "gate 0 verde quando is_error=false"
+  assert_eq FAIL "$(sec gate_err)"   "gate 0 vermelho quando is_error=true"
+  assert_eq FAIL "$(sec gate_trunc)" "gate 0 vermelho quando nao ha evento result"
+
+  # `is_error: true` DENTRO de um tool_result e saida que o modelo leu e
+  # tratou, nao o veredito da sessao. O grep antigo reprovava por isso.
+  assert_eq "a sessao terminou com erro" "$(cat "$es/err.text" 2>/dev/null)" \
+    "o texto vem do result, nao do tool_result"
+
+  # Linha truncada nao pode abortar a extracao das linhas boas.
+  assert_eq "a.php" "$(sec trunc_written)" "log truncado ainda entrega os eventos completos"
 fi
 
 # ---------------------------------------------------------------------------

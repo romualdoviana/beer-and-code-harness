@@ -35,11 +35,17 @@
 #   --max-cycles N           ciclos de correcao por fase (default: 3)
 #   --max-repairs N          consertos cirurgicos por ciclo (default: 2; 0 = off)
 #   --no-repair              desliga o conserto cirurgico (RALPH_REPAIR=off)
+#   --max-rescues N          sessoes de resgate por fase (default: 2; 0 = off)
+#   --no-rescue              desliga a sessao de resgate (RALPH_RESCUE=off)
+#   --rescue-model NOME      modelo do resgate (default: opus no claude)
 #   --baseline               mede as falhas ja existentes em HEAD antes do run e
 #                            faz o gate 2 cobrar so o DELTA. Use quando a suite
 #                            ja esta vermelha por algo alheio as fases; NAO use
 #                            em fase cujo teste-alvo ja esta commitado vermelho,
 #                            porque o perdao seria permanente (RALPH_BASELINE=on)
+#   --no-heal-head           desliga o saneamento do HEAD (RALPH_HEAL_HEAD=off):
+#                            suite vermelha em HEAD volta a nao ser tratada e as
+#                            fases comecam sobre gate vermelho
 #   --no-verify              desliga o gate 3 (equivale a RALPH_VERIFY=off)
 #   --ui-shot-cmd "<cmd>"    comando que fotografa uma tela (evidencia visual
 #                            do gate 3; ver RALPH_UI_SHOT_CMD)
@@ -80,11 +86,11 @@
 #      de correcao quando um gate posterior reprova.
 #   2. testes do projeto, rodados PELO ralph (fora da sessao do agente). O
 #      ESCOPO varia por fase — veja "Escopo do gate 2" abaixo
-#   3. sessao verificadora independente, read-only, task a task — o gate final,
-#      roda em toda fase (RALPH_VERIFY=always, default). RALPH_VERIFY=auto
-#      economiza: so roda quando o veredito do gate 2 nao basta — sessao que
-#      nao escreveu nada (claim "ja implementada"), ciclo de correcao, ou
-#      gate 2 desabilitado. --no-verify / RALPH_VERIFY=off desliga. No engine
+#   3. sessao verificadora independente, read-only, task a task — o gate final.
+#      RALPH_VERIFY=auto (default) so gasta a sessao quando o gate 2 nao basta:
+#      fase que a suite nao cobriu (escopo `skip` — fiacao, view, config),
+#      sessao que nao escreveu nada (claim "ja implementada"), ciclo de
+#      correcao, ou gate 2 desabilitado. RALPH_VERIFY=always roda em toda fase. --no-verify / RALPH_VERIFY=off desliga. No engine
 #      claude o verificador usa RALPH_VERIFY_MODEL (default: sonnet) — e
 #      leitura + checklist, nao escreve codigo.
 #
@@ -115,7 +121,8 @@
 #   Um ciclo de correcao e caro: sessao nova com o preambulo de contexto, a
 #   fase inteira no prompt e acesso total ao projeto. Pagar isso porque UMA
 #   assertion ficou vermelha e desperdicio. Antes de gastar um ciclo, o ralph
-#   tenta ate RALPH_MAX_REPAIRS (default 2) consertos cirurgicos:
+#   tenta ate RALPH_MAX_REPAIRS consertos cirurgicos (default 0 — desligado;
+#   RALPH_REPAIR=on religa):
 #     - prompt minimo: SO a assinatura da falha (teste, arquivo:linha, mensagem)
 #       ou SO as linhas INCOMPLETE do verificador. Sem preambulo, sem a fase.
 #     - modelo proprio e FORTE (RALPH_REPAIR_MODEL, default: opus no claude):
@@ -134,6 +141,64 @@
 #   que estavam INCOMPLETE; as posicoes continuam as originais, nada e
 #   renumerado). Verde no escopo NAO fecha a fase: a cadeia completa — gate 2
 #   inteiro + gate 3 de todas as tasks — roda antes de qualquer commit.
+#
+# Sessao de resgate (rescue) — ultima etapa antes de dar a fase por perdida:
+#   Quando a fase trava — conserto cirurgico desistindo com REPAIR_ABORT,
+#   consertos esgotados, ciclo improdutivo ou os --max-cycles no fim — o ralph
+#   parava e o dev recebia um log. Mas o motivo real do travamento quase nunca e
+#   falta de forca do modelo: e que TODAS as etapas anteriores trabalham com
+#   autoridade estreita. O ciclo corrige "o que falta"; o conserto mexe so no
+#   arquivo da assinatura; nenhum dos dois pode reorganizar a implementacao nem
+#   encostar num teste existente que passou a contradizer a fase.
+#   O resgate e a etapa com a autoridade que faltava:
+#     - prompt auto-contido e LARGO: preambulo de contexto + a fase inteira + o
+#       motivo do travamento + o veredito bruto do ultimo gate + a desistencia
+#       do conserto (verbatim) + o diff do trabalho parcial na arvore
+#     - modelo proprio e forte (RALPH_RESCUE_MODEL, default: opus no claude)
+#     - pode reorganizar a implementacao entre arquivos e camadas, e pode
+#       ajustar teste EXISTENTE que contradiz o comportamento exigido pela fase
+#     - NAO pode afrouxar teste para ficar verde (apagar, pular, comentar,
+#       enfraquecer assert, mudar o runner ou a config) nem criar teste que a
+#       fase nao pediu. Toda alteracao de teste sai justificada por escrito.
+#   Nao substitui gate nenhum: depois do resgate roda a cadeia COMPLETA — gate 2
+#   inteiro + gate 3 de todas as tasks — e so entao a fase commita, como
+#   qualquer outra. Verde de resgate e verde igual; o commit registra a origem.
+#   Orcamento proprio: RALPH_MAX_RESCUES (default 1), que nao consome ciclo nem
+#   conserto. Ambiente fora do ar NAO aciona resgate — servico morto nao e
+#   defeito de codigo. E o resgate tambem pode desistir, com RESCUE_BLOCKED,
+#   quando o bloqueio e contradicao da propria especificacao: nesse caso nenhum
+#   round adicional e gasto — a decisao e humana, nao de modelo.
+#
+# Vermelho herdado de HEAD — saneamento antes da primeira fase:
+#
+#   A suite roda UMA vez em HEAD (arvore limpa, garantida pelo preflight) antes
+#   da fase 1. Vermelho ali nao e defeito de nenhuma fase: e vermelho que o run
+#   herdou, e ele prende o ciclo de TODAS as fases. Regra de ouro do operador:
+#   nunca iniciar fase nova sobre gate vermelho.
+#
+#   O run real que motivou isto: duas guardas de higiene de features ANTIGAS
+#   estavam vermelhas em HEAD — uma congelava byte a byte um metodo de um
+#   arquivo de OUTRO repositorio que um commit posterior mudou de proposito, a
+#   outra congelava a posicao de um item de menu que uma SPEC posterior moveu.
+#   A fase em curso nao tocava nenhuma das duas. O ralph gastou 5 ciclos, 2
+#   consertos cirurgicos e 2 sessoes de resgate (16 min) para chegar ao veredito
+#   correto e tardio "isto nao se conserta escrevendo codigo da fase".
+#
+#   Desfecho: UMA sessao de saneamento, com mandato explicito de consertar o
+#   vermelho herdado — inclusive ATUALIZAR guarda obsoleta de outra feature
+#   quando o texto congelado mudou por decisao registrada (a prova e o commit
+#   que mudou), preservando a regra que a guarda protege. Verde => commit
+#   proprio e o run segue com HEAD limpo. Ainda vermelho => aborta ANTES da fase
+#   1, nomeando os testes: e decisao humana, e custa uma rodada de suite em vez
+#   de uma fase inteira.
+#
+#   --baseline tem precedencia e desliga o saneamento: quem declara "herde o
+#   vermelho como delta" esta dizendo que o vermelho e intencional (fase escrita
+#   em TDD com o teste ja commitado vermelho). --no-heal-head desliga tudo.
+#
+#   O MESMO mandato vai no prompt do conserto cirurgico e do resgate: num plano
+#   multi-repo a guarda pode ficar obsoleta NO MEIO do run, quando uma fase
+#   anterior commita no repositorio vizinho que a guarda le.
 #
 # Ambiente fora do ar (gate 2) — veredito PROPRIO, nem verde nem vermelho:
 #   Servico externo caido (banco, cache, fila, container derrubado por falta de
@@ -256,10 +321,12 @@
 # Variaveis de ambiente:
 #   RALPH_TEST_CMD           comando de teste (gate 2); --test-cmd tem prioridade
 #   RALPH_TEST_SCOPE         escopo do gate 2: auto (default) | full
+#   RALPH_HEAL_HEAD          saneamento do HEAD vermelho: on (default) | off
+#   RALPH_HEAL_ROUNDS        sessoes de saneamento antes de abortar (default: 1)
 #   RALPH_CRITICAL_PATHS     regex ERE de caminho critico: diff da fase que
 #                            casa forca a suite completa naquela fase
 #   RALPH_TEST_FILE_RE       regex ERE que reconhece arquivo de teste
-#   RALPH_VERIFY             gate 3: always (default) | auto | off
+#   RALPH_VERIFY             gate 3: auto (default) | always | off
 #   RALPH_VERIFY_MODEL       modelo do verificador (default: sonnet no claude)
 #   RALPH_VERIFY_EVIDENCE    required (default) | optional. Com required, um
 #                            `TASK n: DONE` sem `— <evidencia>` (arquivo:linha
@@ -305,10 +372,13 @@
 #   RALPH_VERBOSE            1 = streama o progresso do engine (igual --verbose)
 #   RALPH_HEARTBEAT          segundos entre heartbeats no modo quiet (default:
 #                            60; 0 desliga)
-#   RALPH_MAX_CYCLES         ciclos de correcao por fase (default: 3)
-#   RALPH_REPAIR             conserto cirurgico: on (default) | off
-#   RALPH_MAX_REPAIRS        consertos por ciclo (default: 2; 0 desliga)
+#   RALPH_MAX_CYCLES         ciclos de correcao por fase (default: 2)
+#   RALPH_REPAIR             conserto cirurgico: off (default) | on
+#   RALPH_MAX_REPAIRS        consertos por ciclo (default: 0 = desligado)
 #   RALPH_REPAIR_MODEL       modelo do conserto (default: opus no claude)
+#   RALPH_RESCUE             sessao de resgate: on (default) | off
+#   RALPH_MAX_RESCUES        sessoes de resgate por fase (default: 1; 0 desliga)
+#   RALPH_RESCUE_MODEL       modelo do resgate (default: opus no claude)
 #   RALPH_CAVEMAN            nivel do plugin caveman nas sessoes claude que
 #                            escrevem codigo — implementacao e conserto
 #                            (default: ultra; `off` desliga). O verificador
@@ -366,11 +436,26 @@ INPUT_FILE=""
 FROM_PHASE=0
 KEEP_GOING=false
 TEST_CMD_FLAG=""
-MAX_CYCLES="${RALPH_MAX_CYCLES:-5}"
-VERIFY_MODE="${RALPH_VERIFY:-always}"
+# Orcamento de recuperacao por fase. Os defaults sao deliberadamente curtos.
+#
+# Eram 5 ciclos x 2 consertos cirurgicos + 2 resgates: ate ~29 sessoes de
+# engine numa unica fase, e o gasto nao comprava veredito novo — depois do
+# segundo ciclo vermelho o modelo repete a mesma tentativa com outras palavras.
+# Agora: 2 ciclos e, se ainda estiver vermelho, 1 sessao de resgate (larga, com
+# modelo forte) antes de devolver a fase para o humano.
+#
+# O conserto cirurgico sai do default (RALPH_REPAIR=on religa): ele era o nivel
+# intermediario entre o ciclo e o resgate, e com so 2 ciclos o resgate ja chega
+# cedo o bastante.
+MAX_CYCLES="${RALPH_MAX_CYCLES:-2}"
+VERIFY_MODE="${RALPH_VERIFY:-auto}"
 VERIFY_MODEL=""
-REPAIR_MODE="${RALPH_REPAIR:-on}"
-MAX_REPAIRS="${RALPH_MAX_REPAIRS:-2}"
+REPAIR_MODE="${RALPH_REPAIR:-off}"
+MAX_REPAIRS="${RALPH_MAX_REPAIRS:-0}"
+# Resgate: orcamento PROPRIO, por fase. Nao sai do bolso dos ciclos nem dos
+# consertos — e a etapa que so existe quando os dois ja falharam.
+RESCUE_MODE="${RALPH_RESCUE:-on}"
+MAX_RESCUES="${RALPH_MAX_RESCUES:-1}"
 # Baseline do gate 2: a suite roda uma vez em HEAD (arvore limpa, garantida pelo
 # preflight) e o conjunto de testes ja vermelhos vira linha de base. Sem isso,
 # UMA falha pre-existente e alheia a fase prende o loop ate esgotar --max-cycles,
@@ -387,6 +472,15 @@ BASELINE_FILE=""
 BASELINE_COUNT=0
 BASELINE_ACTIVE=false
 GATE2_DELTA_NOTE=""
+# Saneamento do HEAD (ver "Vermelho herdado de HEAD" no cabecalho).
+#   HEAL_MODE      on (default) = HEAD vermelho ganha uma sessao de saneamento
+#   HEAL_ROUNDS    sessoes de saneamento antes de abortar o run
+#   HEAD_RED       1 = a medicao em HEAD achou vermelho AINDA nao sanado
+#   HEAL_ABORT_WHY desistencia declarada pela sessao (HEAL_ABORT: <motivo>)
+HEAL_MODE="${RALPH_HEAL_HEAD:-on}"
+HEAL_ROUNDS="${RALPH_HEAL_ROUNDS:-1}"
+HEAD_RED=0
+HEAL_ABORT_WHY=""
 # Memoria do gate 2 DENTRO da fase: assinatura da arvore na ultima execucao e o
 # veredito que ela deu. Arvore identica => mesmo veredito, sem gastar a suite.
 GATE2_LAST_SIG=""
@@ -435,8 +529,16 @@ UI_SCREEN_TASKS=""
 ENV_ABORT=0
 # Desistencia explicita do conserto cirurgico (REPAIR_ABORT) e abortos de fase.
 REPAIR_ABORTED=0
+# Motivo verbatim da ultima desistencia do conserto: insumo do prompt de
+# resgate. Sem ele, o resgate reexploraria do zero o que o conserto ja concluiu.
+REPAIR_ABORT_WHY=""
 PHASE_ABORT_REASON=""
+# Resgate: bloqueio declarado pelo modelo (RESCUE_BLOCKED) encerra o orcamento
+# — contradicao de especificacao nao se resolve gastando outra sessao.
+RESCUE_BLOCKED=0
+RESCUE_BLOCK_WHY=""
 REPAIR_MODEL=""
+RESCUE_MODEL=""
 # Caveman: o run e headless, ninguem le a prosa do engine. O plugin caveman
 # (se instalado) le CAVEMAN_DEFAULT_MODE no SessionStart, entao o ralph pede o
 # nivel maximo — `ultra` — nas sessoes que ESCREVEM codigo (implementacao e
@@ -474,8 +576,14 @@ while [[ $# -gt 0 ]]; do
     --max-repairs) MAX_REPAIRS="$2"; shift 2 ;;
     --max-repairs=*) MAX_REPAIRS="${1#*=}"; shift ;;
     --no-repair)   REPAIR_MODE="off"; shift ;;
+    --max-rescues) MAX_RESCUES="$2"; shift 2 ;;
+    --max-rescues=*) MAX_RESCUES="${1#*=}"; shift ;;
+    --no-rescue)   RESCUE_MODE="off"; shift ;;
+    --rescue-model) RESCUE_MODEL="$2"; shift 2 ;;
+    --rescue-model=*) RESCUE_MODEL="${1#*=}"; shift ;;
     --baseline)    BASELINE_MODE="on"; shift ;;
     --no-baseline) BASELINE_MODE="off"; shift ;;
+    --no-heal-head) HEAL_MODE="off"; shift ;;
     --test-cmd)    TEST_CMD_FLAG="$2"; shift 2 ;;
     --test-cmd=*)  TEST_CMD_FLAG="${1#*=}"; shift ;;
     --full-suite)  TEST_SCOPE_MODE="full"; shift ;;
@@ -591,6 +699,8 @@ ST_STDOUT_LOG=""
 # round corrente DENTRO do ciclo (0 = nenhum conserto em curso).
 ST_REPAIR="idle"
 ST_REPAIR_ROUND=0
+ST_RESCUE="idle"
+ST_RESCUE_ROUND=0
 # Sufixo dos logs/prompts dos gates dentro de um mesmo ciclo. Vazio no round 0
 # (nomes historicos preservados); "r<N>" nas revalidacoes pos-conserto, para que
 # um round nao sobrescreva o log do anterior.
@@ -737,6 +847,8 @@ state_sync() {
       "$ST_GATE0" "$ST_GATE1" "$ST_GATE2" "$ST_GATE3"
     printf '  "repair": {"status": "%s", "round": %d, "max": %d},\n' \
       "$ST_REPAIR" "$ST_REPAIR_ROUND" "$MAX_REPAIRS"
+    printf '  "rescue": {"status": "%s", "round": %d, "max": %d},\n' \
+      "$ST_RESCUE" "$ST_RESCUE_ROUND" "$MAX_RESCUES"
     printf '  "limit": {"waiting": %s, "until": %d, "waits": %d, "max_waits": %d},\n' \
       "$([ "$ST_LIMIT_WAITING" = "1" ] && echo true || echo false)" \
       "$ST_LIMIT_UNTIL" "$LIMIT_WAITS" "$MAX_LIMIT_WAITS"
@@ -789,6 +901,9 @@ ui_state_cache() {
     printf 'repair=%s\n'      "$ST_REPAIR"
     printf 'repair_round=%s\n' "$ST_REPAIR_ROUND"
     printf 'max_repairs=%s\n' "$MAX_REPAIRS"
+    printf 'rescue=%s\n'      "$ST_RESCUE"
+    printf 'rescue_round=%s\n' "$ST_RESCUE_ROUND"
+    printf 'max_rescues=%s\n' "$MAX_RESCUES"
     printf 'test_cmd=%s\n'    "${TEST_CMD//$'\n'/ }"
     printf 'limit_waiting=%s\n' "$ST_LIMIT_WAITING"
     printf 'limit_until=%s\n' "$ST_LIMIT_UNTIL"
@@ -1035,6 +1150,27 @@ gate_end() {
 
 UI_SPINNER='⣾⣽⣻⢿⡿⣟⣯⣷'
 
+# Glifos das CELULAS do painel. Toda marca aqui tem largura 1 garantida.
+#
+# `${#s}` conta CARACTERE; o terminal desenha COLUNA. Marca East-Asian
+# Ambiguous (U+25B6 ▶, U+25D0 ◐, U+2588 █, U+2591 ░, U+2191 ↑, U+2026 …,
+# U+2014 —) mede 1 no bash e 2 em terminal que resolve ambiguo como largo —
+# Windows Terminal sobre WSL e o caso comum. Cada uma dessas numa linha empurra
+# a borda direita para fora da janela e a caixa aparece cortada.
+#
+# A moldura (U+2500-2524) fica: se ela medisse 2 o painel inteiro colapsaria,
+# nao so a linha com a marca. ✓ ✗ ⊘ ↳ » e o spinner braille sao EAW=Neutral.
+#
+# RALPH_UI_GLYPHS=unicode volta ao conjunto antigo em terminal que resolve
+# ambiguo como estreito (a maioria dos emuladores Linux nativos).
+if [ "${RALPH_UI_GLYPHS:-ascii}" = "unicode" ]; then
+  UI_G_RUN='▶'; UI_G_PART='◐'; UI_G_BAR_ON='█'; UI_G_BAR_OFF='░'
+  UI_G_CUT='…'; UI_G_NONE='—'; UI_G_UP='↑'; UI_G_SCROLL='↑↓'; UI_G_RANGE='–'
+else
+  UI_G_RUN='>'; UI_G_PART='*'; UI_G_BAR_ON='#'; UI_G_BAR_OFF='.'
+  UI_G_CUT='+'; UI_G_NONE='-'; UI_G_UP='^'; UI_G_SCROLL='^v'; UI_G_RANGE='-'
+fi
+
 # Paleta do painel. Separada das cores do placar: o placar tem 4 niveis, o
 # painel precisa de tom neutro para moldura e rotulo.
 UI_C_FRAME='\033[38;5;238m'
@@ -1085,7 +1221,7 @@ ui_cell() {
   local text="$1" width="$2"
   [ "$width" -lt 1 ] && width=1
   if [ "${#text}" -gt "$width" ]; then
-    text="${text:0:$((width - 1))}…"
+    text="${text:0:$((width - 1))}$UI_G_CUT"
   fi
   printf '%s%*s' "$text" $((width - ${#text})) ''
 }
@@ -1105,14 +1241,14 @@ ui_bar() {
   fi
   [ "$filled" -gt "$width" ] && filled=$width
   printf '%b%s%b%b%s%b %3d%%' \
-    "$UI_C_OK" "$(ui_rule "$filled" '█')" "$UI_C_OFF" \
-    "$UI_C_PEND" "$(ui_rule $((width - filled)) '░')" "$UI_C_OFF" "$pct"
+    "$UI_C_OK" "$(ui_rule "$filled" "$UI_G_BAR_ON")" "$UI_C_OFF" \
+    "$UI_C_PEND" "$(ui_rule $((width - filled)) "$UI_G_BAR_OFF")" "$UI_C_OFF" "$pct"
 }
 
 ui_status_label() {
   case "$1" in
     done)     printf '%b✓ Concluída%b'  "$UI_C_OK"   "$UI_C_OFF" ;;
-    running)  printf '%b▶ Em execução%b' "$UI_C_RUN"  "$UI_C_OFF" ;;
+    running)  printf '%b%s Em execução%b' "$UI_C_RUN" "$UI_G_RUN" "$UI_C_OFF" ;;
     failed)   printf '%b✗ Falhou%b'      "$UI_C_ERR"  "$UI_C_OFF" ;;
     skipped)  printf '%b» Pulada%b'      "$UI_C_DIM"  "$UI_C_OFF" ;;
     partial)  printf '%b! Incompleta%b'  "$UI_C_ERR"  "$UI_C_OFF" ;;
@@ -1135,22 +1271,22 @@ ui_task_state() {
 }
 ui_task_plain() {
   case "$1" in
-    active:*)     printf '▶ ~%s%%' "${1#active:}" ;;
-    partialpct:*) printf '◐ ~%s%%' "${1#partialpct:}" ;;
+    active:*)     printf '%s ~%s%%' "$UI_G_RUN" "${1#active:}" ;;
+    partialpct:*) printf '%s ~%s%%' "$UI_G_PART" "${1#partialpct:}" ;;
     *)            ui_status_plain "$1" ;;
   esac
 }
 ui_task_label() {
   case "$1" in
-    active:*)     printf '%b▶ ~%s%%%b' "$UI_C_RUN"  "${1#active:}" "$UI_C_OFF" ;;
-    partialpct:*) printf '%b◐ ~%s%%%b' "$UI_C_DIM"  "${1#partialpct:}" "$UI_C_OFF" ;;
+    active:*)     printf '%b%s ~%s%%%b' "$UI_C_RUN" "$UI_G_RUN" "${1#active:}" "$UI_C_OFF" ;;
+    partialpct:*) printf '%b%s ~%s%%%b' "$UI_C_DIM" "$UI_G_PART" "${1#partialpct:}" "$UI_C_OFF" ;;
     *)            ui_status_label "$1" ;;
   esac
 }
 
 ui_status_plain() {
   case "$1" in
-    done) printf '✓ Concluída' ;; running) printf '▶ Em execução' ;;
+    done) printf '✓ Concluída' ;; running) printf '%s Em execução' "$UI_G_RUN" ;;
     failed) printf '✗ Falhou' ;;  skipped) printf '» Pulada' ;;
     partial) printf '! Incompleta' ;; declared) printf '✓ Declarada' ;;
     *) printf '· Pendente' ;;
@@ -1179,6 +1315,7 @@ ui_load_state() {
   UIV_stage_start=0; UIV_stderr_log=""; UIV_stdout_log=""
   UIV_engine=""; UIV_project=""
   UIV_repair=""; UIV_repair_round=0; UIV_max_repairs=0
+  UIV_rescue=""; UIV_rescue_round=0; UIV_max_rescues=0
 
   [ -f "$UI_DIR/state.env" ] || return 0
   local k v
@@ -1199,6 +1336,8 @@ ui_load_state() {
       engine) UIV_engine="$v" ;;           project) UIV_project="$v" ;;
       repair) UIV_repair="$v" ;;           repair_round) UIV_repair_round="$v" ;;
       max_repairs) UIV_max_repairs="$v" ;;
+      rescue) UIV_rescue="$v" ;;           rescue_round) UIV_rescue_round="$v" ;;
+      max_rescues) UIV_max_rescues="$v" ;;
     esac
   done < "$UI_DIR/state.env"
 }
@@ -1211,7 +1350,7 @@ ui_sec_header() {
   local w="$1"
   local status_txt status_col
   case "$UIV_run_status" in
-    running)  status_txt="▶ Em execução"; status_col="$UI_C_RUN" ;;
+    running)  status_txt="$UI_G_RUN Em execução"; status_col="$UI_C_RUN" ;;
     done)     status_txt="✓ Concluído";   status_col="$UI_C_OK" ;;
     failed)   status_txt="✗ Falhou";      status_col="$UI_C_ERR" ;;
     aborted)  status_txt="✗ Abortado";    status_col="$UI_C_ERR" ;;
@@ -1219,7 +1358,7 @@ ui_sec_header() {
   esac
   [ "$UIV_limit_waiting" = "1" ] && { status_txt="~ Aguardando limite"; status_col="$UI_C_RUN"; }
 
-  local elapsed="—"
+  local elapsed="$UI_G_NONE"
   [ "${UIV_started:-0}" -gt 0 ] 2> /dev/null && elapsed="$(format_duration $(($(date +%s) - UIV_started)))"
 
   printf '%bRALPH%b\n' "$UI_C_TITLE" "$UI_C_OFF"
@@ -1259,7 +1398,7 @@ ui_box_row() {
   local w="$1" plain="$2" colored="$3"
   local inner=$((w - 4))
   if [ "${#plain}" -gt "$inner" ]; then
-    plain="${plain:0:$((inner - 1))}…"
+    plain="${plain:0:$((inner - 1))}$UI_G_CUT"
     colored="$plain"
   fi
   printf '%b│%b %b%s %b│%b\n' \
@@ -1300,7 +1439,7 @@ ui_sec_progress_lines() {
 
 ui_sec_current_lines() {
   local w="$1"
-  local gate_now="—"
+  local gate_now="$UI_G_NONE"
   if [ "$UIV_limit_waiting" = "1" ]; then
     local left=$((UIV_limit_until - $(date +%s)))
     [ "$left" -lt 0 ] && left=0
@@ -1319,15 +1458,19 @@ ui_sec_current_lines() {
   # rodaram antes de gastar um ciclo caro.
   local repair_txt=""
   [ "$UIV_repair_round" -gt 0 ] 2> /dev/null && repair_txt="   Conserto: $UIV_repair_round/$UIV_max_repairs"
+  if [ "$UIV_rescue_round" -gt 0 ] 2> /dev/null; then
+    repair_txt="$repair_txt   Resgate: $UIV_rescue_round/$UIV_max_rescues"
+    [ "$UIV_rescue" = "blocked" ] && repair_txt="$repair_txt (bloqueio de spec)"
+  fi
 
   ui_box_row "$w" "Ciclo: $UIV_cycle/$UIV_max_cycles   Gate: $gate_now$repair_txt" \
     "$(printf '%bCiclo:%b %s/%s   %bGate:%b %s%b%s%b' "$UI_C_LABEL" "$UI_C_OFF" "$UIV_cycle" "$UIV_max_cycles" "$UI_C_LABEL" "$UI_C_OFF" "$gate_now" "$UI_C_DIM" "$repair_txt" "$UI_C_OFF")"
-  ui_box_row "$w" "Atividade: ${UIV_activity:-—}" \
-    "$(printf '%bAtividade:%b %s' "$UI_C_LABEL" "$UI_C_OFF" "${UIV_activity:-—}")"
-  ui_box_row "$w" "Último erro: ${UIV_last_error:-—}" \
+  ui_box_row "$w" "Atividade: ${UIV_activity:-$UI_G_NONE}" \
+    "$(printf '%bAtividade:%b %s' "$UI_C_LABEL" "$UI_C_OFF" "${UIV_activity:-$UI_G_NONE}")"
+  ui_box_row "$w" "Último erro: ${UIV_last_error:-$UI_G_NONE}" \
     "$(printf '%bÚltimo erro:%b %b%s%b' "$UI_C_LABEL" "$UI_C_OFF" \
        "$([ -n "$UIV_last_error" ] && printf '%b' "$UI_C_ERR" || printf '%b' "$UI_C_DIM")" \
-       "${UIV_last_error:-—}" "$UI_C_OFF")"
+       "${UIV_last_error:-$UI_G_NONE}" "$UI_C_OFF")"
 }
 
 # Duas colunas quando cabe, empilhadas quando nao. `paste` alinharia mal com
@@ -1471,10 +1614,10 @@ ui_sec_table() {
   # Rodape so quando ha linha escondida — que e exatamente quando a dica de
   # navegacao importa. Fora disso a moldura fica limpa.
   if [ "$total" -gt "$last" ] || [ "$start" -gt 0 ]; then
-    local foot="  … $total linhas, mostrando $((start + 1))–$last"
+    local foot="  $UI_G_CUT $total linhas, mostrando $((start + 1))$UI_G_RANGE$last"
     if [ "$UI_KEYS" = "1" ]; then
       if [ "$UI_SCROLL" -ge 0 ] 2> /dev/null; then foot+=" · manual · a = auto"
-      else foot+=" · ↑↓ rolar · a = auto"; fi
+      else foot+=" · $UI_G_SCROLL rolar · a = auto"; fi
     fi
     ui_box_row "$w" "$foot" "$(printf '%b%s%b' "$UI_C_DIM" "$foot" "$UI_C_OFF")"
   fi
@@ -1493,20 +1636,61 @@ ui_scroll_fit() {
   printf '%s' "$start"
 }
 
+# Acumulador de arquivos tocados por fase.
+#
+# `git status` esvazia no instante em que a fase commita, e o stream do engine
+# some quando o log do ciclo e substituido. Sem memoria, o progresso das tasks
+# cairia a zero justamente quando a fase fecha.
+#
+# Alimentado pelo PINTOR (a cada ~3s, enquanto o engine trabalha) E pelo
+# processo principal em pontos deterministicos (fim da sessao, antes do
+# commit). So o pintor nao basta: se a ultima varredura dele cair antes do
+# engine escrever o ultimo arquivo, aquela task nunca e contada — um flake que
+# aparecia so com a maquina carregada.
+#
+# Vive em .phases/, que split_phases recria: nao atravessa runs.
+ui_touched_file() {
+  printf '%s/touched-%s.txt' "$UI_DIR" "${1:-0}"
+}
+
+ui_touch_record() {
+  local phase_num="${1:-0}" stdout_log="${2:-}"
+  [ -n "$phase_num" ] && [ "$phase_num" -gt 0 ] 2> /dev/null || return 0
+  [ -d "$UI_DIR" ] || return 0
+
+  local seen tmp
+  seen="$(ui_touched_file "$phase_num")"
+  tmp="$seen.tmp.$$"
+
+  {
+    [ -n "$stdout_log" ] && engine_written_files "$stdout_log"
+    git status --porcelain -uall 2> /dev/null | awk '{ $1=""; sub(/^ /,""); print }' || true
+    [ -f "$seen" ] && cat "$seen"
+  } 2> /dev/null | awk 'NF && !s[$0]++' > "$tmp" 2> /dev/null
+
+  # tmp + mv porque o pintor le este diretorio em paralelo.
+  mv -f "$tmp" "$seen" 2> /dev/null || rm -f "$tmp" 2> /dev/null
+  return 0
+}
+
 # ui_infer_tasks — qual task esta sendo trabalhada, e quanto dela ja apareceu.
 #
-# HEURISTICA, e o painel a rotula como tal. O engine roda numa sessao opaca:
-# nenhum evento diz em que task ele esta. O que existe de concreto e (a) o texto
-# da task, que nomeia identificadores de codigo, e (b) a arvore mudando. Casar
-# um com o outro da o sinal mais honesto disponivel — "os artefatos que esta
-# task nomeia ja existem no disco" — e nada mais forte que isso.
+# HEURISTICA, e o painel a rotula como tal. Nenhum evento do engine diz em que
+# task ele esta. O que existe de concreto e (a) o texto da task, que nomeia
+# identificadores de codigo, e (b) os arquivos que o engine ESCREVEU nesta
+# sessao — Edit/Write emitidos no stream, mais a arvore suja. Casar um com o
+# outro da "os artefatos que esta task nomeia foram escritos agora".
+#
+# A fonte era `git ls-files`, o repo inteiro: uma task que cita arquivo
+# preexistente nascia ~100% antes de alguem encostar nela, e era isso que a
+# tabela mostrava. Existir nao e prova de nada; ter sido escrito e.
 #
 # NAO substitui o gate 3: presenca de arquivo nao e prova de implementacao
 # correta. Por isso o veredito do gate 3, quando existe, sempre vence.
 #
 # Escreve $UI_TASKPROG: indice|pct|ativa(0|1)
 ui_infer_tasks() {
-  local phase_num="$1"
+  local phase_num="$1" stdout_log="${2:-}"
   local out="$UI_TASKPROG" tmp="$UI_TASKPROG.tmp.$$"
   local pf
   pf="$(printf 'phase-%02d.md' "$phase_num" 2> /dev/null)"
@@ -1534,7 +1718,7 @@ ui_infer_tasks() {
   done
 
   # Nenhuma task nomeou artefato: nao ha o que inferir, e sair AQUI e
-  # obrigatorio. O awk de duas passadas abaixo separa os arquivos por FNR/NR;
+  # obrigatorio. O awk de duas passadas abaixo separa os arquivos por FILENAME;
   # com o primeiro arquivo vazio ele lia o universo de caminhos como se fosse a
   # lista de ancoras — foi assim que o taskprog.txt de um run real virou 60 KB
   # de linhas `caminho|0|0` e a tabela ficou Pendente do inicio ao fim.
@@ -1544,18 +1728,37 @@ ui_infer_tasks() {
     return 0
   fi
 
-  # Universo de caminhos: o que o git rastreia mais o que acabou de mudar. O
-  # segundo e o que faz a inferencia se mexer durante a sessao.
-  {
-    git ls-files 2> /dev/null || true
-    git status --porcelain -uall 2> /dev/null | awk '{ $1=""; sub(/^ /,""); print }' || true
-  } > "$paths" 2> /dev/null
+  # Universo de caminhos: SO o que ESTA FASE tocou.
+  #
+  # Antes isto era `git ls-files` — todo arquivo rastreado do repo. Uma task que
+  # cita um arquivo preexistente ja nascia 100%, e a tabela mostrava ~100% na
+  # task que ninguem tinha comecado. Agora a prova e o ATO de escrever.
+  #
+  # O acumulador e obrigatorio: `git status` esvazia no instante em que a fase
+  # commita, e sem memoria o progresso das tasks recem-concluidas cairia de
+  # 100% para 0 justamente no fim da fase. O arquivo vive em .phases, que
+  # split_phases recria a cada run, entao nao atravessa runs.
+  ui_touch_record "$phase_num" "$stdout_log"
+  cp -f "$(ui_touched_file "$phase_num")" "$paths" 2> /dev/null || : > "$paths"
+
+  # Nada escrito ainda: toda task em 0, sem chamar o awk.
+  if [ ! -s "$paths" ]; then
+    awk -F'\t' '{ t[$1] = 1 } END { for (k in t) printf "%s|0|0\n", k }' "$anchors" \
+      2> /dev/null | sort -n > "$tmp" && mv -f "$tmp" "$out" 2> /dev/null
+    rm -f "$anchors" "$paths" "$tmp" 2> /dev/null
+    return 0
+  fi
 
   # Arquivo tocado mais recentemente: e ele que aponta a task ativa.
   local newest=""
   newest="$(git status --porcelain -uall 2> /dev/null | awk '{ $1=""; sub(/^ /,""); print }' \
     | while IFS= read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done \
     | xargs -r ls -1t 2> /dev/null | head -n 1 || true)"
+  # Sem arvore suja (o engine escreveu e ja commitou, ou o Edit falhou), a
+  # ultima linha do stream ainda diz onde ele estava.
+  if [ -z "$newest" ] && [ -n "$stdout_log" ]; then
+    newest="$(engine_written_files "$stdout_log" | tail -n 1 || true)"
+  fi
 
   # FILENAME, e nao NR == FNR: a separacao tem que vir do arquivo que esta
   # sendo lido, nunca de uma contagem que empata quando um dos dois e vazio.
@@ -1600,41 +1803,42 @@ ui_sec_live() {
   local w="$1"
   local inner=$((w - 4))
 
-  local stage_el="—"
+  local stage_el="$UI_G_NONE"
   [ "${UIV_stage_start:-0}" -gt 0 ] 2> /dev/null && \
     stage_el="$(format_duration $(($(date +%s) - UIV_stage_start)))"
 
   ui_box_top "$w" "AO VIVO"
 
-  ui_box_row "$w" "Etapa: ${UIV_activity:-—} · $stage_el" \
-    "$(printf '%bEtapa:%b %s · %b%s%b' "$UI_C_LABEL" "$UI_C_OFF" "${UIV_activity:-—}" "$UI_C_RUN" "$stage_el" "$UI_C_OFF")"
+  ui_box_row "$w" "Etapa: ${UIV_activity:-$UI_G_NONE} · $stage_el" \
+    "$(printf '%bEtapa:%b %s · %b%s%b' "$UI_C_LABEL" "$UI_C_OFF" "${UIV_activity:-$UI_G_NONE}" "$UI_C_RUN" "$stage_el" "$UI_C_OFF")"
 
-  # Taxa de saida: engine vivo escreve; engine travado nao. O delta e a unica
-  # prova barata de atividade quando a CLI nao emite progresso legivel.
-  local rate="—"
+  # Acoes do engine: cada Edit/Write/Bash/Read que ele emitiu no stream. A
+  # contagem de bytes ficava em 0 do inicio ao fim com --output-format json e
+  # nao provava vida nenhuma; numero de ferramentas usadas prova.
+  local rate="$UI_G_NONE"
   [ "${UIL_RATE:-}" != "" ] && rate="$UIL_RATE"
-  local left="Saída do engine: $(ui_human_bytes "${UIL_BYTES:-0}")  ↑ $rate"
+  local left="Ações do engine: ${UIL_ACTIONS:-0}  $UI_G_UP $rate"
   local right="Árvore: ${UIL_DIRTY_N:-0} arquivo(s) tocado(s)"
   local gap=$((inner - ${#left} - ${#right}))
   if [ "$gap" -lt 2 ]; then
-    ui_box_row "$w" "$left" "$(printf '%bSaída do engine:%b %s  %b↑ %s%b' "$UI_C_LABEL" "$UI_C_OFF" "$(ui_human_bytes "${UIL_BYTES:-0}")" "$UI_C_OK" "$rate" "$UI_C_OFF")"
+    ui_box_row "$w" "$left" "$(printf '%bAções do engine:%b %s  %b%s %s%b' "$UI_C_LABEL" "$UI_C_OFF" "${UIL_ACTIONS:-0}" "$UI_C_OK" "$UI_G_UP" "$rate" "$UI_C_OFF")"
     ui_box_row "$w" "$right" "$(printf '%bÁrvore:%b %s arquivo(s) tocado(s)' "$UI_C_LABEL" "$UI_C_OFF" "${UIL_DIRTY_N:-0}")"
   else
     ui_box_row "$w" "$left$(printf '%*s' "$gap" '')$right" \
-      "$(printf '%bSaída do engine:%b %s  %b↑ %s%b%*s%bÁrvore:%b %s arquivo(s) tocado(s)' \
-         "$UI_C_LABEL" "$UI_C_OFF" "$(ui_human_bytes "${UIL_BYTES:-0}")" "$UI_C_OK" "$rate" "$UI_C_OFF" \
+      "$(printf '%bAções do engine:%b %s  %b%s %s%b%*s%bÁrvore:%b %s arquivo(s) tocado(s)' \
+         "$UI_C_LABEL" "$UI_C_OFF" "${UIL_ACTIONS:-0}" "$UI_C_OK" "$UI_G_UP" "$rate" "$UI_C_OFF" \
          "$gap" '' "$UI_C_LABEL" "$UI_C_OFF" "${UIL_DIRTY_N:-0}")"
   fi
 
-  # Ultima linha de progresso lida AO VIVO do stderr. Engine que nao streama
-  # (claude -p --output-format json) deixa isso vazio para sempre — nesse caso
-  # diga ha quanto tempo esta em silencio em vez de repetir "aguardando".
+  # Ultima acao lida AO VIVO do stream do engine: ferramenta + alvo. Vazio
+  # mesmo com a sessao rodando significa que ele ainda nao usou ferramenta
+  # nenhuma (esta lendo o prompt / pensando) — dizer ha quanto tempo e honesto.
   local prog="${UIL_TAIL:-}"
   if [ -n "$prog" ]; then
     ui_box_row "$w" "· $prog" "$(printf '%b· %s%b' "$UI_C_DIM" "$prog" "$UI_C_OFF")"
   else
-    ui_box_row "$w" "· engine em silêncio há $stage_el (esta CLI não streama progresso)" \
-      "$(printf '%b· engine em silêncio há %s (esta CLI não streama progresso)%b' "$UI_C_PEND" "$stage_el" "$UI_C_OFF")"
+    ui_box_row "$w" "· nenhuma ação ainda · $stage_el nesta etapa" \
+      "$(printf '%b· nenhuma ação ainda · %s nesta etapa%b' "$UI_C_PEND" "$stage_el" "$UI_C_OFF")"
   fi
 
   # Task inferida: o `~` e deliberado. E palpite fundamentado em arquivo real,
@@ -1834,11 +2038,19 @@ ui_painter_loop() {
         UIL_RATE="$(ui_human_bytes $((delta / dt)))/s"
         prev_bytes=$UIL_BYTES; prev_ts=$now_ts
       elif [ "$prev_ts" -eq 0 ]; then
-        prev_bytes=$UIL_BYTES; prev_ts=$now_ts; UIL_RATE="—"
+        prev_bytes=$UIL_BYTES; prev_ts=$now_ts; UIL_RATE="$UI_G_NONE"
       fi
 
+      # Ultima acao do engine. Fonte preferida: o NDJSON do stdout, onde cada
+      # ferramenta usada vira um evento assim que acontece. O stderr e fallback
+      # (codex, e claude quando o stream ainda nao produziu tool_use nenhum).
       UIL_TAIL=""
-      [ -n "$sl" ] && [ -s "$sl" ] && \
+      UIL_ACTIONS=0
+      if [ -n "$ol" ] && [ -s "$ol" ]; then
+        UIL_ACTIONS="$(engine_action_count "$ol")"
+        UIL_TAIL="$(engine_last_action "$ol" | cut -c1-200 || true)"
+      fi
+      [ -z "$UIL_TAIL" ] && [ -n "$sl" ] && [ -s "$sl" ] && \
         UIL_TAIL="$(grep -v '^[[:space:]]*$' "$sl" 2> /dev/null | tail -n 1 | cut -c1-200 || true)"
 
       # git status varre a arvore inteira: a 2 fps num repo grande isso pesaria.
@@ -1864,7 +2076,7 @@ ui_painter_loop() {
         # PROGRESS_FILE e os arquivos de fase do disco, entao nao depende do
         # estado congelado que herdou no fork.
         ui_tasks_cache 2> /dev/null || true
-        ui_infer_tasks "${pnum:-0}" 2> /dev/null || true
+        ui_infer_tasks "${pnum:-0}" "$ol" 2> /dev/null || true
 
         UIL_ACTIVE_TASK=""
         if [ -f "$UI_TASKPROG" ]; then
@@ -2306,8 +2518,8 @@ attach_run() {
     # (nao-TTY, --no-ui) o attach continua util: republica e resume em texto.
     if ! $UI_ACTIVE; then
       ui_tasks_cache 2> /dev/null || true
-      ui_infer_tasks "$pnum" 2> /dev/null || true
-      log "attach: fase ${pnum} · $(attach_task_tally) · ${UIV_activity:-—}"
+      ui_infer_tasks "$pnum" "${UIV_stdout_log:-}" 2> /dev/null || true
+      log "attach: fase ${pnum} · $(attach_task_tally) · ${UIV_activity:-$UI_G_NONE}"
     fi
 
     case "$st" in
@@ -2532,6 +2744,11 @@ preflight_checks() {
     exit 1
   fi
 
+  if ! [[ "$MAX_RESCUES" =~ ^[0-9]+$ ]]; then
+    fail "Valor invalido para --max-rescues: '$MAX_RESCUES'. Use um inteiro >= 0 (0 desliga)."
+    exit 1
+  fi
+
   if ! [[ "$MAX_REPAIRS" =~ ^[0-9]+$ ]]; then
     fail "Valor invalido para --max-repairs: '$MAX_REPAIRS'. Use um inteiro >= 0 (0 desliga)."
     exit 1
@@ -2548,6 +2765,7 @@ preflight_checks() {
   # --no-repair e --max-repairs 0 sao o mesmo desligamento; normaliza para um
   # unico predicado (repair_enabled) em vez de checar dois lugares no loop.
   [ "$REPAIR_MODE" = "off" ] && MAX_REPAIRS=0
+  [ "$RESCUE_MODE" = "off" ] && MAX_RESCUES=0
 
   local n
   for n in REPAIR_MAX_FILES REPAIR_MAX_TASKS; do
@@ -2599,7 +2817,16 @@ preflight_checks() {
     REPAIR_MODEL="opus"
   fi
 
-  log "Modelos — implementacao: ${IMPL_MODEL:-default da CLI}; verificacao: ${VERIFY_MODEL:-default da CLI}; conserto: ${REPAIR_MODEL:-default da CLI}"
+  # Resgate: a sessao mais cara e a de maior autoridade do harness — reorganiza
+  # implementacao e decide sobre teste existente. Mesma regra do conserto: sem
+  # default no codex, so se pedido.
+  if [ -n "${RALPH_RESCUE_MODEL:-}" ] && [ -z "$RESCUE_MODEL" ]; then
+    RESCUE_MODEL="$RALPH_RESCUE_MODEL"
+  elif [ -z "$RESCUE_MODEL" ] && [[ "$ENGINE" == "claude" ]]; then
+    RESCUE_MODEL="opus"
+  fi
+
+  log "Modelos — implementacao: ${IMPL_MODEL:-default da CLI}; verificacao: ${VERIFY_MODEL:-default da CLI}; conserto: ${REPAIR_MODEL:-default da CLI}; resgate: ${RESCUE_MODEL:-default da CLI}"
 
   case "$TEST_SCOPE_MODE" in
     auto|full) ;;
@@ -2627,6 +2854,16 @@ preflight_checks() {
     else
       fail "Claude Code CLI nao encontrado. Instale com: npm install -g @anthropic-ai/claude-code"
     fi
+    exit 1
+  fi
+
+  # jq e dependencia dura: o engine claude emite NDJSON (stream-json) e todo
+  # veredito — gate 0, TASK do gate 3, REPAIR_ABORT, RESCUE_BLOCKED, limite de
+  # uso — sai de dentro desse stream. Extrair com grep/sed voltaria a depender
+  # de escape de JSON, que foi exatamente o que quebrava antes.
+  if [[ "$ENGINE" == "claude" ]] && ! command -v jq &> /dev/null; then
+    fail "jq nao encontrado, e ele e obrigatorio para o engine claude."
+    fail "Instale: apt install jq | brew install jq | dnf install jq"
     exit 1
   fi
 
@@ -3051,6 +3288,7 @@ RULES
     else
       echo "- Rode o comando de teste do projeto ao final e confirme que passa."
     fi
+    guard_mandate
     cat <<'ABORT'
 - Se a causa NAO estiver clara no erro acima, ou se o conserto exigir mudar
   varios arquivos ou reimplementar a funcionalidade, PARE sem editar nada e
@@ -3059,6 +3297,132 @@ RULES
   Desistir aqui e barato e correto — quem assume a fase depois recebe o
   contexto completo. Um patch as cegas custa mais caro do que desistir.
 ABORT
+  } > "$prompt_file"
+
+  echo "$prompt_file"
+}
+
+# Prompt de resgate: o OPOSTO do conserto cirurgico. A fase travou justamente
+# porque ninguem tinha contexto nem autoridade suficientes — entao aqui vai
+# TUDO: preambulo, a fase inteira, o motivo do travamento, o veredito bruto do
+# gate, a desistencia do conserto verbatim e o diff do trabalho parcial.
+build_rescue_prompt() {
+  local phase_file="$1" round="$2" reason="$3" gate="$4" cause="$5"
+  local prompt_file="$PROMPT_DIR/${phase_file%.md}.rescue-${round}.txt"
+
+  {
+    echo "RALPH_RESCUE"
+    echo
+    echo "Voce e um engenheiro senior assumindo uma fase que TRAVOU."
+    echo
+    context_preamble "$phase_file"
+    ui_design_brief "$phase_file"
+    cat <<'INTRO'
+
+## Situacao
+Esta fase ja passou por ciclo(s) de correcao e por conserto(s) cirurgico(s) e
+continua vermelha. Repetir o caminho das sessoes anteriores chega ao mesmo
+veredito: elas trabalhavam com autoridade estreita — corrigir "o que falta" e
+patchar o arquivo da assinatura. Voce tem autoridade maior (abaixo) e a
+obrigacao de descobrir POR QUE aquele caminho nao fecha, antes de escrever
+qualquer linha.
+
+Voce esta numa sessao nova: nao tem memoria do que foi feito. Leia o codigo
+atual e o diff do trabalho parcial antes de mudar qualquer coisa.
+INTRO
+    echo
+    echo "## Por que a fase parou"
+    printf '%s\n' "$reason"
+    if [ -n "$REPAIR_ABORT_WHY" ]; then
+      echo
+      echo "## Desistencia do conserto cirurgico (verbatim)"
+      echo '```'
+      printf '%s\n' "$REPAIR_ABORT_WHY"
+      echo '```'
+      echo "Essa desistencia e uma PISTA, nao um veredito final: o conserto so"
+      echo "podia mexer no arquivo da assinatura. Voce pode mexer em mais."
+    fi
+    if [ -n "$cause" ]; then
+      echo
+      echo "## Veredito do ultimo gate (${gate:-?})"
+      echo '```'
+      printf '%s\n' "$cause" | head -n 60
+      echo '```'
+    fi
+
+    local dirty diff_txt
+    dirty="$(git status --porcelain 2> /dev/null | head -n 40 || true)"
+    if [ -n "$dirty" ]; then
+      echo
+      echo "## Trabalho parcial na arvore (nao commitado)"
+      echo '```'
+      printf '%s\n' "$dirty"
+      echo '```'
+      diff_txt="$(git --no-pager diff HEAD 2> /dev/null | head -n 400 || true)"
+      if [ -n "$diff_txt" ]; then
+        echo
+        echo "### git diff HEAD (truncado em 400 linhas)"
+        echo '```diff'
+        printf '%s\n' "$diff_txt"
+        echo '```'
+      fi
+      echo "Esse trabalho e seu ponto de partida, nao um contrato: mantenha o que"
+      echo "estiver certo, reorganize ou descarte o que estiver no caminho."
+    fi
+
+    cat <<'RULES'
+
+## O que voce PODE fazer (e as sessoes anteriores nao podiam)
+- Reorganizar a implementacao entre arquivos e camadas: mover a regra para outro
+  ponto do fluxo, trocar a ordem de validacao, extrair ou unir classe/metodo —
+  desde que os acceptance criteria da fase continuem satisfeitos.
+- Ajustar teste EXISTENTE que passou a contradizer o comportamento que a fase
+  exige (ex.: teste que fixa a ordem antiga de um erro que a fase muda). Essa e
+  a UNICA hipotese de encostar em teste que ja existia.
+
+## O que continua PROIBIDO — sem excecao
+- Afrouxar teste para ficar verde: apagar, pular (skip/incomplete/xfail/only),
+  comentar, renomear para fora do runner, trocar assert por assert mais fraco,
+  encolher dataset, ou mudar o comando/config de teste do projeto.
+- Mudar dependencia, versao de ferramenta ou configuracao de ambiente para
+  "fazer passar".
+- Deixar TODO, placeholder, mock de conveniencia ou codigo morto.
+- Criar teste que a fase nao pediu. Teste cobre regra de negocio com ramificacao,
+  autorizacao (quem pode e quem NAO pode), contrato de borda, invariante de dado
+  e bug corrigido — nunca getter, cast, relacao declarada, "a classe existe",
+  label cosmetico, default de config ou o mesmo ramo reafirmado noutra camada.
+  Task com `Testes: none` NAO leva teste.
+
+## Se mexer em teste existente, e obrigatorio declarar
+No fim da resposta, uma linha por teste alterado:
+  TESTE ALTERADO: <arquivo> — <o que ele fixava> -> <o que a fase exige agora> — <por que o antigo ficou errado>
+Alteracao de teste sem essa linha e lida como teste afrouxado e reprova a fase.
+RULES
+    guard_mandate
+    cat <<'BLOCKED'
+
+## Se a fase for impossivel como esta escrita
+Se o bloqueio for contradicao da PROPRIA especificacao — a fase exige A, outra
+regra ja acordada do projeto exige nao-A, e nenhuma implementacao honesta
+satisfaz as duas — NAO force e NAO escolha um lado sozinho. Pare sem editar
+nada e responda exatamente uma linha:
+  RESCUE_BLOCKED: <o conflito em uma frase, citando os dois lados>
+Essa decisao e humana. Desistir aqui encerra a fase na hora, sem gastar outra
+sessao — e e a resposta certa quando o conflito e de especificacao.
+
+Guarda obsoleta NAO e conflito de especificacao: e fatia deixada pela metade, e
+o mandato acima manda voce fechar. So declare RESCUE_BLOCKED por guarda depois de
+provar, com o commit na mao, que os dois lados sao decisoes VIVAS em conflito.
+BLOCKED
+    if [ -n "$TEST_CMD" ]; then
+      echo "- Ao final, rode os testes desta fase e confirme que passam. A suite"
+      echo "  inteira (\`$TEST_CMD\`) quem roda e o ralph, logo depois de voce."
+    else
+      echo "- Ao final, rode os testes desta fase e confirme que passam."
+    fi
+    echo
+    echo "## Fase a entregar"
+    cat "$PHASES_DIR/$phase_file"
   } > "$prompt_file"
 
   echo "$prompt_file"
@@ -3179,14 +3543,128 @@ stderr_log_for() {
   echo "${log_file%.log}.stderr.log"
 }
 
+# Caminho do texto legivel extraido de um log de stdout.
+engine_text_for() {
+  local log_file="$1"
+  echo "${log_file%.log}.text"
+}
+
+# Materializa o texto da resposta do engine a partir do stdout.
+#
+# O claude emite NDJSON (--output-format stream-json): a resposta do modelo vive
+# dentro de `.result` do evento final, com \n e aspas escapados. Todo consumidor
+# semantico — `TASK <n>: DONE`, REPAIR_ABORT, RESCUE_BLOCKED, HEAL_ABORT — le o
+# arquivo que esta funcao escreve, NUNCA o NDJSON cru: casar esses marcadores no
+# JSON escapado e o que exigia os `[^"\\]*` de antes, que cortavam a mensagem
+# no primeiro caractere escapado.
+#
+# Fallbacks em cascata, porque o log pode estar incompleto (engine morto no
+# meio): evento result -> textos de assistant -> o proprio arquivo. O codex ja
+# emite texto puro e so e copiado.
+engine_materialize_text() {
+  local log_file="$1"
+  local out tmp
+  out="$(engine_text_for "$log_file")"
+  tmp="$out.tmp.$$"
+
+  [ -f "$log_file" ] || { : > "$out" 2> /dev/null; return 0; }
+
+  if [[ "$ENGINE" != "claude" ]]; then
+    cp -f "$log_file" "$out" 2> /dev/null || : > "$out"
+    return 0
+  fi
+
+  # -R + fromjson?: uma linha truncada (engine morto no meio da escrita) nao
+  # pode abortar a extracao das linhas boas que vieram antes.
+  jq -R -r 'fromjson? | select(.type == "result") | .result // empty' \
+    "$log_file" > "$tmp" 2> /dev/null || : > "$tmp"
+
+  if [ ! -s "$tmp" ]; then
+    jq -R -r 'fromjson? | select(.type == "assistant")
+              | .message.content[]? | select(.type == "text") | .text // empty' \
+      "$log_file" > "$tmp" 2> /dev/null || : > "$tmp"
+  fi
+
+  # Nem result nem assistant: o log nao e o NDJSON esperado (CLI antiga, erro
+  # de invocacao). Melhor entregar o bruto do que entregar vazio e cegar os
+  # gates — quem julga formato e o gate 0.
+  [ -s "$tmp" ] || cp -f "$log_file" "$tmp" 2> /dev/null || : > "$tmp"
+
+  mv -f "$tmp" "$out" 2> /dev/null || rm -f "$tmp" 2> /dev/null
+  return 0
+}
+
+# Ultima acao observavel do engine, lida AO VIVO do NDJSON enquanto a sessao
+# roda. E o que o painel mostra em "AO VIVO": ferramenta + alvo, nao byte count.
+engine_last_action() {
+  local log_file="$1"
+  [[ "$ENGINE" == "claude" ]] || return 0
+  [ -s "$log_file" ] || return 0
+
+  # So o rabo do arquivo: o log de uma fase longa chega a dezenas de MB, e
+  # relê-lo inteiro a cada frame do painel (~3s) fritaria a CPU.
+  tail -n 40 "$log_file" 2> /dev/null | jq -R -r '
+    fromjson?
+    | select(.type == "assistant")
+    | .message.content[]?
+    | select(.type == "tool_use")
+    | .name as $n
+    | (.input.file_path // .input.path // .input.command // .input.pattern
+       // .input.description // "") as $t
+    | if ($t | length) > 0 then "\($n) \($t)" else $n end' 2> /dev/null \
+    | tail -n 1 || true
+}
+
+# Quantas ferramentas o engine ja usou nesta sessao. Prova de vida honesta:
+# substitui a contagem de bytes, que com --output-format json ficava em 0 do
+# inicio ao fim e fazia o painel anunciar "engine em silencio".
+engine_action_count() {
+  local log_file="$1"
+  [[ "$ENGINE" == "claude" ]] || { echo 0; return 0; }
+  local n
+  n=$(grep -c '"type":"tool_use"' "$log_file" 2> /dev/null) || true
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  echo "$n"
+}
+
+# Arquivos que o engine ESCREVEU nesta sessao, extraidos do stream.
+#
+# Diferente de `git status`: aqui a prova e o ato de escrever, nao a existencia
+# do arquivo. Era essa a confusao que fazia uma task marcar ~100% porque o
+# arquivo que ela cita ja existia no repo antes do run comecar.
+engine_written_files() {
+  local log_file="$1"
+  [[ "$ENGINE" == "claude" ]] || return 0
+  [ -s "$log_file" ] || return 0
+
+  jq -R -r '
+    fromjson?
+    | select(.type == "assistant")
+    | .message.content[]?
+    | select(.type == "tool_use")
+    | select(.name == "Edit" or .name == "Write" or .name == "NotebookEdit"
+             or .name == "MultiEdit")
+    | .input.file_path // .input.notebook_path // empty' \
+    "$log_file" 2> /dev/null | awk '!seen[$0]++' || true
+}
+
 # Tail para DIAGNOSTICO (GATE_CAUSE): junta os dois streams porque o erro real
 # do engine costuma sair no stderr. Nunca use isto para decidir gate.
+#
+# Mostra o TEXTO extraido, nao o NDJSON: 40 linhas de eventos JSON nao dizem
+# nada a quem le o relatorio, e era o que o prompt de correcao recebia.
 engine_tail() {
   local log_file="$1" lines="${2:-40}"
-  local err_log
+  local err_log txt
   err_log="$(stderr_log_for "$log_file")"
+  txt="$(engine_text_for "$log_file")"
 
-  tail -n "$lines" "$log_file" 2>/dev/null || true
+  if [ -s "$txt" ]; then
+    tail -n "$lines" "$txt" 2>/dev/null || true
+  else
+    tail -n "$lines" "$log_file" 2>/dev/null || true
+  fi
+
   if [ -s "$err_log" ]; then
     echo "--- stderr do engine (progresso, nao e veredito) ---"
     tail -n "$lines" "$err_log" 2>/dev/null || true
@@ -3360,9 +3838,15 @@ detect_usage_limit() {
   # de teste do projeto ("429", "Too Many Requests") disparar espera de 30min.
   # Le os DOIS streams: dependendo da CLI e da versao, o aviso de limite cai no
   # stdout (claude, dentro do JSON) ou no stderr (codex).
+  # Em stream-json o aviso de limite chega de duas formas: como texto na
+  # resposta final (que engine_materialize_text ja desescapou) e como campo
+  # estruturado no evento `result`. Le as duas, mais o stderr do codex.
+  local txt_log
+  txt_log="$(engine_text_for "$log_file")"
   tail_txt=$(
     {
       tail -n 20 "$log_file" 2>/dev/null || true
+      [ -s "$txt_log" ] && { tail -n 20 "$txt_log" 2>/dev/null || true; }
       [ -f "$err_log" ] && { tail -n 20 "$err_log" 2>/dev/null || true; }
     } || true
   )
@@ -3563,6 +4047,16 @@ run_engine() {
     if [ -n "$REPAIR_MODEL" ]; then
       model_args=(--model "$REPAIR_MODEL")
     fi
+  elif [[ "$mode" == "rescue" ]]; then
+    if [ -n "$RESCUE_MODEL" ]; then
+      model_args=(--model "$RESCUE_MODEL")
+    fi
+  elif [[ "$mode" == "heal" ]]; then
+    # Saneamento precisa de arqueologia de git (qual commit mudou o texto
+    # congelado, qual SPEC pediu) — o mesmo modelo forte do resgate.
+    if [ -n "$RESCUE_MODEL" ]; then
+      model_args=(--model "$RESCUE_MODEL")
+    fi
   elif [ -n "$IMPL_MODEL" ]; then
     # Implementacao e correcao: sem --model o engine usa o default da CLI, e o
     # operador nao tem como saber qual modelo escreveu a fase. Fixar aqui evita
@@ -3575,6 +4069,10 @@ run_engine() {
     hb_label="$ENGINE verificando a fase ${RALPH_PHASE_NUM:-?}"
   elif [[ "$mode" == "repair" ]]; then
     hb_label="$ENGINE consertando a fase ${RALPH_PHASE_NUM:-?} (round ${RALPH_PHASE_REPAIR:-1})"
+  elif [[ "$mode" == "rescue" ]]; then
+    hb_label="$ENGINE resgatando a fase ${RALPH_PHASE_NUM:-?} (round ${RALPH_PHASE_RESCUE:-1})"
+  elif [[ "$mode" == "heal" ]]; then
+    hb_label="$ENGINE saneando o vermelho herdado de HEAD"
   else
     hb_label="$ENGINE implementando a fase ${RALPH_PHASE_NUM:-?} (ciclo ${RALPH_PHASE_ATTEMPT:-1})"
   fi
@@ -3605,26 +4103,38 @@ run_engine() {
     else
       # stdin /dev/null: claude -p le stdin quando nao e TTY. Sem o redirect ele
       # consome o stream de quem chamou (ex: o manifest do loop de fases).
+      # stream-json, nao json: `json` so imprime quando a sessao ACABA, entao o
+      # log fica em 0 byte por minutos e o painel nao tem o que mostrar — era
+      # dai que vinha o "engine em silencio (esta CLI nao streama progresso)".
+      # Em NDJSON cada ferramenta usada vira um evento na hora.
+      #
+      # Sem --include-partial-messages de proposito: o delta token a token
+      # multiplica o log por ~50x e nao acrescenta nada ao painel, que mostra
+      # ferramenta + alvo. O veredito continua saindo do evento `result`.
       if [[ "$mode" == "verify" ]]; then
         run_split "$log_file" "$err_log" /dev/null \
           env -u CLAUDECODE claude --dangerously-skip-permissions \
           ${model_args[@]+"${model_args[@]}"} \
           -p "$(cat "$prompt_file")" \
           --allowedTools "Read,Glob,Grep" \
-          --output-format text || rc=$?
+          --output-format stream-json --verbose || rc=$?
       else
-        # JSON: o exit code do CLI e sinal fraco; o gate 0 le is_error.
+        # O exit code do CLI e sinal fraco; o gate 0 le is_error do evento final.
         run_split "$log_file" "$err_log" /dev/null \
           env -u CLAUDECODE ${cave_env[@]+"${cave_env[@]}"} \
           claude --dangerously-skip-permissions \
           ${model_args[@]+"${model_args[@]}"} \
           -p "$(cat "$prompt_file")" \
-          --output-format json || rc=$?
+          --output-format stream-json --verbose || rc=$?
       fi
     fi
 
     stop_heartbeat
     caveman_flag_restore
+
+    # Antes de qualquer leitura do log: detect_usage_limit, gate 0 e os gates
+    # semanticos todos leem o TEXTO, nao o NDJSON.
+    engine_materialize_text "$log_file"
 
     local reset_epoch
     if reset_epoch=$(detect_usage_limit "$log_file"); then
@@ -3650,11 +4160,21 @@ gate0_engine_finished() {
   # O veredito sai SO do stdout (resposta final). O stderr entra apenas no
   # diagnostico: telemetria de progresso nao decide gate.
   if [[ "$ENGINE" == "claude" ]]; then
-    if ! grep -qF '"type":"result"' "$log_file" && ! grep -qF '"type": "result"' "$log_file"; then
+    # O veredito e o evento `result` do NDJSON, lido como JSON. Antes isso era
+    # um grep por `"is_error": true` no arquivo inteiro — em stream-json esse
+    # texto tambem aparece dentro de um tool_result que o proprio modelo leu
+    # (a saida de um comando que falhou), e a sessao era reprovada por um erro
+    # que ela ja tinha tratado.
+    local verdict
+    verdict="$(jq -R -r 'fromjson? | select(.type == "result")
+               | if (.is_error == true) then "error" else "ok" end' \
+               "$log_file" 2> /dev/null | tail -n 1 || true)"
+
+    if [ -z "$verdict" ]; then
       GATE_CAUSE="O engine terminou sem emitir um resultado. Ultimas linhas do output:"$'\n'"$(engine_tail "$log_file" 40)"
       return 1
     fi
-    if grep -qE '"is_error"[[:space:]]*:[[:space:]]*true' "$log_file"; then
+    if [ "$verdict" = "error" ]; then
       GATE_CAUSE="O engine reportou is_error=true. Ultimas linhas do output:"$'\n'"$(engine_tail "$log_file" 40)"
       return 1
     fi
@@ -3739,8 +4259,11 @@ gate2_failure_count() {
 # arvore limpa, entao esta medicao e exatamente o estado de HEAD — nada do que a
 # fase escrever pode ser confundido com uma falha herdada.
 measure_baseline() {
-  [ "$BASELINE_MODE" = "on" ] || return 0
   [ -n "$TEST_CMD" ] || return 0
+  # Duas razoes independentes para medir: herdar o vermelho como delta
+  # (--baseline) ou sanea-lo antes da fase 1 (HEAL_MODE). Sem nenhuma das duas o
+  # operador pediu o comportamento antigo — nao gasta a rodada.
+  [ "$BASELINE_MODE" = "on" ] || [ "$HEAL_MODE" = "on" ] || return 0
 
   local log rc=0
   log="$LOG_DIR/baseline.log"
@@ -3753,19 +4276,31 @@ measure_baseline() {
   if [ "$rc" -eq 0 ]; then
     : > "$BASELINE_FILE"
     BASELINE_COUNT=0
-    BASELINE_ACTIVE=true
+    HEAD_RED=0
+    [ "$BASELINE_MODE" = "on" ] && BASELINE_ACTIVE=true
     success "Baseline — suite verde em HEAD; qualquer vermelho daqui pra frente e da fase"
+    return 0
+  fi
+
+  # Ambiente fora do ar na medicao nao e vermelho de codigo: a suite nao chegou
+  # a julgar nada, e nenhuma sessao de saneamento levanta um servico morto.
+  if $ENV_GUARD && gate2_infra_failure "$log"; then
+    BASELINE_ACTIVE=false
+    HEAD_RED=0
+    warn "Baseline — a suite em HEAD caiu por ambiente fora do ar ($INFRA_SIGNATURE)."
+    warn "Baseline e saneamento IGNORADOS: suba os servicos para medir HEAD de verdade."
     return 0
   fi
 
   gate2_failure_ids "$log" > "$BASELINE_FILE"
   BASELINE_COUNT=$(gate2_failure_count "$log")
-  BASELINE_ACTIVE=true
 
   if [ ! -s "$BASELINE_FILE" ]; then
     # Suite vermelha e nenhum id extraido: o formato do runner nao e conhecido.
-    # Herdar o vermelho as cegas mascararia regressao real — melhor desligar.
+    # Herdar o vermelho as cegas mascararia regressao real, e sanear sem saber o
+    # que esta vermelho viraria chute — melhor deixar os gates julgarem.
     BASELINE_ACTIVE=false
+    HEAD_RED=0
     warn "Baseline — suite vermelha em HEAD, mas nao consegui identificar os testes."
     warn "Baseline DESLIGADO: o gate 2 vai exigir a suite inteira verde."
     return 0
@@ -3773,7 +4308,190 @@ measure_baseline() {
 
   warn "Baseline — HEAD ja tem $BASELINE_COUNT teste(s) vermelho(s), alheios a este run:"
   sed 's/^/    /' "$BASELINE_FILE"
-  warn "O gate 2 vai cobrar apenas o DELTA. Conserte-os fora do ralph."
+
+  # --baseline tem precedencia: o operador declarou que esse vermelho e
+  # intencional (fase em TDD com o teste-alvo ja commitado vermelho). Sanear
+  # seria consertar justamente o teste que a fase existe para fechar.
+  if [ "$BASELINE_MODE" = "on" ]; then
+    BASELINE_ACTIVE=true
+    HEAD_RED=0
+    warn "O gate 2 vai cobrar apenas o DELTA. Conserte-os fora do ralph."
+    return 0
+  fi
+
+  HEAD_RED=1
+}
+
+# Mandato sobre guarda obsoleta. Vai no prompt do saneamento, do conserto
+# cirurgico e do resgate: as tres sessoes ja desistiram de vermelho que era so
+# uma guarda velha, tratando congelamento de outra feature como intocavel. E o
+# oposto: quem mudou o texto congelado de proposito devia ter atualizado a
+# guarda na mesma fatia, e nao atualizou — a divida e da guarda.
+guard_mandate() {
+  cat <<'MANDATE'
+
+## Guarda obsoleta de OUTRA feature — voce TEM autoridade
+Teste que congela o TEXTO de um arquivo (byte a byte, contagem de metodos,
+superficie publica, ordem de itens), inclusive de outro repositorio, e guarda de
+higiene de alguma feature. Vermelho ali e, na maioria das vezes, guarda OBSOLETA:
+alguem mudou o texto congelado de proposito e nao atualizou a guarda na mesma
+fatia. Nao desista antes de PROVAR qual dos dois lados esta velho:
+
+- `git log -S'<trecho congelado>' --oneline -- <arquivo>` no repositorio DONO do
+  arquivo, e leia a mensagem do commit que mudou o texto.
+- Procure a SPEC/PLAN que pediu a mudanca (`.spec/features/*/`, `.spec/bugfixes/*/`).
+
+Mudanca intencional e commitada => a guarda esta velha. ATUALIZE a guarda para o
+shape novo, no MESMO nivel de congelamento, preservando a regra que ela protege,
+e estenda o comentario nomeando a feature que mudou o texto. Isto NAO e afrouxar
+contrato de outra feature: e terminar a fatia que a deixou pela metade.
+
+Proibido: apagar a guarda, trocar o congelamento por assercao generica
+(`toContain`, regex frouxa), marcar como skip, ou mudar codigo de PRODUCAO para
+satisfazer guarda velha.
+
+Se o texto congelado nao mudou por decisao registrada, o vermelho e defeito de
+verdade: conserte o codigo.
+MANDATE
+}
+
+# ---------------------------------------------------------------------------
+# Saneamento do HEAD vermelho (ver o cabecalho)
+#
+# Roda entre a medicao do baseline e a fase 1. Sessao com mandato proprio: o
+# alvo nao e nenhuma fase, e a suite. Verde => commit proprio, HEAD limpo e o
+# run segue. Ainda vermelho => aborta antes de gastar a fase 1.
+# ---------------------------------------------------------------------------
+
+build_heal_prompt() {
+  local round="$1"
+  local prompt_file="$PROMPT_DIR/heal-head-${round}.txt"
+
+  {
+    echo "RALPH_HEAL"
+    echo
+    echo "Voce e um engenheiro senior fazendo o SANEAMENTO do HEAD, antes da"
+    echo "primeira fase do plano. Nenhuma fase foi implementada ainda."
+    echo
+    cat <<'INTRO'
+## Situacao
+A suite do projeto ja esta VERMELHA em HEAD, com a arvore limpa, antes de
+qualquer linha desta execucao. Esse vermelho nao e defeito de nenhuma fase: e
+vermelho herdado, e ele prende o ciclo de TODAS as fases que vem depois.
+
+Seu unico objetivo e deixar a suite VERDE em HEAD. Voce nao implementa fase
+nenhuma, nao le o documento de fases e nao antecipa trabalho de feature.
+INTRO
+    echo
+    echo "## Testes vermelhos em HEAD"
+    sed 's/^/  - /' "$BASELINE_FILE"
+    echo
+    echo "## Saida da suite em HEAD"
+    echo '```'
+    tail -n 200 "$LOG_DIR/baseline.log"
+    echo '```'
+    guard_mandate
+    echo
+    cat <<'RULES'
+## Regras obrigatorias
+- Escopo: so o que deixa a suite verde. Nao refatore, nao renomeie, nao
+  reorganize, nao deixe TODO nem placeholder.
+- Nao apague, nao pule (`skip`/`only`/`xit`) e nao comente teste existente.
+- Nao mude o comando de teste do projeto, nem configuracao, dependencia ou
+  versao de ferramenta para "fazer passar".
+- Nao toque em codigo de producao a menos que o vermelho seja defeito real de
+  producao — e, nesse caso, corrija a causa, nao a assercao.
+RULES
+    if [ -n "$TEST_CMD" ]; then
+      echo "- Rode \`$TEST_CMD\` ao final e confirme que a suite INTEIRA passa."
+    fi
+    cat <<'ABORT'
+- Se o vermelho NAO se resolve assim — o teste cobra comportamento que ninguem
+  implementou, ou os dois lados sao decisoes vivas em conflito real — PARE sem
+  editar nada e responda exatamente uma linha:
+  HEAL_ABORT: <o conflito em uma frase, citando os dois lados>
+  Desistir aqui e barato: o run para antes da fase 1, e o operador decide.
+ABORT
+  } > "$prompt_file"
+
+  echo "$prompt_file"
+}
+
+# heal_head
+#   rc 0 = HEAD verde (ou nada a sanear); o run pode comecar
+#   rc 1 = HEAD segue vermelho; o chamador aborta o run
+heal_head() {
+  [ "$HEAD_RED" -eq 1 ] || return 0
+
+  if [ "$HEAL_MODE" != "on" ] || [ "$HEAL_ROUNDS" -lt 1 ] 2> /dev/null; then
+    warn "Saneamento desligado: as fases vao comecar sobre gate vermelho."
+    return 0
+  fi
+
+  local round=1
+  while [ "$round" -le "$HEAL_ROUNDS" ]; do
+    local prompt_file log_file
+    prompt_file=$(build_heal_prompt "$round")
+    log_file="$LOG_DIR/heal-head-${round}.log"
+
+    set_activity "saneando o vermelho herdado de HEAD ($round/$HEAL_ROUNDS)"
+    warn "Saneamento do HEAD $round/$HEAL_ROUNDS — nenhuma fase comeca sobre gate vermelho"
+
+    HEAL_ABORT_WHY=""
+    run_engine "$prompt_file" "$log_file" "heal" || true
+
+    if grep -qa 'HEAL_ABORT:' "$(engine_text_for "$log_file")" 2> /dev/null; then
+      HEAL_ABORT_WHY=$(grep -aoE 'HEAL_ABORT:.*' "$(engine_text_for "$log_file")" | head -n 1 | cut -c1-300 || true)
+      warn "Saneamento abortado pelo modelo — $HEAL_ABORT_WHY"
+      break
+    fi
+
+    local rc=0
+    set_activity "revalidando a suite depois do saneamento"
+    bash -c "$TEST_CMD" < /dev/null > "$LOG_DIR/heal-head-${round}.test.log" 2>&1 || rc=$?
+
+    if [ "$rc" -eq 0 ]; then
+      if [ -n "$(git status --porcelain)" ]; then
+        git add -A
+        git commit -q -m "test(baseline): sanea o vermelho herdado de HEAD" \
+          -m "Suite verde antes da fase 1. Ver .phases/logs/heal-head-${round}.*"
+        success "Saneamento — suite verde em HEAD; commit criado"
+      else
+        success "Saneamento — suite verde em HEAD sem edicao (vermelho intermitente)"
+      fi
+      : > "$BASELINE_FILE"
+      BASELINE_COUNT=0
+      HEAD_RED=0
+      return 0
+    fi
+
+    # Piorou: ids novos depois do saneamento significam que a sessao quebrou
+    # outra coisa. Insistir a partir daqui e cavar mais fundo.
+    local ids_novos
+    ids_novos="$(comm -13 "$BASELINE_FILE" <(gate2_failure_ids "$LOG_DIR/heal-head-${round}.test.log") || true)"
+    if [ -n "$ids_novos" ]; then
+      warn "Saneamento — a suite ficou PIOR; falhas novas:"
+      printf '%s\n' "$ids_novos" | sed 's/^/    /'
+      break
+    fi
+
+    warn "Saneamento $round/$HEAL_ROUNDS — HEAD segue vermelho"
+    round=$((round + 1))
+  done
+
+  echo ""
+  fail "HEAD vermelho nao sanado — o run NAO comeca sobre gate vermelho."
+  warn "Testes vermelhos em HEAD:"
+  sed 's/^/    /' "$BASELINE_FILE"
+  [ -n "$HEAL_ABORT_WHY" ] && warn "Veredito da sessao: $HEAL_ABORT_WHY"
+  warn "Saidas possiveis:"
+  warn "  1. conserte a suite fora do ralph e re-rode (caminho normal)"
+  warn "  2. --baseline: o vermelho e intencional; o gate 2 cobra so o DELTA"
+  warn "  3. --no-heal-head: comeca sobre gate vermelho, por sua conta"
+  if [ -n "$(git status --porcelain)" ]; then
+    warn "A arvore tem o trabalho parcial do saneamento — revise antes de re-rodar."
+  fi
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -4350,8 +5068,18 @@ gate3_independent_verify() {
     auto)
       # Revalidacao escopada nunca e opcional: ela existe justamente porque o
       # gate 3 acabou de reprovar. Pular aqui daria verde sem verificar nada.
-      if [ -z "$VERIFY_ONLY_IDX" ] && [ "$cycle" -eq 1 ] && [ "$session_wrote" -eq 1 ] && [ -n "$TEST_CMD" ]; then
-        log "Gate 3 pulado: a sessao escreveu codigo e a suite passou (RALPH_VERIFY=always para rodar sempre)"
+      #
+      # `-n "$TEST_CMD"` nao servia como condicao: ele diz que o PROJETO tem
+      # suite, nao que ESTA fase foi testada. Fase de fiacao, view ou config
+      # nao altera nem cita arquivo de teste — o gate 2 resolve o escopo como
+      # `skip` e nao executa nada. Pular o gate 3 ali fechava e commitava a
+      # fase sem validacao mecanica nenhuma.
+      #
+      # A condicao certa e o veredito do gate 2 desta fase: ele rodou teste de
+      # verdade e passou.
+      if [ -z "$VERIFY_ONLY_IDX" ] && [ "$cycle" -eq 1 ] && [ "$session_wrote" -eq 1 ] \
+        && [ -n "$TEST_CMD" ] && [ "${GATE2_SCOPE:-full}" != "skip" ]; then
+        log "Gate 3 pulado: a suite cobriu esta fase e passou (RALPH_VERIFY=always para rodar sempre)"
         gate_end 3 skip
         return 0
       fi
@@ -4402,8 +5130,10 @@ gate3_independent_verify() {
   # SO o stdout do verificador (resposta final). O progresso vive no
   # .stderr.log e nunca e parseado: no codex a resposta final tambem sai no
   # stderr, e ler os dois duplicava toda linha TASK.
+  # O TEXTO extraido, nao o NDJSON: em stream-json a resposta do verificador vem
+  # escapada dentro de `.result`, e `^TASK` nunca casaria com ela.
   local task_lines
-  task_lines=$(sed 's/^[[:space:]]*//' "$verify_log" \
+  task_lines=$(sed 's/^[[:space:]]*//' "$(engine_text_for "$verify_log")" 2> /dev/null \
     | grep -E '^TASK[[:space:]]+[0-9]+[[:space:]]*:[[:space:]]*(DONE|INCOMPLETE)' || true)
 
   local emitted
@@ -4600,11 +5330,20 @@ print_gate_cause() {
 # ---------------------------------------------------------------------------
 
 commit_phase() {
-  local phase_num="$1" phase_title="$2"
+  local phase_num="$1" phase_title="$2" rescue_round="${3:-0}"
   git add -A
   if git diff --cached --quiet; then
     fail "Nada para commitar apos os gates — estado inesperado."
     return 1
+  fi
+  # Verde de resgate e verde igual — os gates foram os mesmos. Mas a fase que
+  # precisou da sessao larga merece revisao humana com prioridade, e isso tem
+  # que estar no historico, nao so no log que alguem apaga.
+  if [ "$rescue_round" -gt 0 ] 2> /dev/null; then
+    git commit -q -m "feat(phase-${phase_num}): ${phase_title}" \
+      -m "Fechada pela sessao de resgate (round ${rescue_round}) apos gate vermelho. Ver .phases/logs/."
+    log "Commit criado (resgate round ${rescue_round}): feat(phase-${phase_num}): ${phase_title}"
+    return 0
   fi
   git commit -q -m "feat(phase-${phase_num}): ${phase_title}"
   log "Commit criado: feat(phase-${phase_num}): ${phase_title}"
@@ -4711,6 +5450,7 @@ run_repair() {
   log "Conserto cirurgico $round/$MAX_REPAIRS sobre o $gate${REPAIR_MODEL:+ (modelo: $REPAIR_MODEL)}"
 
   REPAIR_ABORTED=0
+  REPAIR_ABORT_WHY=""
   sig_before=$(tree_signature)
   run_engine "$prompt_file" "$log_file" repair || rc=$?
 
@@ -4727,9 +5467,12 @@ run_repair() {
   # arvore primeiro tambem tira o falso positivo do grep no JSON do claude.
   if [ "$(tree_signature)" = "$sig_before" ]; then
     ST_REPAIR="fail"
-    if grep -qa 'REPAIR_ABORT:' "$log_file" 2> /dev/null; then
+    if grep -qa 'REPAIR_ABORT:' "$(engine_text_for "$log_file")" 2> /dev/null; then
       local why
-      why=$(grep -aoE 'REPAIR_ABORT:[^"\\]*' "$log_file" | head -n 1 | cut -c1-200 || true)
+      why=$(grep -aoE 'REPAIR_ABORT:.*' "$(engine_text_for "$log_file")" | head -n 1 | cut -c1-200 || true)
+      # O resgate recebe esse motivo verbatim: e a conclusao mais barata que o
+      # harness produziu sobre a fase, e ate agora ela morria no log.
+      REPAIR_ABORT_WHY="$why"
       state_event repair_end "round=$round" "verdict=abort"
       warn "Conserto abortado pelo modelo — $why"
       # REPAIR_ABORT nao e "nao consegui": e "isto nao se conserta escrevendo
@@ -4748,6 +5491,29 @@ run_repair() {
   ST_REPAIR="ok"
   state_event repair_end "round=$round" "verdict=patched"
   success "Conserto aplicado (round $round) — revalidando"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Sessao de resgate
+#
+# Ultima etapa antes de dar a fase por perdida. Nao substitui gate: entrega a
+# fase de volta a MESMA cadeia (gate 2 inteiro + gate 3 de todas as tasks).
+# ---------------------------------------------------------------------------
+
+# rescue_should_run <round_ja_gasto>
+#   rc 0 = ainda cabe uma sessao de resgate
+#   rc 1 = nao cabe (desligado, orcamento no fim, ambiente caido, ou o proprio
+#          resgate ja declarou bloqueio de especificacao)
+rescue_should_run() {
+  local round="$1"
+  [ "$MAX_RESCUES" -gt 0 ] || return 1
+  # Ambiente fora do ar nao e defeito de codigo: nenhuma sessao levanta um
+  # servico morto, e a fase tem desfecho proprio (commit wip + exit 3).
+  [ "$ENV_ABORT" -eq 0 ] || return 1
+  # RESCUE_BLOCKED e decisao humana pendente, nao "tente de novo".
+  [ "$RESCUE_BLOCKED" -eq 0 ] || return 1
+  [ "$round" -lt "$MAX_RESCUES" ] || return 1
   return 0
 }
 
@@ -4781,7 +5547,13 @@ run_phase() {
     PHASE_IS_FINAL=1
   fi
   REPAIR_ABORTED=0
+  REPAIR_ABORT_WHY=""
   PHASE_ABORT_REASON=""
+  # Resgate tambem e por FASE: orcamento, bloqueio e motivo nao atravessam.
+  RESCUE_BLOCKED=0
+  RESCUE_BLOCK_WHY=""
+  ST_RESCUE="idle"
+  ST_RESCUE_ROUND=0
 
   ST_PHASE_NUM="$phase_num"
   ST_PHASE_SEQ="$seq"
@@ -4795,33 +5567,79 @@ run_phase() {
   $UI_ACTIVE || echo ""
   log "[$seq/$total] Phase $phase_num: $phase_title"
 
-  local cycle=1
-  while [ "$cycle" -le "$MAX_CYCLES" ]; do
+  # Uma tentativa e um ciclo OU uma sessao de resgate. O resgate nao consome
+  # ciclo: ele so existe depois que os ciclos e os consertos ja falharam.
+  local cycle=1 rescue_round=0 attempt_is_rescue=0
+  local rescue_reason="" rescue_cause="" rescue_gate=""
+  while true; do
+    # Ciclos esgotados nao encerram mais a fase sozinhos: enquanto houver
+    # orcamento de resgate, a fase ganha a sessao larga antes de ser reprovada.
+    if [ "$attempt_is_rescue" -eq 0 ] && [ "$cycle" -gt "$MAX_CYCLES" ]; then
+      if rescue_should_run "$rescue_round"; then
+        rescue_reason="os $MAX_CYCLES ciclos de correcao terminaram com o gate vermelho."
+        rescue_cause="$GATE_CAUSE"
+        rescue_gate="$LAST_GATE"
+        rescue_round=$((rescue_round + 1))
+        attempt_is_rescue=1
+      else
+        break
+      fi
+    fi
+
     export RALPH_PHASE_ATTEMPT="$cycle"
     export RALPH_PHASE_REPAIR=0
-    ST_CYCLE="$cycle"
+    export RALPH_PHASE_RESCUE="$rescue_round"
+    # O painel conta ciclos; a tentativa de resgate acontece depois do ultimo e
+    # nao pode exibir "6/5". O round do resgate tem campo proprio.
+    if [ "$cycle" -le "$MAX_CYCLES" ]; then
+      ST_CYCLE="$cycle"
+    else
+      ST_CYCLE="$MAX_CYCLES"
+    fi
     # Ciclo novo revalida tudo: gates do ciclo anterior nao valem mais.
     ST_GATE0="pending"; ST_GATE1="pending"; ST_GATE2="pending"; ST_GATE3="pending"
     ST_REPAIR="idle"; ST_REPAIR_ROUND=0
-    GATE_TAG=""; VERIFY_ONLY_IDX=""
-    [ "$cycle" -gt 1 ] && warn "Ciclo de correcao $cycle/$MAX_CYCLES..."
+    VERIFY_ONLY_IDX=""
 
+    # Tentativa de resgate e uma rodada inteira de gates com nome proprio: os
+    # logs dela nao podem sobrescrever os do ultimo ciclo.
     local prompt_file log_file rc=0 sig_before
-    log_file="$LOG_DIR/${phase_file%.md}.cycle-${cycle}.log"
+    local cycle_label="$cycle" engine_mode="impl"
+    if [ "$attempt_is_rescue" -eq 1 ]; then
+      cycle_label="rescue${rescue_round}"
+      engine_mode="rescue"
+    fi
+    GATE_TAG=""
 
-    if [ "$cycle" -eq 1 ]; then
-      prompt_file=$(build_impl_prompt "$phase_file" "$cycle")
+    if [ "$attempt_is_rescue" -eq 1 ]; then
+      log_file="$LOG_DIR/${phase_file%.md}.rescue-${rescue_round}.log"
+      prompt_file=$(build_rescue_prompt "$phase_file" "$rescue_round" \
+        "$rescue_reason" "$rescue_gate" "$rescue_cause")
+      ST_RESCUE="running"
+      ST_RESCUE_ROUND="$rescue_round"
+      state_event rescue_start "round=$rescue_round" "gate=${rescue_gate:-?}"
+      warn "Sessao de resgate $rescue_round/$MAX_RESCUES${RESCUE_MODEL:+ (modelo: $RESCUE_MODEL)} — $rescue_reason"
+      set_activity "sessao de resgate (round $rescue_round/$MAX_RESCUES)"
     else
-      prompt_file=$(build_fix_prompt "$phase_file" "$cycle" "$LAST_GATE" "$GATE_CAUSE")
+      log_file="$LOG_DIR/${phase_file%.md}.cycle-${cycle}.log"
+      [ "$cycle" -gt 1 ] && warn "Ciclo de correcao $cycle/$MAX_CYCLES..."
+      if [ "$cycle" -eq 1 ]; then
+        prompt_file=$(build_impl_prompt "$phase_file" "$cycle")
+        set_activity "implementando a fase"
+      else
+        prompt_file=$(build_fix_prompt "$phase_file" "$cycle" "$LAST_GATE" "$GATE_CAUSE")
+        set_activity "corrigindo a fase (ciclo $cycle/$MAX_CYCLES)"
+      fi
     fi
 
     sig_before=$(session_signature)
-    if [ "$cycle" -eq 1 ]; then
-      set_activity "implementando a fase"
-    else
-      set_activity "corrigindo a fase (ciclo $cycle/$MAX_CYCLES)"
-    fi
-    run_engine "$prompt_file" "$log_file" impl || rc=$?
+    run_engine "$prompt_file" "$log_file" "$engine_mode" || rc=$?
+
+    # Registra o que a sessao tocou ANTES de qualquer gate. O pintor tambem
+    # alimenta este acumulador, mas o ritmo dele e melhor esforco: se a ultima
+    # varredura caiu antes do engine escrever o ultimo arquivo, so esta chamada
+    # garante que a task correspondente seja contada.
+    ui_touch_record "$phase_num" "$log_file"
 
     GATE_CAUSE=""
 
@@ -4840,6 +5658,23 @@ run_phase() {
       gate_end 1 skip
     else
       gate_end 1 pass
+    fi
+
+    # Bloqueio de especificacao declarado pelo resgate. Mesma prova do
+    # REPAIR_ABORT: a ARVORE decide, nao o texto — um log que menciona
+    # RESCUE_BLOCKED depois de ter editado arquivos nao e desistencia.
+    if [ "$attempt_is_rescue" -eq 1 ] && [ "$session_wrote" -eq 0 ] \
+      && grep -qa 'RESCUE_BLOCKED:' "$(engine_text_for "$log_file")" 2> /dev/null; then
+      RESCUE_BLOCK_WHY=$(grep -aoE 'RESCUE_BLOCKED:.*' "$(engine_text_for "$log_file")" | head -n 1 | cut -c1-240 || true)
+      RESCUE_BLOCKED=1
+      ST_RESCUE="blocked"
+      state_event rescue_end "round=$rescue_round" "verdict=blocked"
+      LAST_GATE="resgate — bloqueio de especificacao"
+      # Conflito de especificacao nao se resolve gastando outra sessao: quem
+      # decide qual dos dois lados cede e o humano.
+      PHASE_ABORT_REASON="a sessao de resgate declarou bloqueio de especificacao — $RESCUE_BLOCK_WHY"
+      fail "Resgate $rescue_round/$MAX_RESCUES: $RESCUE_BLOCK_WHY"
+      break
     fi
 
     # Gate 0 fora da cadeia if/elif: precisa registrar o veredito no estado
@@ -4865,7 +5700,7 @@ run_phase() {
     else
       while true; do
         local failed_gate="" test_log rrc=0
-        test_log="$LOG_DIR/${phase_file%.md}.test-${cycle}${GATE_TAG}.log"
+        test_log="$LOG_DIR/${phase_file%.md}.test-${cycle_label}${GATE_TAG}.log"
         GATE_CAUSE=""
 
         if [ "$gate2_fresh" -eq 1 ]; then
@@ -4879,7 +5714,7 @@ run_phase() {
           LAST_GATE="gate 2 — suite de testes do projeto"
         fi
 
-        if [ -z "$failed_gate" ] && ! gate3_independent_verify "$phase_file" "$cycle" "$session_wrote"; then
+        if [ -z "$failed_gate" ] && ! gate3_independent_verify "$phase_file" "$cycle_label" "$session_wrote"; then
           failed_gate="gate3"
           LAST_GATE="gate 3 — verificacao independente"
         fi
@@ -4939,7 +5774,7 @@ run_phase() {
         fi
 
         repair_round=$((repair_round + 1))
-        run_repair "$phase_file" "$cycle" "$repair_round" "$failed_gate" || rrc=$?
+        run_repair "$phase_file" "$cycle_label" "$repair_round" "$failed_gate" || rrc=$?
         if [ "$REPAIR_ABORTED" -eq 1 ]; then
           PHASE_ABORT_REASON="o conserto cirurgico desistiu (REPAIR_ABORT): a causa do $failed_gate nao se resolve escrevendo codigo. Ciclos adicionais repetiriam o mesmo veredito."
           break
@@ -4993,8 +5828,16 @@ run_phase() {
         return 0
       fi
 
+      if [ "$attempt_is_rescue" -eq 1 ]; then
+        ST_RESCUE="ok"
+        state_event rescue_end "round=$rescue_round" "verdict=green"
+        success "Resgate $rescue_round/$MAX_RESCUES fechou a fase — gates completos verdes"
+      fi
       success "Phase $phase_num: $phase_title — COMPLETA ($(format_duration "$phase_duration"))"
-      if ! commit_phase "$phase_num" "$phase_title"; then
+      # Ultima chance de registrar a arvore com a fase ainda suja: depois do
+      # commit `git status` volta vazio e o acumulador nao teria mais fonte.
+      ui_touch_record "$phase_num" "$log_file"
+      if ! commit_phase "$phase_num" "$phase_title" "$rescue_round"; then
         LAST_GATE="commit"
         ST_PHASE_STATUS="failed"
         FAILED_NUMS+=" $phase_num"
@@ -5015,8 +5858,36 @@ run_phase() {
       log "Progresso do engine: $(stderr_log_for "$log_file")"
     fi
 
+    # Fase travada (desistencia do conserto, ciclo improdutivo). Antes de
+    # desistir dela, a sessao de resgate: e exatamente o caso que ela existe
+    # para atender — mais um ciclo repetiria o veredito, o resgate nao.
     if [ -n "$PHASE_ABORT_REASON" ]; then
+      if rescue_should_run "$rescue_round"; then
+        rescue_reason="$PHASE_ABORT_REASON"
+        rescue_cause="$GATE_CAUSE"
+        rescue_gate="$LAST_GATE"
+        PHASE_ABORT_REASON=""
+        rescue_round=$((rescue_round + 1))
+        attempt_is_rescue=1
+        continue
+      fi
       warn "Abortando a fase sem gastar os ciclos restantes — $PHASE_ABORT_REASON"
+      break
+    fi
+
+    # Resgate vermelho: proximo round, se houver. Resgate NAO volta para ciclo
+    # de correcao — o ciclo e a etapa mais estreita, ja falhou antes dele.
+    if [ "$attempt_is_rescue" -eq 1 ]; then
+      ST_RESCUE="fail"
+      state_event rescue_end "round=$rescue_round" "verdict=red"
+      if rescue_should_run "$rescue_round"; then
+        rescue_reason="a sessao de resgate $rescue_round nao fechou os gates (${LAST_GATE:-?})."
+        rescue_cause="$GATE_CAUSE"
+        rescue_gate="$LAST_GATE"
+        rescue_round=$((rescue_round + 1))
+        continue
+      fi
+      warn "Sessoes de resgate esgotadas ($MAX_RESCUES) — a fase fica reprovada"
       break
     fi
 
@@ -5043,7 +5914,13 @@ run_phase() {
     return 1
   fi
 
-  fail "Phase $phase_num: $phase_title — FALHOU apos $MAX_CYCLES ciclos ($(format_duration "$phase_duration"))"
+  # O relatorio tem que dizer TUDO que foi gasto: um dev que le "5 ciclos" e nao
+  # ve o resgate assume que a etapa larga nem rodou.
+  local attempts_txt="$MAX_CYCLES ciclos"
+  if [ "$rescue_round" -gt 0 ]; then
+    attempts_txt="$attempts_txt + $rescue_round sessao(oes) de resgate"
+  fi
+  fail "Phase $phase_num: $phase_title — FALHOU apos $attempts_txt ($(format_duration "$phase_duration"))"
   fail "Ultima causa ($LAST_GATE):"
   print_gate_cause 20
   fail "Logs em: $LOG_DIR/${phase_file%.md}.*"
@@ -5060,7 +5937,7 @@ run_phase() {
   local cause_summary
   cause_summary=$(printf '%s' "$GATE_CAUSE" | head -n 2 | cut -c1-240 || true)
   notify_and_record phase_failed \
-    "FALHOU apos $MAX_CYCLES ciclos ($(format_duration "$phase_duration")). Ultimo gate: ${LAST_GATE:-?}. ${cause_summary}"
+    "FALHOU apos $attempts_txt ($(format_duration "$phase_duration")). Ultimo gate: ${LAST_GATE:-?}. ${cause_summary}"
 
   return 1
 }
@@ -5092,6 +5969,11 @@ main() {
   serve_start
   # Depois de split_phases: ele faz `rm -rf .phases` e levaria junto o baseline.
   measure_baseline
+  # Nenhuma fase comeca sobre gate vermelho: ou o HEAD fica verde aqui, ou o run
+  # para antes de gastar a fase 1.
+  if ! heal_head; then
+    exit 1
+  fi
 
   resolve_final_phase
 
