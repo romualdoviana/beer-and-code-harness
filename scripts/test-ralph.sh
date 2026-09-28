@@ -3445,6 +3445,155 @@ REN
 fi
 
 # ---------------------------------------------------------------------------
+# 74. Contrato aditivo do estado (RF-14, CT-01, CT-02): numa falha de gate 2 o
+#     state.json publica manchete, linha FAIL, escopo, tarefas e percentual —
+#     e nenhuma chave antiga muda de nome, tipo ou valor.
+# ---------------------------------------------------------------------------
+if case_enabled state-additive; then
+  header "74. state.json ganha campos aditivos sem mudar as chaves antigas"
+  CASE_PHASES='## Phase 1: Soma
+
+- [ ] T01 — Criar soma: valida dois valores (PLAN: T01)
+  - **Acceptance criteria:**
+    - o arquivo existe
+
+- [ ] T02 — Exibir total
+  - **Acceptance criteria:**
+    - o arquivo existe
+
+## Phase 2: Fim
+
+- [ ] **Task:** cria o arquivo B
+  - **Acceptance criteria:**
+    - o arquivo existe
+'
+  base=$(new_case state-additive-base)
+  d=$(new_case state-additive)
+  unset CASE_PHASES
+
+  rc=$(run_ralph "$base" ok --engine claude --test-cmd "$base/test.sh" --full-suite)
+  assert_eq 0 "$rc" "baseline ok: exit 0"
+
+  cat > "$d/test.sh" <<'REDLOG'
+#!/usr/bin/env bash
+echo "  PASS  Tests\Feature\TotalTest"
+echo "  FAIL  Tests\Feature\SomaTest"
+echo "  ✕ soma dois valores"
+echo "  Failed asserting that 3 matches expected 4."
+echo "  at tests/Feature/SomaTest.php:22"
+echo "  Tests:    1 failed, 1 passed"
+exit 1
+REDLOG
+  chmod +x "$d/test.sh"
+  rc=$(run_ralph "$d" test-red-repairable --engine claude --test-cmd "$d/test.sh" --full-suite --max-cycles 1 --no-repair)
+  assert_eq 1 "$rc" "gate 2 sempre vermelho: exit 1"
+
+  python3 - "$base/repo/.phases/state.json" "$d/repo/.phases/state.json" > "$d/contract.txt" 2>&1 <<'PY'
+import json, sys
+
+def check(cond, msg):
+    print(("ok " if cond else "bad ") + msg)
+
+try:
+    base = json.load(open(sys.argv[1]))
+    red = json.load(open(sys.argv[2]))
+except Exception as e:
+    print("bad state.json valido nos dois runs: %s" % e)
+    sys.exit(0)
+check(True, "state.json valido nos dois runs")
+
+ct01 = ["schema", "project", "engine", "input", "test_cmd", "started_at",
+        "updated_at", "run_status", "phase", "gates", "repair", "rescue",
+        "limit", "progress_line", "activity", "last_error", "pid", "run_id",
+        "phases"]
+nested = {
+    "phase": ["num", "seq", "total", "title", "status", "cycle", "max_cycles", "started_at"],
+    "gates": ["0", "1", "2", "3"],
+    "repair": ["status", "round", "max"],
+    "rescue": ["status", "round", "max"],
+    "limit": ["waiting", "until", "waits", "max_waits"],
+}
+for name, st in (("baseline", base), ("vermelho", red)):
+    check(list(st.keys())[:len(ct01)] == ct01, "%s: chaves de CT-01 na mesma ordem, antes das novas" % name)
+    check(st.get("schema") == 1, "%s: schema continua 1" % name)
+    for k, sub in nested.items():
+        check(list(st.get(k, {}).keys()) == sub, "%s: %s mantem as mesmas subchaves" % (name, k))
+    check(all(list(p.keys()) == ["num", "title", "status"] for p in st.get("phases", [])),
+          "%s: phases[] mantem num/title/status" % name)
+for k in ct01:
+    check(type(base.get(k)) is type(red.get(k)), "tipo de '%s' igual ao baseline" % k)
+for k in nested:
+    for sk in nested[k]:
+        check(type(base[k].get(sk)) is type(red[k].get(sk)), "tipo de '%s.%s' igual ao baseline" % (k, sk))
+for k in ("schema", "project", "engine", "input"):
+    check(base.get(k) == red.get(k), "valor de '%s' igual ao baseline" % k)
+check(base["limit"]["max_waits"] == red["limit"]["max_waits"], "valor de limit.max_waits igual ao baseline")
+check([(p["num"], p["title"]) for p in base["phases"]] == [(p["num"], p["title"]) for p in red["phases"]],
+      "phases[] num/title iguais ao baseline")
+check(red["gates"]["2"] == "fail" and red["run_status"] == "failed", "vermelho: gates.2=fail e run_status=failed")
+
+f = red.get("failure", {})
+check(f.get("gate") == "gate2", "failure.gate = gate2")
+check(f.get("cycle") == 1, "failure.cycle = 1")
+check(f.get("name") == "Tests\\Feature\\SomaTest", "failure.name extraido da linha FAIL (veio %r)" % f.get("name"))
+check(f.get("message") == "Failed asserting that 3 matches expected 4.", "failure.message extraida do log (veio %r)" % f.get("message"))
+check(f.get("headline") == "Tests\\Feature\\SomaTest: Failed asserting that 3 matches expected 4.",
+      "failure.headline = nome: mensagem (veio %r)" % f.get("headline"))
+check(str(f.get("log", "")).endswith(".phases/logs/phase-01.test-1.log"), "failure.log aponta o log do teste")
+t = red.get("test", {})
+check(t.get("scope") == "full", "test.scope = full")
+check(t.get("file") == "tests/Feature/SomaTest.php", "test.file = arquivo da falha (veio %r)" % t.get("file"))
+check(t.get("log") == f.get("log"), "test.log = log da suite")
+tasks = red.get("tasks")
+check(isinstance(tasks, list) and len(tasks) == 2, "tasks[] tem as 2 tarefas da fase corrente")
+if isinstance(tasks, list) and len(tasks) == 2:
+    check(tasks[0].get("idx") == 1 and tasks[1].get("idx") == 2, "tasks[].idx sequencial")
+    check(tasks[0].get("title") == "Criar soma", "titulo sem TNN e sem (PLAN: TNN) (veio %r)" % tasks[0].get("title"))
+    check(tasks[0].get("subtitle") == "valida dois valores", "subtitulo = texto apos ': ' (veio %r)" % tasks[0].get("subtitle"))
+    check(tasks[1].get("title") == "Exibir total" and tasks[1].get("subtitle") == "", "sem separador: subtitulo vazio")
+    check(all(x.get("status") in ("done", "declared", "partial", "running", "pending") for x in tasks), "tasks[].status no vocabulario")
+check(isinstance(red.get("task_active"), int), "task_active e inteiro")
+check(isinstance(red.get("correction", {}).get("title"), str), "correction.title e texto")
+check(list(red.get("previous_gates", {}).keys()) == ["0", "1", "2", "3"], "previous_gates tem G0..G3")
+disp = red.get("display", {})
+check(disp.get("phases_done") == 0 and disp.get("phases_total") == 2 and disp.get("percent") == 0,
+      "display vermelho: 0 de 2 fases, 0%%")
+check(disp.get("status_word") == "FALHOU" and disp.get("status_tone") == "err", "display: FALHOU em tom de erro")
+bd = base.get("display", {})
+check(bd.get("phases_done") == 2 and bd.get("percent") == 100, "display baseline: 2 de 2 fases, 100%%")
+check(base.get("failure", {}).get("gate") == "" and base.get("failure", {}).get("headline") == "", "baseline sem falha: failure vazio")
+PY
+  while IFS= read -r line; do
+    case "$line" in
+      "ok "*)  ok "${line#ok }" ;;
+      "bad "*) bad "${line#bad }" ;;
+      *)       bad "saida inesperada do verificador: $line" ;;
+    esac
+  done < "$d/contract.txt"
+
+  env_file="$d/repo/.phases/ui/state.env"
+  assert_contains "$env_file" 'failure_name=Tests\Feature\SomaTest' "state.env espelha failure.name"
+  assert_contains "$env_file" 'failure_message=Failed asserting that 3 matches expected 4.' "state.env espelha failure.message"
+  assert_contains "$env_file" 'failure_headline=Tests\Feature\SomaTest: Failed asserting that 3 matches expected 4.' "state.env espelha failure.headline"
+  assert_contains "$env_file" 'test_file=tests/Feature/SomaTest.php' "state.env espelha test.file"
+  assert_contains "$env_file" 'percent=0' "state.env espelha display.percent"
+  assert_contains "$env_file" 'status_word=FALHOU' "state.env espelha display.status_word"
+  assert_contains "$env_file" "$(printf 'task=1\t')" "state.env espelha tasks[]"
+  assert_contains "$env_file" "$(printf '\tCriar soma\tvalida dois valores')" "state.env carrega titulo e subtitulo"
+
+  # CT-02: nenhum evento novo nem campo novo nas linhas do events.jsonl.
+  if python3 - "$d/repo/.phases/events.jsonl" <<'PY' 2> /dev/null
+import json, sys
+for line in open(sys.argv[1]):
+    if line.strip():
+        ev = json.loads(line)
+        assert list(ev.keys())[:4] == ["ts", "event", "phase", "cycle"]
+PY
+  then ok "events.jsonl: linhas validas no formato de sempre"
+  else bad "events.jsonl: linhas validas no formato de sempre"; fi
+fi
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$FAIL" -eq 0 ]; then

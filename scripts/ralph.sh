@@ -503,11 +503,13 @@ INFRA_RETRIED=0
 #   GATE2_SCOPE       resultado da resolucao desta execucao: full|scoped|skip
 #   GATE2_SCOPE_CMD   comando efetivamente executado pelo gate
 #   GATE2_SCOPE_WHY   frase curta que explica a escolha (vai para o log)
+#   GATE2_SCOPE_FILES arquivos de teste do escopo, separados por espaco (so scoped)
 #   PHASE_IS_FINAL    1 na ultima fase pendente do documento — o fim da spec
 TEST_SCOPE_MODE="${RALPH_TEST_SCOPE:-auto}"
 GATE2_SCOPE=""
 GATE2_SCOPE_CMD=""
 GATE2_SCOPE_WHY=""
+GATE2_SCOPE_FILES=""
 # Fase corrente, para o gate 2 ler os testes que o documento declara.
 GATE2_PHASE_FILE=""
 PHASE_IS_FINAL=0
@@ -706,6 +708,28 @@ ST_FAILURE_LOG=""
 ST_TEST_LOG=""
 ST_STAGE_START=0
 ST_STDOUT_LOG=""
+# Gates da tentativa anterior (ciclo ou round de conserto), para a tela de
+# diagnostico comparar com a atual. Snapshot antes de cada reset.
+ST_PREV_GATE0="pending"
+ST_PREV_GATE1="pending"
+ST_PREV_GATE2="pending"
+ST_PREV_GATE3="pending"
+# Digest da falha corrente (ui_failure_digest), recalculado so quando a falha
+# muda — a chave e gate|ciclo|log. Ver state_derive.
+SD_FAIL_KEY=""
+SD_FAIL_NAME=""
+SD_FAIL_MESSAGE=""
+SD_FAIL_HEADLINE=""
+SD_FAIL_FILE=""
+SD_TEST_FILE=""
+SD_TASKS=""
+SD_TASK_ACTIVE=0
+SD_CORRECTION=""
+SD_STATUS_WORD=""
+SD_STATUS_TONE=""
+SD_PHASES_DONE=0
+SD_PHASES_TOTAL=0
+SD_PERCENT=0
 # Conserto cirurgico: idle | running | ok | fail | skipped. ST_REPAIR_ROUND e o
 # round corrente DENTRO do ciclo (0 = nenhum conserto em curso).
 ST_REPAIR="idle"
@@ -839,6 +863,151 @@ current_progress_line() {
   grep -v '^[[:space:]]*$' "$ST_STDERR_LOG" 2> /dev/null | tail -n 1 | cut -c1-160 || true
 }
 
+# ui_failure_digest <log>
+#
+# Nome do teste vermelho e mensagem da assertion, lidos do log da suite para a
+# manchete das telas. Reusa as mesmas regras do gate 2 (gate2_failure_ids) e do
+# conserto (extract_failure_signature) — o painel nunca inventa um parser.
+# Publica em SD_FAIL_NAME/SD_FAIL_MESSAGE/SD_FAIL_FILE. REPAIR_SIGNATURE e
+# REPAIR_FILES sao insumo do conserto em curso: salvos e restaurados.
+ui_failure_digest() {
+  local log="$1" saved_sig="$REPAIR_SIGNATURE" saved_files="$REPAIR_FILES" line
+  SD_FAIL_NAME=""; SD_FAIL_MESSAGE=""; SD_FAIL_FILE=""
+  [ -s "$log" ] || return 0
+
+  if [ -n "$(gate2_failure_ids "$log" | head -n 1)" ]; then
+    # Primeira linha de falha NA ORDEM DO LOG (os ids saem ordenados), com o
+    # nome inteiro: "FAIL  rejects insufficient stock" tem espacos.
+    line="$(sed -e 's/\x1b\[[0-9;]*m//g' "$log" 2> /dev/null | awk '
+      /^[[:space:]]*FAIL[[:space:]]+[^[:space:]]/ ||
+      /^[[:space:]]*FAILED[[:space:]]+[^[:space:]]+::/ ||
+      /^[[:space:]]*--- FAIL: / ||
+      /^test .* \.\.\. FAILED/ { print; exit }
+    ' || true)"
+    SD_FAIL_NAME="$(printf '%s' "$line" \
+      | sed -E 's/^[[:space:]]*(--- FAIL:|FAILED|FAIL)[[:space:]]+//; s/^test[[:space:]]+(.*)[[:space:]]+\.\.\.[[:space:]]+FAILED$/\1/; s/[[:space:]]+$//' \
+      | cut -c1-160)"
+  fi
+
+  if extract_failure_signature "$log" 30; then
+    SD_FAIL_MESSAGE="$(printf '%s\n' "$REPAIR_SIGNATURE" \
+      | grep -aE '(Failed asserting|Expected|AssertionError|panicked at|Error[[:space:]]*:|Exception|^[[:space:]]*E[[:space:]]{2,})' \
+      | grep -avE '^[[:space:]]*(FAIL|FAILED|--- FAIL:)[[:space:]]' \
+      | head -n 1 | sed -E 's/^[[:space:]]+//' | cut -c1-200 || true)"
+    SD_FAIL_FILE="$(printf '%s\n' "$REPAIR_FILES" | head -n 1)"
+  fi
+
+  REPAIR_SIGNATURE="$saved_sig"
+  REPAIR_FILES="$saved_files"
+  return 0
+}
+
+# Rotulo das telas para cada gate, o mesmo da caixa "VALIDACAO DA FASE".
+gate_display_name() {
+  case "$1" in
+    gate0) printf 'G0 Sessão' ;; gate1) printf 'G1 Código' ;;
+    gate2) printf 'G2 Testes' ;; gate3) printf 'G3 Verificação' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# Campos aditivos do estado (RF-14). Calculados UMA vez por state_sync e lidos
+# pelas duas saidas — state.json e state.env —, entao terminal e navegador
+# nunca derivam valores diferentes do mesmo instante.
+#
+# SD_TASKS: uma linha por task da fase corrente, campos separados por \x1f
+# (idx, status, titulo, subtitulo). Separador fora do texto: TAB colapsaria
+# num `read` com campo vazio.
+state_derive() {
+  local key="$ST_FAILURE_GATE|$ST_FAILURE_CYCLE|$ST_FAILURE_LOG"
+  if [ -z "$ST_FAILURE_GATE" ]; then
+    SD_FAIL_KEY=""; SD_FAIL_NAME=""; SD_FAIL_MESSAGE=""; SD_FAIL_HEADLINE=""; SD_FAIL_FILE=""
+  elif [ "$key" != "$SD_FAIL_KEY" ]; then
+    # Log so e relido quando a falha muda: o state_sync roda a cada atividade.
+    SD_FAIL_KEY="$key"
+    SD_FAIL_NAME=""; SD_FAIL_MESSAGE=""; SD_FAIL_FILE=""
+    [ "$ST_FAILURE_GATE" = gate2 ] && ui_failure_digest "$ST_FAILURE_LOG"
+    if [ -n "$SD_FAIL_NAME" ]; then
+      SD_FAIL_HEADLINE="$SD_FAIL_NAME${SD_FAIL_MESSAGE:+: $SD_FAIL_MESSAGE}"
+    else
+      SD_FAIL_HEADLINE="$ST_LAST_ERROR"
+    fi
+  fi
+  SD_TEST_FILE="${GATE2_SCOPE_FILES:-$SD_FAIL_FILE}"
+
+  local sep=$'\x1f' file num title idx status label t sub a b
+  local pdone=0 ptotal=0 running=0
+  SD_TASKS=""
+  SD_TASK_ACTIVE=0
+  [ "$ST_RUN_STATUS" = running ] && [ "$ST_PHASE_STATUS" = running ] && running=1
+
+  if [ -f "$MANIFEST" ]; then
+    while IFS='|' read -r file num title; do
+      [ -n "$num" ] || continue
+      ptotal=$((ptotal + 1))
+      [ "$(phase_status_of "$num" "$file")" = "done" ] && pdone=$((pdone + 1))
+      [ "$num" = "$ST_PHASE_NUM" ] || continue
+
+      while IFS='|' read -r idx status label; do
+        [ -n "$idx" ] || continue
+        # Tarefa ativa: a primeira que ainda nao fechou, so com a fase rodando.
+        if [ "$running" = 1 ] && [ "$SD_TASK_ACTIVE" = 0 ]; then
+          case "$status" in
+            pending) status=running; SD_TASK_ACTIVE="$idx" ;;
+            partial) SD_TASK_ACTIVE="$idx" ;;
+          esac
+        fi
+        label="${label//$'\t'/ }"
+        while [[ "$label" =~ ^(.*)\(PLAN:[[:space:]]*T[0-9]+\)(.*)$ ]]; do
+          label="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+        done
+        label="${label%"${label##*[![:space:]]}"}"
+        # Subtitulo: o texto depois do PRIMEIRO separador, " — " ou ": ".
+        a="${label%%' — '*}"
+        b="${label%%': '*}"
+        t="$label"; sub=""
+        if [ "$a" != "$label" ] && { [ "$b" = "$label" ] || [ "${#a}" -le "${#b}" ]; }; then
+          t="$a"; sub="${label#"$a — "}"
+        elif [ "$b" != "$label" ]; then
+          t="$b"; sub="${label#"$b: "}"
+        fi
+        SD_TASKS+="$idx$sep$status$sep$t$sep$sub"$'\n'
+      done < <(phase_task_rows "$file" "$num")
+    done < <(manifest_entries)
+  fi
+  SD_PHASES_DONE="$pdone"
+  SD_PHASES_TOTAL="$ptotal"
+  SD_PERCENT=0
+  [ "$ptotal" -gt 0 ] && SD_PERCENT=$((pdone * 100 / ptotal))
+
+  SD_CORRECTION=""
+  if [ "$running" = 1 ]; then
+    if [ "$ST_REPAIR" = running ]; then
+      SD_CORRECTION="Conserto cirúrgico $ST_REPAIR_ROUND/$MAX_REPAIRS — $(gate_display_name "$ST_FAILURE_GATE")"
+    elif [ "$ST_RESCUE" = running ]; then
+      SD_CORRECTION="Resgate $ST_RESCUE_ROUND/$MAX_RESCUES"
+    elif [ "$ST_CYCLE" -gt 1 ]; then
+      SD_CORRECTION="Ciclo de correção $ST_CYCLE/$MAX_CYCLES — ${SD_FAIL_NAME:-${SD_FAIL_HEADLINE:-$(gate_display_name "$ST_FAILURE_GATE")}}"
+    fi
+  fi
+
+  case "$ST_RUN_STATUS" in
+    running)
+      if [ "$ST_LIMIT_WAITING" = 1 ]; then
+        SD_STATUS_WORD="AGUARDANDO LIMITE"; SD_STATUS_TONE="warn"
+      elif [ -n "$SD_CORRECTION" ]; then
+        SD_STATUS_WORD="CORRIGINDO"; SD_STATUS_TONE="warn"
+      else
+        SD_STATUS_WORD="IMPLEMENTANDO"; SD_STATUS_TONE="run"
+      fi ;;
+    done)    SD_STATUS_WORD="CONCLUÍDO"; SD_STATUS_TONE="ok" ;;
+    failed)  SD_STATUS_WORD="FALHOU";    SD_STATUS_TONE="err" ;;
+    aborted) SD_STATUS_WORD="ABORTADO";  SD_STATUS_TONE="err" ;;
+    *)       SD_STATUS_WORD="INICIANDO"; SD_STATUS_TONE="dim" ;;
+  esac
+  return 0
+}
+
 # state.json reescrito por tmp + mv: `mv` no mesmo filesystem e atomico, entao
 # um leitor concorrente ve a versao velha OU a nova, nunca meio arquivo. Escrever
 # por cima do proprio state.json daria JSON invalido a quem lesse no meio.
@@ -849,6 +1018,7 @@ state_sync() {
   now=$(date +%s)
   tmp="$STATE_FILE.tmp.$$"
   progress="$(current_progress_line)"
+  state_derive 2> /dev/null || true
 
   if ! {
     printf '{\n'
@@ -891,7 +1061,32 @@ state_sync() {
       done < <(manifest_entries)
     fi
 
-    printf '\n  ]\n}\n'
+    printf '\n  ],\n'
+
+    # Campos aditivos (RF-14). Sempre DEPOIS das chaves antigas: um leitor que
+    # compara o prefixo do arquivo continua vendo os mesmos bytes (CT-01).
+    printf '  "failure": {"gate": "%s", "cycle": %d, "headline": "%s", "name": "%s", "message": "%s", "log": "%s"},\n' \
+      "$ST_FAILURE_GATE" "$ST_FAILURE_CYCLE" "$(json_escape "$SD_FAIL_HEADLINE")" \
+      "$(json_escape "$SD_FAIL_NAME")" "$(json_escape "$SD_FAIL_MESSAGE")" "$(json_escape "$ST_FAILURE_LOG")"
+    printf '  "test": {"scope": "%s", "file": "%s", "log": "%s"},\n' \
+      "$GATE2_SCOPE" "$(json_escape "$SD_TEST_FILE")" "$(json_escape "$ST_TEST_LOG")"
+    printf '  "tasks": ['
+    local tfirst=1 tidx tstatus ttitle tsub
+    while IFS=$'\x1f' read -r tidx tstatus ttitle tsub; do
+      [ -n "$tidx" ] || continue
+      [ "$tfirst" = "1" ] || printf ','
+      tfirst=0
+      printf '\n    {"idx": %d, "title": "%s", "subtitle": "%s", "status": "%s"}' \
+        "$tidx" "$(json_escape "$ttitle")" "$(json_escape "$tsub")" "$tstatus"
+    done <<< "$SD_TASKS"
+    if [ "$tfirst" = "1" ]; then printf '],\n'; else printf '\n  ],\n'; fi
+    printf '  "task_active": %d,\n' "$SD_TASK_ACTIVE"
+    printf '  "correction": {"title": "%s"},\n' "$(json_escape "$SD_CORRECTION")"
+    printf '  "previous_gates": {"0": "%s", "1": "%s", "2": "%s", "3": "%s"},\n' \
+      "$ST_PREV_GATE0" "$ST_PREV_GATE1" "$ST_PREV_GATE2" "$ST_PREV_GATE3"
+    printf '  "display": {"status_word": "%s", "status_tone": "%s", "phases_done": %d, "phases_total": %d, "percent": %d}\n' \
+      "$SD_STATUS_WORD" "$SD_STATUS_TONE" "$SD_PHASES_DONE" "$SD_PHASES_TOTAL" "$SD_PERCENT"
+    printf '}\n'
   } > "$tmp" 2> /dev/null || ! mv -f "$tmp" "$STATE_FILE" 2> /dev/null; then
     rm -f "$tmp" 2> /dev/null
   fi
@@ -951,6 +1146,25 @@ ui_state_cache() {
     # mostraria a engine default em vez da que o run de verdade esta usando.
     printf 'engine=%s\n'      "$ENGINE"
     printf 'project=%s\n'     "$PROJECT_NAME"
+    # Campos aditivos (RF-14): os MESMOS valores do state.json, da mesma
+    # derivacao (state_derive). task= se repete, uma linha por tarefa, com
+    # idx/status/titulo/subtitulo separados por TAB.
+    printf 'failure_name=%s\n'     "${SD_FAIL_NAME//$'\n'/ }"
+    printf 'failure_message=%s\n'  "${SD_FAIL_MESSAGE//$'\n'/ }"
+    printf 'failure_headline=%s\n' "${SD_FAIL_HEADLINE//$'\n'/ }"
+    printf 'test_file=%s\n'        "${SD_TEST_FILE//$'\n'/ }"
+    printf 'task_active=%s\n'      "$SD_TASK_ACTIVE"
+    printf 'correction_title=%s\n' "$SD_CORRECTION"
+    printf 'prev_gate0=%s\n'       "$ST_PREV_GATE0"
+    printf 'prev_gate1=%s\n'       "$ST_PREV_GATE1"
+    printf 'prev_gate2=%s\n'       "$ST_PREV_GATE2"
+    printf 'prev_gate3=%s\n'       "$ST_PREV_GATE3"
+    printf 'status_word=%s\n'      "$SD_STATUS_WORD"
+    printf 'status_tone=%s\n'      "$SD_STATUS_TONE"
+    printf 'phases_done=%s\n'      "$SD_PHASES_DONE"
+    printf 'phases_total=%s\n'     "$SD_PHASES_TOTAL"
+    printf 'percent=%s\n'          "$SD_PERCENT"
+    printf '%s' "$SD_TASKS" | tr '\037' '\t' | sed 's/^/task=/'
   } > "$tmp" 2> /dev/null || ! mv -f "$tmp" "$UI_DIR/state.env" 2> /dev/null; then
     rm -f "$tmp" 2> /dev/null
   fi
@@ -1067,33 +1281,41 @@ extract_task_checks() {
 #
 # O checkbox nunca sobrescreve veredito: uma task marcada pelo engine e depois
 # reprovada pelo gate 3 tem que aparecer como Incompleta, e nao de verde.
+# phase_task_rows <phase_file> <num> -> indice|status|rotulo, uma linha por
+# task da fase. Fonte unica do status de task: tasks.txt e o state.json leem
+# daqui, entao painel e navegador nunca discordam.
+phase_task_rows() {
+  local file="$1" num="$2" idx label status vfile checks pstatus
+  vfile="$UI_DIR/verdicts-$num.txt"
+  pstatus="$(phase_status_of "$num" "$file")"
+  checks="$(extract_task_checks "$file")"
+  while IFS='|' read -r idx label; do
+    [ -n "$idx" ] || continue
+    if [ "$pstatus" = "done" ]; then
+      status="done"
+    elif [ -f "$vfile" ] && grep -q "^$idx|" "$vfile" 2> /dev/null; then
+      case "$(grep "^$idx|" "$vfile" | tail -1 | cut -d'|' -f2)" in
+        DONE) status="done" ;;
+        *)    status="partial" ;;
+      esac
+    elif [ "$(printf '%s\n' "$checks" | awk -F'|' -v i="$idx" '$1 == i { print $2; exit }')" = "x" ]; then
+      status="declared"
+    else
+      status="pending"
+    fi
+    printf '%s|%s|%s\n' "$idx" "$status" "$label"
+  done < <(extract_task_labels "$file")
+}
+
 ui_tasks_cache() {
   [ -f "$MANIFEST" ] || return 0
   local tmp="$UI_DIR/.tasks.tmp.$$"
 
   if ! {
-    local file num title idx label status vfile checks pstatus
+    local file num title
     while IFS='|' read -r file num title; do
       [ -n "$num" ] || continue
-      vfile="$UI_DIR/verdicts-$num.txt"
-      pstatus="$(phase_status_of "$num" "$file")"
-      checks="$(extract_task_checks "$file")"
-      while IFS='|' read -r idx label; do
-        [ -n "$idx" ] || continue
-        if [ "$pstatus" = "done" ]; then
-          status="done"
-        elif [ -f "$vfile" ] && grep -q "^$idx|" "$vfile" 2> /dev/null; then
-          case "$(grep "^$idx|" "$vfile" | tail -1 | cut -d'|' -f2)" in
-            DONE) status="done" ;;
-            *)    status="partial" ;;
-          esac
-        elif [ "$(printf '%s\n' "$checks" | awk -F'|' -v i="$idx" '$1 == i { print $2; exit }')" = "x" ]; then
-          status="declared"
-        else
-          status="pending"
-        fi
-        printf '%s|%s|%s|%s\n' "$num" "$idx" "$status" "$label"
-      done < <(extract_task_labels "$file")
+      phase_task_rows "$file" "$num" | sed "s/^/$num|/"
     done < <(manifest_entries)
   } > "$tmp" 2> /dev/null || ! mv -f "$tmp" "$UI_DIR/tasks.txt" 2> /dev/null; then
     rm -f "$tmp" 2> /dev/null
@@ -1162,6 +1384,12 @@ gate_start() {
     2) ST_GATE2="running" ;; 3) ST_GATE3="running" ;;
   esac
   state_event gate_start "gate=$1"
+}
+
+# Guarda os gates da tentativa que acabou antes de uma nova comecar.
+snapshot_gates() {
+  ST_PREV_GATE0="$ST_GATE0"; ST_PREV_GATE1="$ST_GATE1"
+  ST_PREV_GATE2="$ST_GATE2"; ST_PREV_GATE3="$ST_GATE3"
 }
 
 # gate_end <gate> <veredito: pass|fail|skip>
@@ -1349,6 +1577,9 @@ ui_gate_color() {
 }
 
 # Le o cache achatado que o state_sync grava. Popula UIV_* no escopo do chamador.
+# Os campos aditivos (RF-14) sao lidos por todas as telas, nao so por esta
+# funcao — o shellcheck nao enxerga o consumo fora dela.
+# shellcheck disable=SC2034
 ui_load_state() {
   UIV_run_status=""; UIV_phase_num=0; UIV_phase_total=0
   UIV_phase_title=""; UIV_cycle=0; UIV_max_cycles=0
@@ -1362,11 +1593,32 @@ ui_load_state() {
   UIV_failure_gate=""; UIV_failure_cycle=0; UIV_failure_log=""; UIV_test_log=""
   UIV_test_scope=""; UIV_test_scope_cmd=""; UIV_test_scope_why=""
   UIV_env_abort=0; UIV_updated=0
+  UIV_failure_name=""; UIV_failure_message=""; UIV_failure_headline=""
+  UIV_test_file=""; UIV_task_active=0; UIV_correction_title=""
+  UIV_prev_gate0=""; UIV_prev_gate1=""; UIV_prev_gate2=""; UIV_prev_gate3=""
+  UIV_status_word=""; UIV_status_tone=""
+  UIV_phases_done=0; UIV_phases_total=0; UIV_percent=0
+  # Tarefas da fase corrente, alinhadas por posicao (RF-14).
+  UIV_task_idx=(); UIV_task_status=(); UIV_task_title=(); UIV_task_subtitle=()
 
   [ -f "$UI_DIR/state.env" ] || return 0
-  local k v
+  local k v rest
   while IFS='=' read -r k v; do
     case "$k" in
+      task)
+        UIV_task_idx+=("${v%%$'\t'*}"); rest="${v#*$'\t'}"
+        UIV_task_status+=("${rest%%$'\t'*}"); rest="${rest#*$'\t'}"
+        UIV_task_title+=("${rest%%$'\t'*}"); UIV_task_subtitle+=("${rest#*$'\t'}") ;;
+      failure_name) UIV_failure_name="$v" ;;
+      failure_message) UIV_failure_message="$v" ;;
+      failure_headline) UIV_failure_headline="$v" ;;
+      test_file) UIV_test_file="$v" ;;     task_active) UIV_task_active="$v" ;;
+      correction_title) UIV_correction_title="$v" ;;
+      prev_gate0) UIV_prev_gate0="$v" ;;   prev_gate1) UIV_prev_gate1="$v" ;;
+      prev_gate2) UIV_prev_gate2="$v" ;;   prev_gate3) UIV_prev_gate3="$v" ;;
+      status_word) UIV_status_word="$v" ;; status_tone) UIV_status_tone="$v" ;;
+      phases_done) UIV_phases_done="$v" ;; phases_total) UIV_phases_total="$v" ;;
+      percent) UIV_percent="$v" ;;
       run_status) UIV_run_status="$v" ;;   phase_num) UIV_phase_num="$v" ;;
       phase_total) UIV_phase_total="$v" ;;
       phase_title) UIV_phase_title="$v" ;; cycle) UIV_cycle="$v" ;;
@@ -5037,6 +5289,7 @@ resolve_gate2_scope() {
   GATE2_SCOPE="full"
   GATE2_SCOPE_CMD="$TEST_CMD"
   GATE2_SCOPE_WHY=""
+  GATE2_SCOPE_FILES=""
 
   if [ "$TEST_SCOPE_MODE" = "full" ]; then
     GATE2_SCOPE_WHY="modo suite completa (--full-suite / RALPH_TEST_SCOPE=full)"
@@ -5088,6 +5341,7 @@ resolve_gate2_scope() {
 
   GATE2_SCOPE="scoped"
   GATE2_SCOPE_CMD="$cmd"
+  GATE2_SCOPE_FILES="${targets[*]}"
   GATE2_SCOPE_WHY="${#targets[@]} arquivo(s) de teste desta fase"
 }
 
@@ -5864,8 +6118,9 @@ run_phase() {
   GATE_CAUSE=""
   ST_LAST_ERROR=""
   ST_FAILURE_GATE=""; ST_FAILURE_CYCLE=0; ST_FAILURE_LOG=""; ST_TEST_LOG=""
-  GATE2_SCOPE=""; GATE2_SCOPE_CMD=""; GATE2_SCOPE_WHY=""
+  GATE2_SCOPE=""; GATE2_SCOPE_CMD=""; GATE2_SCOPE_WHY=""; GATE2_SCOPE_FILES=""
   ST_GATE0=pending; ST_GATE1=pending; ST_GATE2=pending; ST_GATE3=pending
+  ST_PREV_GATE0=pending; ST_PREV_GATE1=pending; ST_PREV_GATE2=pending; ST_PREV_GATE3=pending
   # Memoria do gate 2 e abortos sao POR FASE: a fase seguinte parte de outra
   # arvore e nao pode herdar veredito nem desistencia da anterior.
   GATE2_LAST_SIG=""
@@ -5932,6 +6187,7 @@ run_phase() {
       ST_CYCLE="$MAX_CYCLES"
     fi
     # Ciclo novo revalida tudo: gates do ciclo anterior nao valem mais.
+    snapshot_gates
     ST_GATE0="pending"; ST_GATE1="pending"; ST_GATE2="pending"; ST_GATE3="pending"
     ST_REPAIR="idle"; ST_REPAIR_ROUND=0
     VERIFY_ONLY_IDX=""
@@ -6126,6 +6382,7 @@ run_phase() {
         # gate 3, escopo nas tasks que travaram — nas posicoes ORIGINAIS.
         GATE_TAG="r${repair_round}"
         gate2_fresh=0
+        snapshot_gates
         # O conserto escreveu — o modo auto do gate 3 nao pode mais tratar a
         # revalidacao como "sessao sem escrita". Ja `no_change_note` continua
         # valendo: ele fala da SESSAO DE IMPLEMENTACAO, e essa segue vazia; e o

@@ -10,7 +10,7 @@ Antes de implementar, leia:
 1. `.spec/features/ralph-painel-fiel-artefatos/SPEC.md` — requisitos RIGID que esta fase cobre
 2. `.spec/features/ralph-painel-fiel-artefatos/PLAN.md` — decomposição completa, dependências e riscos
 
-- [ ] T01 — Publicar os campos aditivos do estado (RF-14) (PLAN: T01)
+- [x] T01 — Publicar os campos aditivos do estado (RF-14) (PLAN: T01)
       Arquivos: `scripts/ralph.sh`, `scripts/test-ralph.sh`
       Mudança: em `state_sync`/`ui_state_cache`/`ui_load_state`, acrescentar sem tocar chave existente as chaves `failure {gate, cycle, headline, name, message, log}`, `test {scope, file, log}`, `tasks [{idx, title, subtitle, status}]` da fase corrente, `task_active`, `correction {title}`, `previous_gates`, `display {status_word, status_tone, phases_done, phases_total, percent}`; helper `ui_failure_digest` reusando `gate2_failure_ids` e `extract_failure_signature`; snapshot de gates antes de cada novo ciclo/round; subtítulo = texto após o primeiro ` — `/`: ` do rótulo sem `TNN —` e sem `(PLAN: TNN)`; mesmos valores espelhados em `state.env`; `events.jsonl` inalterado.
       Cobre: RF-14, RF-10, CT-01, CT-02
