@@ -19,7 +19,6 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASS=0
 FAIL=0
-CURRENT=""
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
@@ -695,13 +694,12 @@ RECORDER
   : > "$events"
 }
 
-events_of() { grep -oE '^[a-z_]+' "$1" | tr '\n' ' '; }
 
 count_event() { grep -cE "^$2\|" "$1" || true; }
 
 case_enabled() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 
-header() { CURRENT="$1"; echo -e "\n${YELLOW}== $1${NC}"; }
+header() { echo -e "\n${YELLOW}== $1${NC}"; }
 
 # ---------------------------------------------------------------------------
 # 1. Fase ok de primeira -> 1 commit por fase, progresso gravado
@@ -736,8 +734,11 @@ if case_enabled test-red-once; then
   assert_contains "$d/repo/.phases/prompts/phase-01.cycle-2.txt" "ExpectedFooTest" "prompt de correcao carrega a saida do teste"
   assert_contains "$d/repo/.phases/prompts/phase-01.cycle-2.txt" "## Fase a completar" "prompt de correcao e auto-contido (fase inteira)"
   # logs por ciclo, nunca sobrescritos
-  test -f "$d/repo/.phases/logs/phase-01.cycle-1.log" && test -f "$d/repo/.phases/logs/phase-01.cycle-2.log" \
-    && ok "logs por ciclo preservados" || bad "logs por ciclo preservados"
+  if test -f "$d/repo/.phases/logs/phase-01.cycle-1.log" && test -f "$d/repo/.phases/logs/phase-01.cycle-2.log"; then
+    ok "logs por ciclo preservados"
+  else
+    bad "logs por ciclo preservados"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -770,7 +771,11 @@ if case_enabled verify-incomplete; then
   assert_contains "$d/out.log" "Conserto cirurgico 1/2" "o conserto entrou antes do ciclo"
   assert_not_contains "$d/out.log" "Ciclo de correcao" "nenhum ciclo de correcao gasto"
   assert_eq 1 "$(cat "$d/state/repair_calls")" "um unico conserto"
-  test -f "$d/repo/.phases/logs/phase-01.verify-1.log" && ok "log do verificador por ciclo" || bad "log do verificador por ciclo"
+  if test -f "$d/repo/.phases/logs/phase-01.verify-1.log"; then
+    ok "log do verificador por ciclo"
+  else
+    bad "log do verificador por ciclo"
+  fi
 
   # O prompt do conserto e o oposto do prompt de correcao: leva o erro e SO ele.
   assert_contains "$d/state/repair_prompt_1.txt" "TASK 1: INCOMPLETE" "conserto recebe as tasks incompletas verbatim"
@@ -779,9 +784,11 @@ if case_enabled verify-incomplete; then
 
   # Revalidacao escopada entre rounds; cadeia completa antes do commit.
   assert_contains "$d/repo/.phases/prompts/phase-01.verify-1r1.txt" "Escopo desta verificacao" "revalidacao pos-conserto e escopada"
-  test -f "$d/repo/.phases/prompts/phase-01.verify-1r1f.txt" \
-    && ok "a verificacao completa pre-commit tem prompt proprio" \
-    || bad "a verificacao completa pre-commit tem prompt proprio"
+  if test -f "$d/repo/.phases/prompts/phase-01.verify-1r1f.txt"; then
+    ok "a verificacao completa pre-commit tem prompt proprio"
+  else
+    bad "a verificacao completa pre-commit tem prompt proprio"
+  fi
   assert_not_contains "$d/repo/.phases/prompts/phase-01.verify-1r1f.txt" "Escopo desta verificacao" "antes do commit o gate 3 roda sobre a fase inteira"
   assert_contains "$d/out.log" "revalidando a fase inteira antes do commit" "escopo verde nao fecha a fase sozinho"
 fi
@@ -798,7 +805,11 @@ if case_enabled verify-incomplete-no-repair; then
   assert_eq 3 "$(commits "$d")" "1 commit por fase"
   assert_contains "$d/out.log" "Ciclo de correcao 2/2" "entrou em ciclo de correcao"
   assert_contains "$d/repo/.phases/prompts/phase-01.cycle-2.txt" "TASK 1: INCOMPLETE" "prompt de correcao carrega as tasks incompletas verbatim"
-  test -f "$d/state/repair_calls" && bad "nenhuma sessao de conserto gasta" || ok "nenhuma sessao de conserto gasta"
+  if test -f "$d/state/repair_calls"; then
+    bad "nenhuma sessao de conserto gasta"
+  else
+    ok "nenhuma sessao de conserto gasta"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -853,7 +864,11 @@ if case_enabled false-429; then
   assert_eq 0 "$rc" "exit 0"
   assert_not_contains "$d/out.log" "Limite de uso atingido" "nao interpretou 429 de teste como limite"
   assert_contains "$d/repo/.phases/logs/phase-01.cycle-1.log" "429 Too Many Requests" "o 429 realmente estava no log"
-  [ "$elapsed" -lt 5 ] && ok "sem espera (${elapsed}s)" || bad "sem espera (${elapsed}s)"
+  if [ "$elapsed" -lt 5 ]; then
+    ok "sem espera (${elapsed}s)"
+  else
+    bad "sem espera (${elapsed}s)"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -902,7 +917,11 @@ if case_enabled dirty-tree; then
   rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
   assert_eq 1 "$rc" "exit 1"
   assert_contains "$d/out.log" "Arvore de trabalho suja" "abortou com instrucao"
-  test -f "$d/state/impl_calls" && bad "nenhuma sessao de engine iniciada" || ok "nenhuma sessao de engine iniciada"
+  if test -f "$d/state/impl_calls"; then
+    bad "nenhuma sessao de engine iniciada"
+  else
+    ok "nenhuma sessao de engine iniciada"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -920,7 +939,11 @@ if case_enabled bad-format; then
   # "## Phase Two" nao casa com '^## Phase [0-9]+: ' -> heading malformado
   assert_eq 1 "$rc" "exit 1"
   assert_contains "$d/out.log" "Contrato de formato violado" "abortou por formato invalido"
-  test -f "$d/state/impl_calls" && bad "nenhuma sessao de engine iniciada" || ok "nenhuma sessao de engine iniciada"
+  if test -f "$d/state/impl_calls"; then
+    bad "nenhuma sessao de engine iniciada"
+  else
+    ok "nenhuma sessao de engine iniciada"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1040,7 +1063,11 @@ if case_enabled no-verify; then
   assert_eq 0 "$rc" "exit 0 (gate 2 verde decide sozinho)"
   assert_contains "$d/out.log" "Gate 3 pulado (--no-verify)" "skip explicito logado"
   assert_contains "$d/out.log" "Gate 2 verde contra o codigo em HEAD" "mensagem nao menciona gate 3 (nao rodou)"
-  test -f "$d/state/verify_calls" && bad "nenhuma sessao verificadora gasta" || ok "nenhuma sessao verificadora gasta"
+  if test -f "$d/state/verify_calls"; then
+    bad "nenhuma sessao verificadora gasta"
+  else
+    ok "nenhuma sessao verificadora gasta"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1056,7 +1083,11 @@ if case_enabled verify-auto; then
   assert_eq 0 "$rc" "exit 0"
   assert_eq 3 "$(commits "$d")" "fases commitadas"
   assert_contains "$d/out.log" "Gate 3 pulado: a suite cobriu esta fase" "skip logado com a causa"
-  test -f "$d/state/verify_calls" && bad "nenhuma sessao verificadora gasta" || ok "nenhuma sessao verificadora gasta"
+  if test -f "$d/state/verify_calls"; then
+    bad "nenhuma sessao verificadora gasta"
+  else
+    ok "nenhuma sessao verificadora gasta"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1142,7 +1173,11 @@ if case_enabled sail-down; then
   assert_contains "$d/out.log" "containers nao estao de pe" "abortou com a causa"
   assert_contains "$d/out.log" "vendor/bin/sail up -d" "instruiu como subir o ambiente"
   assert_eq 2 "$(commits "$d")" "nenhum commit de fase"
-  test -f "$d/state/impl_calls" && bad "nenhuma sessao de engine iniciada" || ok "nenhuma sessao de engine iniciada"
+  if test -f "$d/state/impl_calls"; then
+    bad "nenhuma sessao de engine iniciada"
+  else
+    ok "nenhuma sessao de engine iniciada"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1888,8 +1923,11 @@ if case_enabled attach-readonly; then
   assert_eq "$before_commits" "$(commits "$d")" "attach nao criou commit"
 
   # Arquivo proprio: o pintor do run original continua dono do taskprog.txt.
-  test -f "$ui/taskprog.attach.txt" && ok "attach usa taskprog proprio" \
-    || bad "attach usa taskprog proprio"
+  if test -f "$ui/taskprog.attach.txt"; then
+    ok "attach usa taskprog proprio"
+  else
+    bad "attach usa taskprog proprio"
+  fi
   # As tasks do fixture nao nomeiam artefato nenhum. Com o awk quebrado o
   # universo de caminhos vazava para dentro do taskprog (60 KB de `caminho|0|0`
   # num run real) e a tabela ficava Pendente para sempre.
@@ -1911,7 +1949,11 @@ if case_enabled attach-no-run; then
   ) || arc=$?
   assert_eq 1 "$arc" "exit 1 sem run para acompanhar"
   assert_contains "$d/attach.log" "nao ha run neste diretorio" "mensagem aponta a causa"
-  test -d "$d/repo/.phases" && bad "attach nao pode criar .phases" || ok "attach nao criou .phases"
+  if test -d "$d/repo/.phases"; then
+    bad "attach nao pode criar .phases"
+  else
+    ok "attach nao criou .phases"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1940,7 +1982,7 @@ if case_enabled ui-keys; then
         echo "- [ ] T2 — task dois da fase $n"
         echo "- [ ] T3 — task tres da fase $n"
       } > "$d/repo/.phases/phase-0$n.md"
-      st=pending; [ "$n" -lt 5 ] && st=done; [ "$n" = 5 ] && st=running
+      st=pending; [ "$n" -lt 5 ] && st="done"; [ "$n" = 5 ] && st=running
       printf '%s|%s|Fase numero %s\n' "$n" "$st" "$n" >> "$d/repo/.phases/ui/phases.txt"
     done
     # PID vivo: o attach encerra sozinho quando o processo do run some, e sao
@@ -1978,6 +2020,7 @@ UISTATE
           "cd '$d/repo' && stty rows 30 cols 150 && $* RALPH_ATTACH_INTERVAL=1 RALPH_UI=panel bash '$RALPH' --attach" \
           /dev/null > "$out" 2>&1 || true
     }
+    # Cockpit de 30 linhas reserva 17 linhas para a tabela.
     # A janela desenhada em cada frame, sem os escapes de cor.
     ui_keys_windows() {
       sed -r 's/\x1B\[[0-9;?]*[A-Za-z]//g' "$1" \
@@ -1985,29 +2028,36 @@ UISTATE
     }
 
     ui_keys_run "$d/down.raw" '\033[B\033[B\033[B'
-    assert_eq "mostrando 14-19 mostrando 15-20 mostrando 16-21 mostrando 17-22" \
+    assert_eq "mostrando 9-25 mostrando 10-26 mostrando 11-27 mostrando 12-28" \
       "$(ui_keys_windows "$d/down.raw")" \
       "cada seta para baixo anda UMA linha (rajada de CSI nao pode virar uma tecla so)"
 
     ui_keys_run "$d/end.raw" 'G'
-    assert_eq "mostrando 14-19 mostrando 27-32" "$(ui_keys_windows "$d/end.raw")" \
+    assert_eq "mostrando 9-25 mostrando 16-32" "$(ui_keys_windows "$d/end.raw")" \
       "G vai para o fim e para na ultima linha (sem linha vazia no rodape)"
 
     # `uniq` colapsa frames iguais: subir no topo NAO pode gerar janela nova.
     ui_keys_run "$d/top.raw" 'gk'
-    assert_eq "mostrando 14-19 mostrando 1-6" "$(ui_keys_windows "$d/top.raw")" \
+    assert_eq "mostrando 9-25 mostrando 1-17" "$(ui_keys_windows "$d/top.raw")" \
       "g vai para o topo e subir dali nao move a janela"
 
     ui_keys_run "$d/auto.raw" 'Ga'
-    assert_eq "mostrando 14-19 mostrando 27-32 mostrando 14-19" "$(ui_keys_windows "$d/auto.raw")" \
+    assert_eq "mostrando 9-25 mostrando 16-32 mostrando 9-25" "$(ui_keys_windows "$d/auto.raw")" \
       "'a' devolve a janela ao modo automatico, centrada na fase corrente"
 
     assert_contains "$d/end.raw" "manual" "rodape avisa que a janela esta no modo manual"
 
     ui_keys_run "$d/off.raw" 'jjjG' RALPH_UI_KEYS=0
-    assert_eq "mostrando 14-19" "$(ui_keys_windows "$d/off.raw")" \
+    assert_eq "mostrando 9-25" "$(ui_keys_windows "$d/off.raw")" \
       "RALPH_UI_KEYS=0 desliga a rolagem"
     assert_not_contains "$d/off.raw" "↑↓ rolar" "sem teclado o rodape nao promete navegacao"
+
+    ui_keys_run "$d/layouts.raw" '231'
+    assert_contains "$d/layouts.raw" 'RALPH / FOCO' "tecla 2 abre foco no TTY"
+    assert_contains "$d/layouts.raw" 'RALPH / DIAGNÓSTICO' "tecla 3 abre diagnostico no TTY"
+    assert_contains "$d/layouts.raw" 'RALPH / COCKPIT' "tecla 1 volta ao cockpit"
+    ui_keys_run "$d/layout-env.raw" '' RALPH_UI_LAYOUT=diagnostic
+    assert_contains "$d/layout-env.raw" 'RALPH / DIAGNÓSTICO' "env seleciona tela inicial no attach"
 
     # O painel desliga o eco para ler tecla; sair tem que devolver o terminal.
     ( sleep 2; printf 'jj'; sleep 1; printf '\003'; sleep 3 ) \
@@ -2091,8 +2141,16 @@ if case_enabled repair-gate2; then
   assert_not_contains "$d/state/repair_prompt_1.txt" "Descubra a stack" "conserto nao carrega o preambulo de contexto"
   assert_not_contains "$d/state/repair_prompt_1.txt" "Acceptance criteria" "conserto nao carrega a fase inteira"
   # logs por round, nunca sobrescritos
-  test -f "$d/repo/.phases/logs/phase-01.repair-1-1.log" && ok "log do conserto por round" || bad "log do conserto por round"
-  test -f "$d/repo/.phases/logs/phase-01.test-1r1.log" && ok "revalidacao da suite tem log proprio" || bad "revalidacao da suite tem log proprio"
+  if test -f "$d/repo/.phases/logs/phase-01.repair-1-1.log"; then
+    ok "log do conserto por round"
+  else
+    bad "log do conserto por round"
+  fi
+  if test -f "$d/repo/.phases/logs/phase-01.test-1r1.log"; then
+    ok "revalidacao da suite tem log proprio"
+  else
+    bad "revalidacao da suite tem log proprio"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -2104,13 +2162,21 @@ if case_enabled repair-off; then
   rc=$(run_ralph "$d" test-red-repairable --engine claude --test-cmd "$d/test.sh" --max-cycles 2 --no-repair)
   assert_eq 0 "$rc" "exit 0"
   assert_contains "$d/out.log" "Ciclo de correcao 2/2" "entrou em ciclo de correcao"
-  test -f "$d/state/repair_calls" && bad "nenhuma sessao de conserto gasta" || ok "nenhuma sessao de conserto gasta"
+  if test -f "$d/state/repair_calls"; then
+    bad "nenhuma sessao de conserto gasta"
+  else
+    ok "nenhuma sessao de conserto gasta"
+  fi
 
   # --max-repairs 0 e o mesmo desligamento por outra porta
   d2=$(new_case repair-zero)
   rc=$(run_ralph "$d2" test-red-repairable --engine claude --test-cmd "$d2/test.sh" --max-cycles 2 --max-repairs 0)
   assert_eq 0 "$rc" "exit 0 com --max-repairs 0"
-  test -f "$d2/state/repair_calls" && bad "--max-repairs 0 nao gasta conserto" || ok "--max-repairs 0 nao gasta conserto"
+  if test -f "$d2/state/repair_calls"; then
+    bad "--max-repairs 0 nao gasta conserto"
+  else
+    ok "--max-repairs 0 nao gasta conserto"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -2165,7 +2231,11 @@ if case_enabled repair-not-applicable; then
   assert_eq 1 "$rc" "exit 1"
   assert_contains "$d/out.log" "Conserto cirurgico nao se aplica" "o ralph explicou por que nao reparou"
   assert_contains "$d/out.log" "protocolo do verificador" "a razao e o protocolo, nao codigo faltando"
-  test -f "$d/state/repair_calls" && bad "nenhuma sessao de conserto gasta" || ok "nenhuma sessao de conserto gasta"
+  if test -f "$d/state/repair_calls"; then
+    bad "nenhuma sessao de conserto gasta"
+  else
+    ok "nenhuma sessao de conserto gasta"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -2240,7 +2310,11 @@ if case_enabled baseline-inherited; then
   rc=$(CASE_HEAL_HEAD=on run_ralph "$d3" baseline-inherited --engine claude \
     --test-cmd "$d3/test.sh" --baseline --max-cycles 2)
   assert_eq 0 "$rc" "exit 0 (herdou o vermelho, como pedido)"
-  test -f "$d3/state/heal_calls" && bad "--baseline nao dispara saneamento" || ok "--baseline nao dispara saneamento"
+  if test -f "$d3/state/heal_calls"; then
+    bad "--baseline nao dispara saneamento"
+  else
+    ok "--baseline nao dispara saneamento"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -2555,9 +2629,21 @@ SHOT
   chmod +x "$d/shot.sh"
   rc=$(CASE_UI_SHOT_CMD="$d/shot.sh" run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
   assert_eq 0 "$rc" "exit 0"
-  test -s "$d/repo/.phases/evidence/phase-01/task-1.png" && ok "captura gravada em .phases/evidence/<fase>/task-1.png" || bad "captura gravada em .phases/evidence/<fase>/task-1.png"
-  test -s "$d/repo/.phases/evidence/phase-01/task-1-mobile.png" && ok "captura de celular gravada em task-1-mobile.png" || bad "captura de celular gravada em task-1-mobile.png"
-  test -e "$d/repo/.phases/evidence/phase-01/task-2.png" && bad "task sem 'Tela:' nao e fotografada" || ok "task sem 'Tela:' nao e fotografada"
+  if test -s "$d/repo/.phases/evidence/phase-01/task-1.png"; then
+    ok "captura gravada em .phases/evidence/<fase>/task-1.png"
+  else
+    bad "captura gravada em .phases/evidence/<fase>/task-1.png"
+  fi
+  if test -s "$d/repo/.phases/evidence/phase-01/task-1-mobile.png"; then
+    ok "captura de celular gravada em task-1-mobile.png"
+  else
+    bad "captura de celular gravada em task-1-mobile.png"
+  fi
+  if test -e "$d/repo/.phases/evidence/phase-01/task-2.png"; then
+    bad "task sem 'Tela:' nao e fotografada"
+  else
+    ok "task sem 'Tela:' nao e fotografada"
+  fi
   assert_contains "$d/state/shot_args" '/admin|' "o comando recebe a rota"
   assert_contains "$d/state/shot_args" '|.fi-header, [data-x="y"]|claro' "o comando recebe os seletores e o tema (4o campo)"
   assert_contains "$d/state/shot_args" 'task-1.png|.fi-header, [data-x="y"]|claro|desktop' "a captura principal roda com RALPH_UI_VIEWPORT=desktop"
@@ -2596,12 +2682,18 @@ if case_enabled ui-shot-autodetect; then
   header "G3-C2. sem RALPH_UI_SHOT_CMD, scripts/ralph-ui-shot.sh do repo e o comando de captura"
   d=$(CASE_PHASES="$PHASES_FIXTURE_UI" new_case ui-shot-autodetect)
   mkdir -p "$d/repo/scripts"
+  # O argumento $2 pertence ao script gerado, nao a esta suite.
+  # shellcheck disable=SC2016
   printf '#!/usr/bin/env bash\nprintf PNG > "$2"\n' > "$d/repo/scripts/ralph-ui-shot.sh"
   git -C "$d/repo" add -A && git -C "$d/repo" commit -q -m "chore: shot script"
   rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
   assert_eq 0 "$rc" "exit 0"
   assert_contains "$d/out.log" "comando de captura detectado: bash scripts/ralph-ui-shot.sh" "o ralph anuncia o comando detectado"
-  test -s "$d/repo/.phases/evidence/phase-01/task-1.png" && ok "captura gravada pelo script do repo" || bad "captura gravada pelo script do repo"
+  if test -s "$d/repo/.phases/evidence/phase-01/task-1.png"; then
+    ok "captura gravada pelo script do repo"
+  else
+    bad "captura gravada pelo script do repo"
+  fi
 fi
 
 if case_enabled ui-shot-fails; then
@@ -2646,9 +2738,21 @@ if case_enabled rescue-green; then
   assert_eq 1 "$(cat "$d/state/rescue_calls")" "uma sessao de resgate gasta"
   assert_contains "$d/out.log" "Sessao de resgate 1/2" "o resgate foi anunciado"
   assert_contains "$d/out.log" "fechou a fase — gates completos verdes" "resgate nao substitui gate"
-  test -f "$d/repo/.phases/logs/phase-01.rescue-1.log" && ok "log proprio do resgate" || bad "log proprio do resgate"
-  test -f "$d/repo/.phases/logs/phase-01.verify-rescue1.log" && ok "gate 3 do resgate com log proprio (nao sobrescreve o do ciclo)" || bad "gate 3 do resgate com log proprio (nao sobrescreve o do ciclo)"
-  test -f "$d/repo/.phases/logs/phase-01.verify-1.log" && ok "o log do ciclo anterior continua la" || bad "o log do ciclo anterior continua la"
+  if test -f "$d/repo/.phases/logs/phase-01.rescue-1.log"; then
+    ok "log proprio do resgate"
+  else
+    bad "log proprio do resgate"
+  fi
+  if test -f "$d/repo/.phases/logs/phase-01.verify-rescue1.log"; then
+    ok "gate 3 do resgate com log proprio (nao sobrescreve o do ciclo)"
+  else
+    bad "gate 3 do resgate com log proprio (nao sobrescreve o do ciclo)"
+  fi
+  if test -f "$d/repo/.phases/logs/phase-01.verify-1.log"; then
+    ok "o log do ciclo anterior continua la"
+  else
+    bad "o log do ciclo anterior continua la"
+  fi
   git -C "$d/repo" log --format=%B > "$d/commitmsg.txt"
   assert_contains "$d/commitmsg.txt" "sessao de resgate (round 1)" "o commit registra a origem do verde"
   assert_contains "$d/repo/.phases/events.jsonl" "rescue_start" "evento de inicio do resgate"
@@ -2685,14 +2789,22 @@ if case_enabled rescue-off; then
   d=$(new_case rescue-off)
   rc=$(CASE_RESCUE=on run_ralph "$d" rescue-fix --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --max-repairs 2 --no-rescue)
   assert_eq 1 "$rc" "exit 1 (a fase continua travada)"
-  test -f "$d/state/rescue_calls" && bad "nenhuma sessao de resgate gasta" || ok "nenhuma sessao de resgate gasta"
+  if test -f "$d/state/rescue_calls"; then
+    bad "nenhuma sessao de resgate gasta"
+  else
+    ok "nenhuma sessao de resgate gasta"
+  fi
   assert_contains "$d/out.log" "Abortando a fase" "o abort de hoje continua valendo"
 
   # --max-rescues 0 e a mesma porta
   d2=$(new_case rescue-zero)
   rc=$(CASE_RESCUE=on run_ralph "$d2" rescue-fix --engine claude --test-cmd "$d2/test.sh" --max-cycles 1 --max-repairs 2 --max-rescues 0)
   assert_eq 1 "$rc" "exit 1 com --max-rescues 0"
-  test -f "$d2/state/rescue_calls" && bad "--max-rescues 0 nao gasta resgate" || ok "--max-rescues 0 nao gasta resgate"
+  if test -f "$d2/state/rescue_calls"; then
+    bad "--max-rescues 0 nao gasta resgate"
+  else
+    ok "--max-rescues 0 nao gasta resgate"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -2702,7 +2814,7 @@ fi
 if case_enabled rescue-default-on; then
   header "R4. resgate ligado por default"
   d=$(new_case rescue-default-on)
-  rc=$(CASE_RESCUE= run_ralph "$d" rescue-fix --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --max-repairs 2)
+  rc=$(CASE_RESCUE='' run_ralph "$d" rescue-fix --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --max-repairs 2)
   assert_eq 0 "$rc" "exit 0 sem passar flag nenhuma de resgate"
   assert_eq 1 "$(cat "$d/state/rescue_calls")" "o resgate rodou por default"
 fi
@@ -2771,7 +2883,11 @@ if case_enabled heal-head; then
     "o saneamento tem commit proprio, antes do commit da fase 1"
   # Nenhum ciclo de correcao foi gasto com o vermelho alheio.
   assert_not_contains "$d/out.log" "Ciclo de correcao" "nenhum ciclo gasto com vermelho herdado"
-  test -f "$d/state/repair_calls" && bad "nenhum conserto cirurgico gasto" || ok "nenhum conserto cirurgico gasto"
+  if test -f "$d/state/repair_calls"; then
+    bad "nenhum conserto cirurgico gasto"
+  else
+    ok "nenhum conserto cirurgico gasto"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -2788,7 +2904,11 @@ if case_enabled heal-blocked; then
   assert_contains "$d/out.log" "GuardaVelhaTest" "o abort nomeia o teste vermelho"
   assert_contains "$d/out.log" "--baseline" "o abort oferece a saida de herdar o vermelho"
   assert_eq 1 "$(commits "$d")" "so o commit da fixture: nenhuma fase comecou"
-  test -f "$d/state/impl_calls" && bad "nenhuma sessao de fase foi gasta" || ok "nenhuma sessao de fase foi gasta"
+  if test -f "$d/state/impl_calls"; then
+    bad "nenhuma sessao de fase foi gasta"
+  else
+    ok "nenhuma sessao de fase foi gasta"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -3097,6 +3217,231 @@ PROBE
 
   # Linha truncada nao pode abortar a extracao das linhas boas.
   assert_eq "a.php" "$(sec trunc_written)" "log truncado ainda entrega os eventos completos"
+fi
+
+# As telas nao podem inventar progresso nem ultrapassar o terminal.
+if case_enabled ui-layouts; then
+  header "telas: cockpit, foco e diagnostico"
+  ul="$TMP/layouts"
+  mkdir -p "$ul/.phases/ui" "$ul/.phases/logs"
+  sed '$d' "$RALPH" > "$ul/lib.sh"
+  cat > "$ul/.phases/ui/state.env" <<'ENV'
+run_status=running
+project=layout-test
+engine=codex
+phase_num=2
+phase_seq=2
+phase_total=3
+phase_title=API de pedidos
+cycle=2
+max_cycles=2
+activity=corrigindo a fase
+last_error=Estoque insuficiente: esperado 422
+failure_gate=gate2
+failure_log=.phases/logs/test.log
+test_scope=scoped
+test_scope_why=1 arquivo de teste
+test_scope_cmd=pytest tests/test_stock.py
+gate0=pass
+gate1=pass
+gate2=skip
+gate3=pending
+ENV
+  printf '1|done|Setup\n2|running|API de pedidos\n3|pending|Interface futura\n' > "$ul/.phases/ui/phases.txt"
+  printf '1|1|done|Configurar projeto\n2|1|declared|Persistir pedido\n2|2|partial|Validar estoque\n3|1|pending|Tela futura\n' > "$ul/.phases/ui/tasks.txt"
+  printf '2|80|1\n' > "$ul/.phases/ui/taskprog.txt"
+  printf '14:35:08\tgate_end\tF2 C2 gate=2 verdict=fail\n' > "$ul/.phases/ui/events.tsv"
+  printf '\033[2JFAIL estoque\r\nexpected 422\n' > "$ul/.phases/logs/test.log"
+  cat > "$ul/probe.sh" <<'PROBE'
+lib="$1"; out="$2"
+source "$lib" > /dev/null 2>&1
+set +eu
+ui_term_cols() { echo "$width"; }
+ui_term_lines() { echo "$height"; }
+for layout in cockpit focus diagnostic; do
+  UI_LAYOUT="$layout"
+  for width in 40 80 120 160; do
+    for height in 12 24 45; do
+      ui_frame 0 > "$out/$layout-$width-$height.raw"
+    done
+  done
+done
+UI_SCROLL=8
+ui_apply_key 2
+printf '%s|%s\n' "${UI_LAYOUT:-}" "$UI_SCROLL" > "$out/keys.txt"
+ui_apply_key 3
+printf '%s\n' "${UI_LAYOUT:-}" >> "$out/keys.txt"
+ui_apply_key 1
+printf '%s\n' "${UI_LAYOUT:-}" >> "$out/keys.txt"
+UI_SCROLL=7; ui_apply_key f
+printf '%s\n' "$UI_SCROLL" >> "$out/keys.txt"
+PROBE
+  (cd "$ul" && bash "$ul/probe.sh" "$ul/lib.sh" "$ul")
+  assert_contains "$ul/cockpit-120-45.raw" "COCKPIT" "cockpit identificado"
+  assert_contains "$ul/focus-120-45.raw" "FOCO" "foco identificado"
+  assert_not_contains "$ul/focus-120-45.raw" "Tela futura" "foco so mostra tarefas da fase atual"
+  assert_contains "$ul/focus-120-45.raw" "Declarada" "declarada nao vira verificada"
+  assert_contains "$ul/focus-120-45.raw" "Incompleta" "veredito vence inferencia"
+  assert_contains "$ul/diagnostic-120-45.raw" "DIAGNÓSTICO" "diagnostico identificado"
+  assert_contains "$ul/diagnostic-120-45.raw" "Estoque insuficiente" "causa da falha visivel"
+  assert_contains "$ul/diagnostic-120-45.raw" "FAIL estoque" "saida do log real"
+  assert_contains "$ul/diagnostic-120-45.raw" "não executado" "skip nao vira aprovado"
+  assert_contains "$ul/diagnostic-120-45.raw" "escopada" "escopo executado visivel"
+  assert_eq $'focus|-1\ndiagnostic\ncockpit\n-1' "$(cat "$ul/keys.txt")" "1/2/3 trocam tela e f segue a fase"
+  python3 - "$ul" <<'CHK' > "$ul/geometry.txt"
+import pathlib, re, sys
+for path in pathlib.Path(sys.argv[1]).glob('*.raw'):
+    _, w, h = path.stem.split('-')
+    clean = re.sub(r'\x1b\[[0-9;]*m', '', path.read_text())
+    assert '\x1b' not in clean, (path.name, 'controle de log vazou')
+    lines = clean.splitlines()
+    assert len(lines) <= int(h)-1, (path.name, len(lines))
+    assert all(len(line) <= int(w) for line in lines), path.name
+    assert '1 Cockpit' in clean and '3 Diagnóstico' in clean, path.name
+print('OK')
+CHK
+  assert_contains "$ul/geometry.txt" "OK" "geometria, controles e atalhos preservados"
+fi
+
+# Curl fake: sem rede, tokens reais ou mensagens enviadas.
+if case_enabled telegram-layout; then
+  header "telegram: desfecho, contexto, escape e limite"
+  tg="$TMP/telegram"
+  mkdir -p "$tg/bin"
+  cat > "$tg/bin/curl" <<'CURL'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in text=*) printf '%s' "${arg#text=}" > "$TELEGRAM_CAPTURE" ;; esac
+done
+printf '%s' "${MOCK_HTTP:-200}"
+CURL
+  chmod +x "$tg/bin/curl"
+  telegram="${RALPH_NOTIFY_BIN:-$ROOT/scripts/notify-telegram.sh}"
+  tg_send() {
+    PATH="$tg/bin:$PATH" TELEGRAM_BOT_TOKEN=fake TELEGRAM_CHAT_ID=0 \
+      TELEGRAM_CAPTURE="$tg/$1.txt" RALPH_PROJECT='Loja <A&B>' \
+      RALPH_ENGINE=codex RALPH_PHASE_NUM=2 RALPH_PHASE_TOTAL=6 \
+      RALPH_PHASE_TITLE='API <pedidos>' RALPH_PHASE_ATTEMPT=2 \
+      RALPH_PHASE_MAX_ATTEMPTS=2 RALPH_GATE2=skip RALPH_GATE3=pass \
+      RALPH_TEST_SCOPE=skip RALPH_LOG_PATH='.phases/logs/test.log' \
+      bash "$telegram" "$1" "$2"
+  }
+  RALPH_OUTCOME=failed tg_send run_done 'Uma fase falhou.'
+  assert_contains "$tg/run_done.txt" "Execução encerrada com falhas" "fim com falha nao anuncia sucesso"
+  assert_not_contains "$tg/run_done.txt" "Fase 2" "fim nao herda fase"
+  assert_contains "$tg/run_done.txt" "Loja &lt;A&amp;B&gt;" "HTML escapado"
+  RALPH_OUTCOME=environment tg_send phase_failed 'Serviço fora do ar.'
+  assert_contains "$tg/phase_failed.txt" "Interrompida pelo ambiente" "infra tem desfecho proprio"
+  assert_contains "$tg/phase_failed.txt" ".phases/logs/test.log" "falha aponta log"
+  RALPH_OUTCOME="done" tg_send phase_done 'Trabalho salvo.'
+  assert_contains "$tg/phase_done.txt" "G2: não executado" "skip nao e verde"
+  assert_contains "$tg/phase_done.txt" "Ciclo: 2/2" "orcamento contextualizado"
+  long=$(python3 -c "print('<&😀' * 4000)")
+  RALPH_OUTCOME=failed tg_send phase_failed "$long"
+  python3 - "$tg/phase_failed.txt" <<'CHK' > "$tg/length.txt"
+import html, pathlib, re, sys
+raw = pathlib.Path(sys.argv[1]).read_text()
+text = html.unescape(re.sub('<[^>]+>', '', raw))
+assert len(text.encode('utf-16-le')) // 2 <= 4096
+assert 'mensagem truncada' in text
+assert '.phases/logs/test.log' in text
+assert not re.search(r'&(?!amp;|lt;|gt;)', raw)
+print('OK')
+CHK
+  assert_contains "$tg/length.txt" "OK" "texto longo cabe e preserva HTML e log"
+  MOCK_HTTP=500 tg_send phase_failed 'Falha simulada.' > "$tg/error.txt" 2>&1
+  assert_eq 0 "$?" "erro de envio nao afeta run"
+  assert_not_contains "$tg/error.txt" "fake" "erro nao expoe credencial"
+fi
+
+# O contexto novo precisa sair do produtor real, nao so da fixture do adapter.
+if case_enabled notify-context; then
+  header "notify: contexto real dos gates e infraestrutura"
+  d=$(new_case notify-context)
+  cat > "$d/context.sh" <<'CTX'
+#!/usr/bin/env bash
+printf '%s|%s|%s|%s|%s|%s\n' "$1" "${RALPH_OUTCOME:-}" "${RALPH_GATE2:-}" "${RALPH_GATE3:-}" "${RALPH_TEST_SCOPE:-}" "${RALPH_LOG_PATH:-}" >> "$MOCK_STATE/context.txt"
+CTX
+  chmod +x "$d/context.sh"
+  rc=$(CASE_NOTIFY_CMD="$d/context.sh" run_ralph "$d" ok --engine claude --no-verify --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "run verde com notificacao contextual"
+  assert_contains "$d/state/context.txt" 'phase_done|running|pass|skip|full|' "gates e escopo reais chegam ao adapter"
+  assert_contains "$d/state/context.txt" 'run_done|done|' "fim verde identificado"
+  d2=$(new_case notify-env)
+  cp "$d/context.sh" "$d2/context.sh"
+  rc=$(CASE_NOTIFY_CMD="$d2/context.sh" run_ralph "$d2" infra-forever --engine claude --full-suite --test-cmd "$d2/test.sh")
+  assert_eq 3 "$rc" "infra continua exit 3"
+  assert_contains "$d2/state/context.txt" 'phase_failed|environment|fail|pending|full|.phases/logs/phase-01.test-1.log' "infra informa desfecho e log exato"
+  assert_contains "$d2/state/context.txt" 'run_done|environment|' "resumo final conserva desfecho de ambiente"
+  assert_contains "$d2/repo/.phases/ui/state.env" 'env_abort=1' "painel recebe contexto de ambiente"
+  assert_contains "$d2/repo/.phases/ui/events.tsv" 'gate_end' "historico privado acompanha eventos publicos"
+fi
+
+# O verificador deve aceitar a regra atual, mas detectar uma copia divergente.
+if case_enabled init-drift-contract; then
+  header "init: ancora acompanha a regra compartilhada"
+  dc="$TMP/init-drift"
+  mkdir -p "$dc/scripts"
+  cp -R "$ROOT/commands" "$dc/commands"
+  cp "$(dirname "$RALPH")/check-init-drift.sh" "$dc/scripts/check-init-drift.sh"
+  rc=0
+  bash "$dc/scripts/check-init-drift.sh" > "$dc/aligned.log" 2>&1 || rc=$?
+  assert_eq 0 "$rc" "os comandos atuais estao alinhados"
+  for doc in project-description user-stories database-schema project-phases; do
+    cp "$dc/commands/init/$doc.md" "$dc/original.md"
+    # Remover apenas o limite de agrupamento precisa voltar a deixar vermelho.
+    sed "s/Batch related questions (≤ 4 per call)/Batch related questions/" \
+      "$dc/original.md" > "$dc/commands/init/$doc.md"
+    rc=0
+    bash "$dc/scripts/check-init-drift.sh" > "$dc/$doc.log" 2>&1 || rc=$?
+    assert_eq 1 "$rc" "detecta divergencia em $doc"
+    assert_contains "$dc/$doc.log" "commands/init/$doc.md" "nomeia a copia divergente"
+    cp "$dc/original.md" "$dc/commands/init/$doc.md"
+  done
+fi
+
+# ---------------------------------------------------------------------------
+# ui-locale-ranges: o texto do painel sobrevive a qualquer locale do dev.
+#
+# ui_clean_text usa faixas de bytes ([ -/], [0-?], [@-~]) no sed. Em
+# en_US.UTF-8 o GNU sed recusa `[ -/]` pela ordem de collation ("Invalid range
+# end"): ui_line recebia texto vazio e o cabecalho, o resumo e as abas saiam
+# como linhas em branco — so a tabela, que nao passa por ui_line, aparecia.
+#
+# Fica vermelho se ui_clean_text voltar a depender do locale do chamador.
+# Sem en_US.UTF-8 instalado a prova nao e possivel: o caso pula, nao passa.
+# ---------------------------------------------------------------------------
+if case_enabled ui-locale-ranges; then
+  header "painel: texto nao some em en_US.UTF-8"
+
+  if ! locale -a 2> /dev/null | grep -qix 'en_US\.utf-\?8'; then
+    echo "  skip en_US.UTF-8 nao instalado"
+  else
+    ul="$TMP/uilocale"
+    mkdir -p "$ul/.phases/ui"
+    sed '$d' "$RALPH" > "$ul/ui.sh"
+    cat > "$ul/.phases/ui/state.env" <<ENV
+run_status=running
+phase_num=1
+phase_total=1
+phase_title=Fase de locale
+engine=claude
+project=locale-bench
+started=$(date +%s)
+ENV
+    printf '1|running|Fase de locale\n' > "$ul/.phases/ui/phases.txt"
+    : > "$ul/.phases/ui/tasks.txt"
+    cat > "$ul/render.sh" <<'REN'
+source "$1" > /dev/null 2>&1
+set +eu
+ui_term_cols()  { echo 120; }
+ui_term_lines() { echo 30; }
+ui_frame 0 2> /dev/null
+REN
+    ( cd "$ul" && LC_ALL=en_US.UTF-8 bash "$ul/render.sh" "$ul/ui.sh" > "$ul/frame.txt" 2> /dev/null )
+    assert_contains "$ul/frame.txt" "RALPH / COCKPIT" "cabecalho do cockpit visivel em en_US.UTF-8"
+    assert_contains "$ul/frame.txt" "1 Cockpit" "abas visiveis em en_US.UTF-8"
+  fi
 fi
 
 # ---------------------------------------------------------------------------

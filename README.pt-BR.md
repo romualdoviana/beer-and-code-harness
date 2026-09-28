@@ -291,6 +291,7 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | `--baseline` | Mede em HEAD o que já está vermelho e faz o gate 2 cobrar só o **delta** (default: desligado) |
 | `--no-verify` | Desliga o gate 3 |
 | `--no-env-guard` | Desliga a detecção de ambiente fora do ar: toda falha volta a ser vermelho da fase |
+| `--ui-layout <nome>` | Tela inicial: `cockpit` (padrão), `focus`, `diagnostic` |
 | `--ui` / `--no-ui` | Força o painel ANSI ligado / desligado (ver abaixo) |
 | `--serve[=PORTA]` | Dashboard web local sobre o mesmo estado |
 
@@ -321,6 +322,7 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | `RALPH_NOTIFY_CMD` | Comando de notificação (vazio = desligado) |
 | `RALPH_NOTIFY_TIMEOUT` | Timeout do comando de notificação em segundos (default: 20) |
 | `RALPH_UI` | Painel: `auto` (default) \| `panel` \| `plain` |
+| `RALPH_UI_LAYOUT` | Tela inicial: `cockpit` (padrão), `focus`, `diagnostic` |
 | `RALPH_UI_FPS` | Repinturas do painel por segundo (default: 2) |
 | `RALPH_UI_KEYS` | Navegação por teclado na tabela do painel: `1` (default) \| `0` desliga |
 | `RALPH_SERVE_PORT` | Primeira porta tentada pelo `--serve` (default: 7433) |
@@ -331,45 +333,51 @@ Durante cada sessão, o ralph exporta `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PH
 
 Run é coisa de olhar, não de ler. O ralph desenha um painel de tela cheia enquanto o run acontece:
 
-```
-RALPH
-Projeto: beer-and-code-harness   Engine: claude       Status: ▶ Em execução
-Duração: 12m 04s                 Run:    run-48213    PID:    48213
-
-┌─────────── PROGRESSO ────────────┐  ┌────────── TRABALHO ATUAL ──────────┐
-│ Fases  2/9     [██████░░░░  22%] │  │ Fase:  3 · Autenticação JWT        │
-│ Tasks  7/31    [████░░░░░░  22%] │  │ Ciclo: 1/3   Gate: G2              │
-└──────────────────────────────────┘  │ Atividade: executando a suite      │
-                                      │ Último erro: —                     │
-                                      └────────────────────────────────────┘
-┌──────────────────────── FASES E TASKS ─────────────────────────┐
-│ ID   Fase / Task              Status         Tentativa  Gates  │
-├────────────────────────────────────────────────────────────────┤
-│ F1   Setup                    ✓ Concluída    1          G0 ✓ … │
-│ F2   Migrations               ✓ Concluída    1          G0 ✓ … │
-│ F3   Autenticação JWT         ▶ Em execução  1          G2 ⣾ … │
-│ T1     ↳ Middleware de guard  ✓ Concluída    -          -      │
-│ T2     ↳ Refresh token        ! Incompleta   -          -      │
-│ F4   Policies                 · Pendente     -          G0 · … │
-└────────────────────────────────────────────────────────────────┘
-· reading app/Http/Middleware/Authenticate.php
-14:22:07 Gate 2 — rodando a suite do projeto: vendor/bin/sail test
+```text
+RALPH / COCKPIT · beer-and-code · codex
+EM EXECUÇÃO · 18m 42s · Ciclo 1/2
+Etapa: implementando a fase · Fase 3/6
+PROGRESSO  Fases 2/6 · Tasks 7/20 concluídas
+JORNADA  ✓ F2 Dados   > F3 API   · F4 Interface
+┌──────── TRABALHO ATUAL ────────┐  ┌──── VALIDAÇÃO DA FASE ────┐
+│ Fase 3 · API de pedidos        │  │ G0 Sessão     aguardando │
+│ Task ativa (~): Validar estoque│  │ G1 Código     aguardando │
+│ AO VIVO: Edit OrderService.php │  │ G2 Testes     aguardando │
+│ Ações do engine: 18            │  │ G3 Verificação aguardando│
+└───────────────────────────────┘  └───────────────────────────┘
+... fases e tarefas ...
+1 Cockpit | 2 Foco | 3 Diagnóstico · ^v rolar · f/a seguir
 ```
 
 O painel roda no **buffer alternado** do terminal (como `vim` ou `less`): ocupa a tela inteira durante o run e, ao sair, devolve o terminal com o scrollback anterior intacto. É o que permite layout de altura variável — a tabela cresce com o número de fases e tasks do documento.
 
-Seções: cabeçalho (projeto, engine, status, duração, run id, pid), **PROGRESSO** (barras de fases e de tasks concluídas), **TRABALHO ATUAL** (fase corrente, ciclo, gate ativo, atividade, último erro), **FASES E TASKS** (uma linha por fase e uma por task, veredito por gate na fase corrente, janela deslizante quando não cabe) e um rodapé com a última linha de progresso do engine mais as mensagens recentes.
+As teclas **1 / 2 / 3** alternam entre três telas sem interromper a execução:
 
-O layout se adapta: os dois quadros de cima empilham abaixo de 100 colunas, a coluna `Gates` cai abaixo de 96 e `Tentativa` abaixo de 74. As linhas de task saem dos itens `- [ ]` de cada fase, e o veredito individual vem do gate 3 — `✓ Concluída` / `! Incompleta` por task, então dá para ver *qual* task travou a fase.
+| Tela | Conteúdo |
+|---|---|
+| **1 · Cockpit** (padrão) | Progresso, jornada de fases, atividade, gates e tabela navegável |
+| **2 · Foco** | Tarefa ativa inferida, ações do engine e somente as tarefas da fase atual |
+| **3 · Diagnóstico** | Última causa e ciclo da falha, gates atuais, escopo/comando dos testes, consertos, resgates e trecho do log |
+
+Escolha a tela inicial com `--ui-layout cockpit|focus|diagnostic` ou `RALPH_UI_LAYOUT`. Também funciona em `--attach`, inclusive para acompanhar um run que já estava aberto:
+
+```bash
+./ralph.sh --attach --ui-layout diagnostic
+```
+
+A composição respeita largura e altura: quadros lado a lado a partir de 100 colunas, detalhes adicionais a partir de 34 linhas e modo compacto abaixo de 24 linhas. O rodapé sempre mantém as teclas de troca de tela. No diagnóstico, a rolagem percorre as últimas 80 linhas do log (limitadas a 16 KiB); `f` acompanha o fim. Sem o cache novo em um run antigo, os dados adicionais aparecem como indisponíveis.
+
+`Declarada` significa que a sessão marcou a task; não é confirmação independente. A inferência `~` nunca sobrescreve um veredito. Gates pulados continuam distintos de aprovados, G1 é um sinal de alteração e fases anteriores sem histórico publicado não recebem gates verdes inventados. Interrupção por ambiente tem indicação própria.
 
 Quando a tabela não cabe na tela, dá para **andar pelas linhas** sem parar o run:
 
 | Tecla | Ação |
 | --- | --- |
+| `1` / `2` / `3` | Cockpit / Foco / Diagnóstico |
 | `↑` / `↓`, `k` / `j` | Uma linha para cima / para baixo |
 | `PgUp` / `PgDn`, espaço | Uma tela para cima / para baixo |
 | `g` / `Home`, `G` / `End` | Primeira / última linha |
-| `a` | Volta ao modo automático (a janela segue a fase corrente) |
+| `a` / `f` | Volta ao modo automático (a janela segue a fase corrente) |
 
 O rodapé da tabela mostra a faixa visível e o modo atual (`↑↓ rolar` = automático, `manual` = topo fixado por você). A leitura de tecla **não bloqueia nada**: ela substitui a espera entre repinturas, então o run segue nos gates independente do que for digitado — a invariante "zero perguntas" continua de pé. Sem `/dev/tty` legível, ou com `RALPH_UI_KEYS=0`, o painel volta ao comportamento anterior (janela sempre automática).
 
@@ -436,6 +444,10 @@ Adaptador pronto para Telegram em `scripts/notify-telegram.sh` (credenciais só 
 export RALPH_NOTIFY_CMD="$HOME/.claude/scripts/notify-telegram.sh"
 ./ralph.sh .spec/features/<slug>/PHASES.md
 ```
+
+As mensagens do Telegram agora identificam o resultado no título: início, fase concluída, falha, espera por limite ou interrupção pelo ambiente. Eventos de fase incluem ciclo, resultados de G2/G3 e escopo da suite; falhas apontam o caminho do log. O fim do run usa o resultado real, sem herdar a fase anterior. Mensagens longas são truncadas antes do escape HTML para preservar o envio e o contexto.
+
+O hook recebe também `RALPH_OUTCOME`, `RALPH_RUN_ID`, `RALPH_GATE2`, `RALPH_GATE3`, `RALPH_TEST_SCOPE` e `RALPH_LOG_PATH`. Os sete nomes de evento e os argumentos posicionais continuam iguais. `phase_failed` também pode indicar infraestrutura: nesse caso, `RALPH_OUTCOME=environment` distingue o motivo. Os testes do adaptador usam `curl` simulado e não enviam mensagens reais.
 
 ### Estado e progresso
 

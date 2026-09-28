@@ -43,11 +43,15 @@ ALL4=("$DESC" "$STORIES" "$SCHEMA" "$PHASES")
 DOWN3=("$STORIES" "$SCHEMA" "$PHASES")
 
 # --- Interview rules (all 4) ---
+# Texto literal de Markdown/shell: nao expandir a ancora.
+# shellcheck disable=SC2016
 check 'Use `AskUserQuestion` for discrete decisions with clear options' "${ALL4[@]}"
-check "Ask real open questions in plain text when the answer is not a menu. Batch related questions; don't drip one at a time." "${ALL4[@]}"
+check "Ask real open questions in plain text when the answer is not a menu, with the same structure plus one worked example of a valid answer. Batch related questions (≤ 4 per call); don't drip one at a time." "${ALL4[@]}"
 check 'as an open question rather than inventing' "${ALL4[@]}"
 
 # --- Re-run contract (all 4) ---
+# Texto literal de Markdown/shell: nao expandir a ancora.
+# shellcheck disable=SC2016
 check 'Re-running this command must **update** the existing document, never rebuild it from scratch — `.spec` belongs to the developer, and manual edits there are decisions, not noise.' "${ALL4[@]}"
 check '**before** interviewing. Every decision recorded in it' "${ALL4[@]}"
 check 'Interview only about **deltas**' "${ALL4[@]}"
@@ -56,6 +60,8 @@ check 'Update via **Edit**, not a full rewrite' "${ALL4[@]}"
 check 'stays deleted — restore it only if the developer explicitly confirms.' "${ALL4[@]}"
 
 # --- Write step + self-check preamble (all 4) ---
+# Texto literal de Markdown/shell: nao expandir a ancora.
+# shellcheck disable=SC2016
 check '(create the `.spec/init/` directories if missing)' "${ALL4[@]}"
 check 'After writing, run these checks. Any failure → fix the document via Edit and re-run until all pass. Never report completion with a failing check.' "${ALL4[@]}"
 
@@ -75,10 +81,14 @@ check 'input changed after this artifact was generated — review before proceed
 check 'Refresh it on **every** run, including re-run Edits' "${DOWN3[@]}"
 
 # --- design/ contract (consumer + router; always manual, never generated) ---
+# Texto literal de Markdown/shell: nao expandir a ancora.
+# shellcheck disable=SC2016
 check '`.spec/init/design/` is always a **manual artifact**: the developer creates and populates it; no `init:*` command writes there. Its absence is never an error.' "$PHASES" "$ROUTER"
 
 # --- Stamp parser loop (3 downstream commands + /init router share it) ---
 check '[a-z0-9.-]+\.md@sha256:[0-9a-f]{12}' "${DOWN3[@]}" "$ROUTER"
+# Texto literal de Markdown/shell: nao expandir a ancora.
+# shellcheck disable=SC2016
 check 'cut -c1-12)" = "${pair##*:}" ]' "${DOWN3[@]}" "$ROUTER"
 
 if [ "$FAIL" -eq 0 ]; then

@@ -295,6 +295,7 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `--baseline` | Measures what is already red at HEAD and makes gate 2 charge only the **delta** (default: off) |
 | `--no-verify` | Disables gate 3 |
 | `--no-env-guard` | Disables environment-down detection: every failure is a red phase again |
+| `--ui-layout <name>` | Initial screen: `cockpit` (default), `focus`, `diagnostic` |
 | `--ui` / `--no-ui` | Forces the ANSI panel on / off (see below) |
 | `--serve[=PORT]` | Local web dashboard over the same state |
 
@@ -325,6 +326,7 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `RALPH_NOTIFY_CMD` | Notification command (empty = disabled) |
 | `RALPH_NOTIFY_TIMEOUT` | Notification command timeout in seconds (default: 20) |
 | `RALPH_UI` | Panel: `auto` (default) \| `panel` \| `plain` |
+| `RALPH_UI_LAYOUT` | Initial screen: `cockpit` (default), `focus`, `diagnostic` |
 | `RALPH_UI_FPS` | Panel repaints per second (default: 2) |
 | `RALPH_UI_KEYS` | Keyboard navigation in the panel table: `1` (default) \| `0` disables |
 | `RALPH_SERVE_PORT` | First port `--serve` tries (default: 7433) |
@@ -335,45 +337,51 @@ During each session, ralph exports `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE
 
 A run is watched, not read. ralph draws a full-screen panel while the run happens:
 
-```
-RALPH
-Projeto: beer-and-code-harness   Engine: claude       Status: ▶ Em execução
-Duração: 12m 04s                 Run:    run-48213    PID:    48213
-
-┌─────────── PROGRESSO ────────────┐  ┌────────── TRABALHO ATUAL ──────────┐
-│ Fases  2/9     [██████░░░░  22%] │  │ Fase:  3 · Autenticação JWT        │
-│ Tasks  7/31    [████░░░░░░  22%] │  │ Ciclo: 1/3   Gate: G2              │
-└──────────────────────────────────┘  │ Atividade: executando a suite      │
-                                      │ Último erro: —                     │
-                                      └────────────────────────────────────┘
-┌──────────────────────── FASES E TASKS ─────────────────────────┐
-│ ID   Fase / Task              Status         Tentativa  Gates  │
-├────────────────────────────────────────────────────────────────┤
-│ F1   Setup                    ✓ Concluída    1          G0 ✓ … │
-│ F2   Migrations               ✓ Concluída    1          G0 ✓ … │
-│ F3   Autenticação JWT         ▶ Em execução  1          G2 ⣾ … │
-│ T1     ↳ Middleware de guard  ✓ Concluída    -          -      │
-│ T2     ↳ Refresh token        ! Incompleta   -          -      │
-│ F4   Policies                 · Pendente     -          G0 · … │
-└────────────────────────────────────────────────────────────────┘
-· reading app/Http/Middleware/Authenticate.php
-14:22:07 Gate 2 — rodando a suite do projeto: vendor/bin/sail test
+```text
+RALPH / COCKPIT · beer-and-code · codex
+EM EXECUÇÃO · 18m 42s · Ciclo 1/2
+Etapa: implementando a fase · Fase 3/6
+PROGRESSO  Fases 2/6 · Tasks 7/20 concluídas
+JORNADA  ✓ F2 Dados   > F3 API   · F4 Interface
+┌──────── TRABALHO ATUAL ────────┐  ┌──── VALIDAÇÃO DA FASE ────┐
+│ Fase 3 · API de pedidos        │  │ G0 Sessão     aguardando │
+│ Task ativa (~): Validar estoque│  │ G1 Código     aguardando │
+│ AO VIVO: Edit OrderService.php │  │ G2 Testes     aguardando │
+│ Ações do engine: 18            │  │ G3 Verificação aguardando│
+└───────────────────────────────┘  └───────────────────────────┘
+... fases e tarefas ...
+1 Cockpit | 2 Foco | 3 Diagnóstico · ^v rolar · f/a seguir
 ```
 
 The panel runs in the terminal's **alternate screen buffer** (like `vim` or `less`): it owns the screen during the run and, on exit, gives the terminal back with the previous scrollback intact. That is what allows a variable-height layout — the table grows with the number of phases and tasks in the document.
 
-Sections: header (project, engine, status, duration, run id, pid), **PROGRESSO** (phase and task completion bars), **TRABALHO ATUAL** (current phase, cycle, active gate, activity, last error), **FASES E TASKS** (one row per phase and per task, per-gate verdict on the current phase, sliding window when it does not fit), and a footer with the engine's last progress line plus the latest messages.
+Use **1 / 2 / 3** to switch screens without interrupting execution:
 
-The layout adapts: the two top boxes stack below 100 columns, the `Gates` column drops below 96, `Tentativa` below 74. Task rows come from the `- [ ]` items of each phase, and their individual verdict comes from gate 3 — `✓ Concluída` / `! Incompleta` per task, so you can see *which* task blocked the phase.
+| Screen | Content |
+|---|---|
+| **1 · Cockpit** (default) | Progress, phase journey, live activity, gates, and scrollable phase/task table |
+| **2 · Focus** | Inferred active task, engine activity, and only the current phase's tasks |
+| **3 · Diagnostics** | Last failure and its cycle, current gates, test scope/command, repairs, rescues, and log output |
+
+Select the initial screen with `--ui-layout cockpit|focus|diagnostic` or `RALPH_UI_LAYOUT`. This also works with `--attach`, including runs already in progress:
+
+```bash
+./ralph.sh --attach --ui-layout diagnostic
+```
+
+The layout respects both dimensions: side-by-side boxes from 100 columns, additional detail from 34 rows, and a compact mode below 24 rows. Screen shortcuts remain visible. Diagnostics scrolls through the latest 80 log lines (bounded to 16 KiB); `f` follows the tail. Older runs without the new cache show unavailable fields explicitly.
+
+`Declarada` means the engine marked a task; it is not independent verification. Inference (`~`) never overrides a verdict. Skipped gates remain distinct from passed gates, G1 is a change signal, and prior phases without published gate history do not receive invented green verdicts. Infrastructure interruptions have their own indication.
 
 When the table does not fit on screen, you can **walk through the rows** without stopping the run:
 
 | Key | Action |
 | --- | --- |
+| `1` / `2` / `3` | Cockpit / Focus / Diagnostics |
 | `↑` / `↓`, `k` / `j` | One row up / down |
 | `PgUp` / `PgDn`, space | One screen up / down |
 | `g` / `Home`, `G` / `End` | First / last row |
-| `a` | Back to automatic mode (the window follows the current phase) |
+| `a` / `f` | Back to automatic mode (the window follows the current phase) |
 
 The table footer shows the visible range and the current mode (`↑↓ rolar` = automatic, `manual` = top pinned by you). Reading a key **blocks nothing**: it replaces the wait between repaints, so the run keeps moving through the gates regardless of what is typed — the "zero questions" invariant still holds. With no readable `/dev/tty`, or with `RALPH_UI_KEYS=0`, the panel falls back to the previous behavior (always-automatic window).
 
@@ -440,6 +448,10 @@ Ready-made Telegram adapter at `scripts/notify-telegram.sh` (credentials via env
 export RALPH_NOTIFY_CMD="$HOME/.claude/scripts/notify-telegram.sh"
 ./ralph.sh .spec/features/<slug>/PHASES.md
 ```
+
+Telegram messages identify the outcome in the title: start, completed phase, failure, usage-limit wait, or infrastructure interruption. Phase events include the cycle, G2/G3 results, and test scope; failures include the log path. The final run message uses the actual outcome without inheriting the previous phase. Long messages are truncated before HTML escaping to preserve delivery and context.
+
+The hook additionally receives `RALPH_OUTCOME`, `RALPH_RUN_ID`, `RALPH_GATE2`, `RALPH_GATE3`, `RALPH_TEST_SCOPE`, and `RALPH_LOG_PATH`. The seven event names and positional arguments remain unchanged. `phase_failed` can also indicate infrastructure: `RALPH_OUTCOME=environment` distinguishes that outcome. Adapter tests use a fake `curl` and send no real messages.
 
 ### State and progress
 

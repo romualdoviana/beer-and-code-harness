@@ -90,12 +90,12 @@ LIVE_STATE="$STATE_DIR/live.tsv"
 # ---------------------------------------------------------------------------
 
 if $USE_COLOR; then
-  C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+  C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
   C_CYAN=$'\033[38;5;81m'; C_GREEN=$'\033[38;5;77m'; C_YELLOW=$'\033[38;5;221m'
   C_RED=$'\033[38;5;203m'; C_GREY=$'\033[38;5;245m'; C_WHITE=$'\033[38;5;255m'
   C_HILITE=$'\033[48;5;53m'
 else
-  C_RESET=""; C_DIM=""; C_BOLD=""
+  C_RESET=""; C_BOLD=""
   C_CYAN=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_GREY=""; C_WHITE=""
   C_HILITE=""
 fi
@@ -275,7 +275,7 @@ gate_mark_plain() {
 declare -A ST_LABEL ST_PLAIN GM_LABEL GM_PLAIN
 init_labels() {
   local s
-  for s in done running failed incomplete skipped pending; do
+  for s in "done" running failed incomplete skipped pending; do
     ST_LABEL[$s]=$(status_label "$s")
     ST_PLAIN[$s]=$(status_plain "$s")
   done
@@ -441,7 +441,7 @@ draw_header() {
   now=$(date +%s)
   elapsed=$(( now - ${META[started]:-$now} ))
   [ "${META[status]:-running}" != "running" ] && [ -n "${META[ended]:-}" ] \
-    && elapsed=$(( ${META[ended]} - ${META[started]:-$now} ))
+    && elapsed=$(( META[ended] - ${META[started]:-$now} ))
 
   printf '\n%s%sRALPH%s\n\n' "$C_BOLD" "$C_CYAN" "$C_RESET"
 
@@ -810,7 +810,7 @@ scroll_by() { # <delta em linhas>
 }
 
 handle_key() { # <char lido>
-  local c="$1" seq="" tail=""
+  local c="$1" seq="" _tail=""
   if [ "$c" = $'\033' ]; then
     IFS= read -rsn2 -t 0.05 -u "$KEY_FD" seq || true
     case "$seq" in
@@ -819,7 +819,7 @@ handle_key() { # <char lido>
       '[H') FOLLOW=false; OFF=0 ;;
       '[F') FOLLOW=false; OFF=$MAX_OFF ;;
       '[5'|'[6'|'[1'|'[4')
-        IFS= read -rsn1 -t 0.05 -u "$KEY_FD" tail || true   # engole o '~'
+        IFS= read -rsn1 -t 0.05 -u "$KEY_FD" _tail || true   # engole o '~'
         case "$seq" in
           '[5') scroll_by -"$VIS" ;;
           '[6') scroll_by "$VIS" ;;

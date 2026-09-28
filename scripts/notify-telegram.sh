@@ -19,13 +19,15 @@
 #      (default: ~/.config/ralph-notify/telegram.env, permissao 600)
 #
 # argv:
-#   $1  evento: phase_done | phase_failed | limit_hit | limit_over
+#   $1  evento: run_start | phase_done | phase_failed | limit_hit | limit_over
 #               | limit_abort | run_done
 #   $2  mensagem ja formatada pelo ralph.sh
 #
 # Contexto lido do ambiente exportado pelo ralph.sh:
 #   RALPH_PROJECT RALPH_ENGINE RALPH_PHASE_NUM RALPH_PHASE_TOTAL
-#   RALPH_PHASE_TITLE RALPH_EVENT
+#   RALPH_PHASE_TITLE RALPH_EVENT RALPH_OUTCOME RALPH_RUN_ID
+#   RALPH_PHASE_ATTEMPT RALPH_PHASE_MAX_ATTEMPTS RALPH_GATE2 RALPH_GATE3
+#   RALPH_TEST_SCOPE RALPH_LOG_PATH
 #
 # Invariante: exit 0 SEMPRE. Falha de rede, token ausente ou erro da API nunca
 # derrubam o run do ralph — a notificacao e um efeito colateral, nao um gate.
@@ -45,8 +47,11 @@ warn() { echo "[notify-telegram] $1" >&2; }
 load_credentials() {
   if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
     if [ -f "$ENV_FILE" ]; then
+      set +u
+      # Configuracao local escolhida em runtime; nao e uma dependencia do repo.
       # shellcheck disable=SC1090
-      set +u; . "$ENV_FILE"; set -u
+      . "$ENV_FILE"
+      set -u
     fi
   fi
 
@@ -90,33 +95,93 @@ event_icon() {
   esac
 }
 
-# Monta o corpo da mensagem. Rodando varios projetos em paralelo, o nome do
-# projeto e a primeira coisa que precisa ser legivel na notificacao do celular.
-build_text() {
-  local event="$1" message="$2"
-  local icon project phase_line engine
-
-  icon=$(event_icon "$event")
-  project=$(html_escape "${RALPH_PROJECT:-projeto}")
-  engine=$(html_escape "${RALPH_ENGINE:-}")
-
-  printf '%s <b>%s</b>\n' "$icon" "$project"
-
-  # Eventos de run, nao de fase. run_done ainda carrega RALPH_PHASE_* da ultima
-  # fase, e run_start pode herda-los do ambiente do shell que chamou o ralph —
-  # exibi-los daria a impressao de um evento de fase.
-  if [ "$event" != "run_done" ] && [ "$event" != "run_start" ] \
-    && [ -n "${RALPH_PHASE_NUM:-}" ]; then
-    phase_line="Fase ${RALPH_PHASE_NUM}"
-    [ -n "${RALPH_PHASE_TOTAL:-}" ] && phase_line="${phase_line}/${RALPH_PHASE_TOTAL}"
-    [ -n "${RALPH_PHASE_TITLE:-}" ] && phase_line="${phase_line} — ${RALPH_PHASE_TITLE}"
-    printf '<i>%s</i>\n' "$(html_escape "$phase_line")"
+# Limita ANTES do escape HTML: cortar uma entidade pela metade perde o envio.
+# O orcamento conservador considera ate 2 unidades UTF-16 por caractere.
+short_text() {
+  local text="$1" max="$2"
+  text="$(printf '%s' "$text" | tr -d '\000-\010\013-\037\177')"
+  if [ "${#text}" -gt "$max" ]; then
+    printf '%s [mensagem truncada]' "${text:0:$max}"
+  else
+    printf '%s' "$text"
   fi
+}
 
-  printf '\n%s\n' "$(html_escape "$message")"
+event_title() {
+  case "$1" in
+    run_start) printf 'Execução iniciada' ;;
+    phase_done) printf 'Fase concluída' ;;
+    phase_failed)
+      if [ "${RALPH_OUTCOME:-}" = environment ]; then printf 'Interrompida pelo ambiente'
+      else printf 'Fase falhou'; fi ;;
+    limit_hit) printf 'Aguardando limite de uso' ;;
+    limit_over) printf 'Execução retomada' ;;
+    limit_abort) printf 'Execução interrompida por limite' ;;
+    run_done)
+      case "${RALPH_OUTCOME:-}" in
+        environment) printf 'Interrompida pelo ambiente' ;;
+        failed|aborted) printf 'Execução encerrada com falhas' ;;
+        done) printf 'Execução concluída' ;;
+        *) printf 'Execução encerrada' ;;
+      esac ;;
+    *) printf 'Atualização do Ralph' ;;
+  esac
+}
 
-  [ -n "$engine" ] && printf '\n<code>engine: %s | %s</code>\n' \
-    "$engine" "$(date '+%d/%m %H:%M')"
+gate_text() {
+  case "$1" in
+    pass) printf 'aprovado' ;; fail) printf 'falhou' ;;
+    skip) printf 'não executado' ;; running) printf 'em execução' ;;
+    *) printf 'aguardando' ;;
+  esac
+}
+
+build_text() {
+  local event="$1" message="$2" icon project engine phase_line title log_path
+  local phase_total="${RALPH_PHASE_TOTAL:-?}" max_attempts="${RALPH_PHASE_MAX_ATTEMPTS:-?}"
+  icon=$(event_icon "$event")
+  if [ "${RALPH_OUTCOME:-}" = environment ]; then icon='⚠️'
+  elif [ "$event" = run_done ] && [ "${RALPH_OUTCOME:-}" = failed ]; then icon='❌'; fi
+  project=$(html_escape "$(short_text "${RALPH_PROJECT:-projeto}" 64)")
+  engine=$(html_escape "$(short_text "${RALPH_ENGINE:-}" 24)")
+  title=$(event_title "$event")
+  printf '%s <b>%s</b>\n<b>%s</b>\n' "$icon" "$project" "$title"
+
+  # Eventos do run nunca herdam fase, ciclo ou gates da ultima fase.
+  if [ "$event" != run_done ] && [ "$event" != run_start ] && [ -n "${RALPH_PHASE_NUM:-}" ]; then
+    phase_line="Fase ${RALPH_PHASE_NUM:0:6}/${phase_total:0:6}"
+    phase_line+=" · $(short_text "${RALPH_PHASE_TITLE:-}" 96)"
+    printf '\n%s\n' "$(html_escape "$phase_line")"
+    if [ -n "${RALPH_PHASE_ATTEMPT:-}" ]; then
+      printf 'Ciclo: %s/%s\n' "$(html_escape "${RALPH_PHASE_ATTEMPT:0:6}")" \
+        "$(html_escape "${max_attempts:0:6}")"
+    fi
+    if [ "$event" = phase_done ] || [ "$event" = phase_failed ]; then
+      if [ "${RALPH_OUTCOME:-}" = environment ]; then
+        printf 'G2: indisponível (sem veredito sobre o código)\n'
+      else
+        printf 'G2: %s · G3: %s\n' "$(gate_text "${RALPH_GATE2:-}")" "$(gate_text "${RALPH_GATE3:-}")"
+      fi
+      case "${RALPH_TEST_SCOPE:-}" in
+        full) printf 'Suite: completa\n' ;; scoped) printf 'Suite: escopada\n' ;;
+        skip) printf 'Suite: não executada\n' ;;
+      esac
+    fi
+  fi
+  printf '\n%s\n' "$(html_escape "$(short_text "$message" 1000)")"
+
+  case "$event" in
+    phase_failed|limit_abort)
+      log_path="$(short_text "${RALPH_LOG_PATH:-.phases/logs/}" 160)"
+      printf '\nLog: <code>%s</code>\n' "$(html_escape "$log_path")"
+      ;;
+  esac
+  if [ "$event" = phase_failed ] && [ "${RALPH_OUTCOME:-}" = environment ]; then
+    printf 'Próximo passo: restabelecer os serviços e retomar o Ralph.\n'
+  fi
+  printf '\n<code>%s · %s</code>\n' "${engine:-ralph}" "$(date '+%d/%m %H:%M')"
+  [ -n "${RALPH_RUN_ID:-}" ] && printf '<code>%s</code>\n' "$(html_escape "$(short_text "$RALPH_RUN_ID" 32)")"
+  return 0
 }
 
 # ---------------------------------------------------------------------------

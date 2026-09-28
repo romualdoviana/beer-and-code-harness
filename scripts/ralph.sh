@@ -59,6 +59,7 @@
 #                            RALPH_TEST_SCOPE=full)
 #   --verbose                streama o progresso do engine no terminal
 #   --quiet                  so o placar do ralph no terminal (DEFAULT)
+#   --ui-layout <nome>       cockpit (default), focus ou diagnostic; teclas 1/2/3
 #   --ui                     forca o painel ANSI (equivale a RALPH_UI=panel)
 #   --no-ui                  forca o placar em linha corrida (RALPH_UI=plain)
 #   --serve[=PORTA]          sobe um dashboard web local sobre o mesmo estado
@@ -396,6 +397,7 @@
 #                            encerra o run em vez de dormir (default: 21600 = 6h)
 #   RALPH_NOTIFY_CMD         comando de notificacao (opcional, vazio = desligado)
 #   RALPH_UI                 painel: auto (default) | panel | plain
+#   RALPH_UI_LAYOUT          cockpit (default) | focus | diagnostic
 #   RALPH_UI_FPS             repinturas por segundo do painel (default: 2)
 #   RALPH_UI_KEYS            1 (default) = navegacao por teclado na tabela do
 #                            painel; 0 desliga (terminal que engole escapes)
@@ -558,6 +560,7 @@ VERBOSE=false
 [ "${RALPH_VERBOSE:-0}" = "1" ] && VERBOSE=true
 HEARTBEAT_SECS="${RALPH_HEARTBEAT:-60}"
 UI_MODE="${RALPH_UI:-auto}"
+UI_LAYOUT="${RALPH_UI_LAYOUT:-cockpit}"
 SERVE=false
 SERVE_PORT="${RALPH_SERVE_PORT:-7433}"
 ATTACH=false
@@ -595,6 +598,8 @@ while [[ $# -gt 0 ]]; do
     --no-env-guard) ENV_GUARD=false; shift ;;
     --verbose)     VERBOSE=true; shift ;;
     --quiet)       VERBOSE=false; shift ;;
+    --ui-layout)   UI_LAYOUT="$2"; shift 2 ;;
+    --ui-layout=*) UI_LAYOUT="${1#*=}"; shift ;;
     --ui)          UI_MODE="panel"; shift ;;
     --no-ui)       UI_MODE="plain"; shift ;;
     --serve)       SERVE=true; shift ;;
@@ -606,6 +611,8 @@ while [[ $# -gt 0 ]]; do
     *)             INPUT_FILE="$1"; shift ;;
   esac
 done
+
+case "$UI_LAYOUT" in cockpit|focus|diagnostic) ;; *) UI_LAYOUT=cockpit ;; esac
 
 PHASES_DIR=".phases"
 LOG_DIR=".phases/logs"
@@ -693,6 +700,10 @@ ST_LIMIT_WAITING=0
 ST_STDERR_LOG=""
 ST_ACTIVITY=""
 ST_LAST_ERROR=""
+ST_FAILURE_GATE=""
+ST_FAILURE_CYCLE=0
+ST_FAILURE_LOG=""
+ST_TEST_LOG=""
 ST_STAGE_START=0
 ST_STDOUT_LOG=""
 # Conserto cirurgico: idle | running | ok | fail | skipped. ST_REPAIR_ROUND e o
@@ -744,8 +755,17 @@ fail()    { if $UI_ACTIVE; then ui_sink fail "$1"; else echo -e "${RED}[$(date '
 # engolido — invariante: notificar nunca altera o resultado do run.
 notify() {
   [ -n "$NOTIFY_CMD" ] || return 0
-  local event="$1" message="${2:-}"
+  local event="$1" message="${2:-}" outcome="$ST_RUN_STATUS"
+  [ "${ENV_ABORT:-0}" = 1 ] && outcome=environment
 
+  RALPH_OUTCOME="$outcome" \
+  RALPH_RUN_ID="$RUN_ID" \
+  RALPH_PHASE_ATTEMPT="$ST_CYCLE" \
+  RALPH_PHASE_MAX_ATTEMPTS="$MAX_CYCLES" \
+  RALPH_GATE2="$ST_GATE2" \
+  RALPH_GATE3="$ST_GATE3" \
+  RALPH_TEST_SCOPE="$GATE2_SCOPE" \
+  RALPH_LOG_PATH="${ST_FAILURE_LOG:-${ST_STDERR_LOG:-$LOG_DIR/}}" \
   RALPH_EVENT="$event" \
   RALPH_PROJECT="$PROJECT_NAME" \
   RALPH_ENGINE="$ENGINE" \
@@ -830,7 +850,7 @@ state_sync() {
   tmp="$STATE_FILE.tmp.$$"
   progress="$(current_progress_line)"
 
-  {
+  if ! {
     printf '{\n'
     printf '  "schema": 1,\n'
     printf '  "project": "%s",\n'   "$(json_escape "$PROJECT_NAME")"
@@ -872,7 +892,9 @@ state_sync() {
     fi
 
     printf '\n  ]\n}\n'
-  } > "$tmp" 2> /dev/null && mv -f "$tmp" "$STATE_FILE" 2> /dev/null || rm -f "$tmp" 2> /dev/null
+  } > "$tmp" 2> /dev/null || ! mv -f "$tmp" "$STATE_FILE" 2> /dev/null; then
+    rm -f "$tmp" 2> /dev/null
+  fi
 
   ui_state_cache
   return 0
@@ -885,7 +907,7 @@ ui_state_cache() {
   local tmp="$UI_DIR/.state.tmp.$$"
   [ -d "$UI_DIR" ] || return 0
 
-  {
+  if ! {
     printf 'run_status=%s\n'  "$ST_RUN_STATUS"
     printf 'phase_num=%s\n'   "$ST_PHASE_NUM"
     printf 'phase_seq=%s\n'   "$ST_PHASE_SEQ"
@@ -910,6 +932,15 @@ ui_state_cache() {
     printf 'progress=%s\n'    "$(current_progress_line)"
     printf 'activity=%s\n'    "${ST_ACTIVITY//$'\n'/ }"
     printf 'last_error=%s\n'  "${ST_LAST_ERROR//$'\n'/ }"
+    printf 'failure_gate=%s\n' "$ST_FAILURE_GATE"
+    printf 'failure_cycle=%s\n' "$ST_FAILURE_CYCLE"
+    printf 'failure_log=%s\n' "$ST_FAILURE_LOG"
+    printf 'test_log=%s\n' "$ST_TEST_LOG"
+    printf 'test_scope=%s\n' "$GATE2_SCOPE"
+    printf 'test_scope_cmd=%s\n' "${GATE2_SCOPE_CMD//$'\n'/ }"
+    printf 'test_scope_why=%s\n' "${GATE2_SCOPE_WHY//$'\n'/ }"
+    printf 'env_abort=%s\n' "${ENV_ABORT:-0}"
+    printf 'updated=%s\n' "$(date +%s)"
     printf 'stage_start=%s\n' "$ST_STAGE_START"
     printf 'stderr_log=%s\n'  "$ST_STDERR_LOG"
     printf 'stdout_log=%s\n'  "$ST_STDOUT_LOG"
@@ -920,17 +951,21 @@ ui_state_cache() {
     # mostraria a engine default em vez da que o run de verdade esta usando.
     printf 'engine=%s\n'      "$ENGINE"
     printf 'project=%s\n'     "$PROJECT_NAME"
-  } > "$tmp" 2> /dev/null && mv -f "$tmp" "$UI_DIR/state.env" 2> /dev/null || rm -f "$tmp" 2> /dev/null
+  } > "$tmp" 2> /dev/null || ! mv -f "$tmp" "$UI_DIR/state.env" 2> /dev/null; then
+    rm -f "$tmp" 2> /dev/null
+  fi
 
   local ptmp="$UI_DIR/.phases.tmp.$$"
   if [ -f "$MANIFEST" ]; then
-    {
+    if ! {
       local file num title
       while IFS='|' read -r file num title; do
         [ -n "$num" ] || continue
         printf '%s|%s|%s\n' "$num" "$(phase_status_of "$num" "$file")" "$title"
       done < <(manifest_entries)
-    } > "$ptmp" 2> /dev/null && mv -f "$ptmp" "$UI_DIR/phases.txt" 2> /dev/null || rm -f "$ptmp" 2> /dev/null
+    } > "$ptmp" 2> /dev/null || ! mv -f "$ptmp" "$UI_DIR/phases.txt" 2> /dev/null; then
+      rm -f "$ptmp" 2> /dev/null
+    fi
   fi
 
   ui_tasks_cache
@@ -1036,7 +1071,7 @@ ui_tasks_cache() {
   [ -f "$MANIFEST" ] || return 0
   local tmp="$UI_DIR/.tasks.tmp.$$"
 
-  {
+  if ! {
     local file num title idx label status vfile checks pstatus
     while IFS='|' read -r file num title; do
       [ -n "$num" ] || continue
@@ -1060,7 +1095,9 @@ ui_tasks_cache() {
         printf '%s|%s|%s|%s\n' "$num" "$idx" "$status" "$label"
       done < <(extract_task_labels "$file")
     done < <(manifest_entries)
-  } > "$tmp" 2> /dev/null && mv -f "$tmp" "$UI_DIR/tasks.txt" 2> /dev/null || rm -f "$tmp" 2> /dev/null
+  } > "$tmp" 2> /dev/null || ! mv -f "$tmp" "$UI_DIR/tasks.txt" 2> /dev/null; then
+    rm -f "$tmp" 2> /dev/null
+  fi
 
   return 0
 }
@@ -1088,6 +1125,12 @@ state_event() {
     printf '}\n'
   } >> "$EVENTS_FILE" 2> /dev/null || true
 
+  if [ -d "$UI_DIR" ]; then
+    local detail="F$ST_PHASE_NUM C$ST_CYCLE $*"
+    detail="${detail//$'\n'/ }"; detail="${detail//$'\t'/ }"
+    printf '%s\t%s\t%s\n' "$(date '+%H:%M:%S')" "$event" "${detail:0:500}" \
+      >> "$UI_DIR/events.tsv" 2>/dev/null || true
+  fi
   state_sync
   return 0
 }
@@ -1184,7 +1227,7 @@ UI_C_PEND='\033[38;5;240m'
 # Task que o engine declarou pronta mas nenhum gate confirmou ainda: verde
 # apagado, distinto do verde de veredito.
 UI_C_DECL='\033[38;5;29m'
-UI_C_CUR='\033[48;5;53m'
+UI_C_CUR='\033[48;5;23m'
 UI_C_OFF='\033[0m'
 
 ui_should_activate() {
@@ -1307,37 +1350,45 @@ ui_gate_color() {
 
 # Le o cache achatado que o state_sync grava. Popula UIV_* no escopo do chamador.
 ui_load_state() {
-  UIV_run_status=""; UIV_phase_num=0; UIV_phase_seq=0; UIV_phase_total=0
-  UIV_phase_title=""; UIV_cycle=0; UIV_max_cycles=0; UIV_phase_start=0
-  UIV_gate0=""; UIV_gate1=""; UIV_gate2=""; UIV_gate3=""; UIV_test_cmd=""
+  UIV_run_status=""; UIV_phase_num=0; UIV_phase_total=0
+  UIV_phase_title=""; UIV_cycle=0; UIV_max_cycles=0
+  UIV_gate0=""; UIV_gate1=""; UIV_gate2=""; UIV_gate3=""
   UIV_limit_waiting=0; UIV_limit_until=0; UIV_progress=""; UIV_activity=""
   UIV_last_error=""; UIV_pid=""; UIV_run_id=""; UIV_started=0
-  UIV_stage_start=0; UIV_stderr_log=""; UIV_stdout_log=""
+  UIV_stage_start=0; UIV_stdout_log=""
   UIV_engine=""; UIV_project=""
   UIV_repair=""; UIV_repair_round=0; UIV_max_repairs=0
   UIV_rescue=""; UIV_rescue_round=0; UIV_max_rescues=0
+  UIV_failure_gate=""; UIV_failure_cycle=0; UIV_failure_log=""; UIV_test_log=""
+  UIV_test_scope=""; UIV_test_scope_cmd=""; UIV_test_scope_why=""
+  UIV_env_abort=0; UIV_updated=0
 
   [ -f "$UI_DIR/state.env" ] || return 0
   local k v
   while IFS='=' read -r k v; do
     case "$k" in
       run_status) UIV_run_status="$v" ;;   phase_num) UIV_phase_num="$v" ;;
-      phase_seq) UIV_phase_seq="$v" ;;     phase_total) UIV_phase_total="$v" ;;
+      phase_total) UIV_phase_total="$v" ;;
       phase_title) UIV_phase_title="$v" ;; cycle) UIV_cycle="$v" ;;
-      max_cycles) UIV_max_cycles="$v" ;;   phase_start) UIV_phase_start="$v" ;;
+      max_cycles) UIV_max_cycles="$v" ;;
       gate0) UIV_gate0="$v" ;; gate1) UIV_gate1="$v" ;;
       gate2) UIV_gate2="$v" ;; gate3) UIV_gate3="$v" ;;
-      test_cmd) UIV_test_cmd="$v" ;;       limit_waiting) UIV_limit_waiting="$v" ;;
+      limit_waiting) UIV_limit_waiting="$v" ;;
       limit_until) UIV_limit_until="$v" ;; progress) UIV_progress="$v" ;;
       activity) UIV_activity="$v" ;;       last_error) UIV_last_error="$v" ;;
       pid) UIV_pid="$v" ;;                 run_id) UIV_run_id="$v" ;;
       started) UIV_started="$v" ;;         stage_start) UIV_stage_start="$v" ;;
-      stderr_log) UIV_stderr_log="$v" ;;   stdout_log) UIV_stdout_log="$v" ;;
+      stdout_log) UIV_stdout_log="$v" ;;
       engine) UIV_engine="$v" ;;           project) UIV_project="$v" ;;
       repair) UIV_repair="$v" ;;           repair_round) UIV_repair_round="$v" ;;
       max_repairs) UIV_max_repairs="$v" ;;
       rescue) UIV_rescue="$v" ;;           rescue_round) UIV_rescue_round="$v" ;;
       max_rescues) UIV_max_rescues="$v" ;;
+      failure_cycle) UIV_failure_cycle="$v" ;;
+      failure_gate) UIV_failure_gate="$v" ;; failure_log) UIV_failure_log="$v" ;;
+      test_log) UIV_test_log="$v" ;; test_scope) UIV_test_scope="$v" ;;
+      test_scope_cmd) UIV_test_scope_cmd="$v" ;; test_scope_why) UIV_test_scope_why="$v" ;;
+      env_abort) UIV_env_abort="$v" ;; updated) UIV_updated="$v" ;;
     esac
   done < "$UI_DIR/state.env"
 }
@@ -1486,17 +1537,17 @@ ui_sec_panels() {
   local lw=$(((w - 2) / 2)) rw
   rw=$((w - 2 - lw))
 
-  local left=() right=() line
-  while IFS= read -r line; do left+=("$line"); done < <(ui_box_top "$lw" "PROGRESSO"; ui_sec_progress_lines "$lw"; ui_box_bot "$lw")
-  while IFS= read -r line; do right+=("$line"); done < <(ui_box_top "$rw" "TRABALHO ATUAL"; ui_sec_current_lines "$rw"; ui_box_bot "$rw")
+  local panel_left=() panel_right=() line
+  while IFS= read -r line; do panel_left+=("$line"); done < <(ui_box_top "$lw" "PROGRESSO"; ui_sec_progress_lines "$lw"; ui_box_bot "$lw")
+  while IFS= read -r line; do panel_right+=("$line"); done < <(ui_box_top "$rw" "TRABALHO ATUAL"; ui_sec_current_lines "$rw"; ui_box_bot "$rw")
 
-  local n=${#left[@]}
-  [ ${#right[@]} -gt "$n" ] && n=${#right[@]}
+  local n=${#panel_left[@]}
+  [ ${#panel_right[@]} -gt "$n" ] && n=${#panel_right[@]}
   local i blank_l blank_r
   blank_l="$(printf '%*s' "$lw" '')"
   blank_r="$(printf '%*s' "$rw" '')"
   for ((i = 0; i < n; i++)); do
-    printf '%s  %s\n' "${left[$i]:-$blank_l}" "${right[$i]:-$blank_r}"
+    printf '%s  %s\n' "${panel_left[$i]:-$blank_l}" "${panel_right[$i]:-$blank_r}"
   done
 }
 
@@ -1508,6 +1559,7 @@ ui_sec_table() {
   # cabecalho ja mostra o gate corrente), depois Tentativa.
   local c_id=4 c_status=15 c_try=10 c_gates=24
   local show_gates=1 show_try=1
+  [ "$UI_LAYOUT" = focus ] && { show_gates=0; c_gates=0; show_try=0; c_try=0; }
   [ "$w" -lt 96 ] && { show_gates=0; c_gates=0; }
   [ "$w" -lt 74 ] && { show_try=0; c_try=0; }
   # Um espaco entre colunas: (n_cols - 1) separadores, e n_cols muda quando
@@ -1528,6 +1580,7 @@ ui_sec_table() {
   local num status title tnum tstatus tlabel
   while IFS='|' read -r num status title; do
     [ -n "$num" ] || continue
+    [ "$UI_LAYOUT" = focus ] && [ "$num" != "$UIV_phase_num" ] && continue
 
     local gates_plain="" gates_col=""
     if [ "$show_gates" = 1 ]; then
@@ -1539,8 +1592,8 @@ ui_sec_table() {
           gates_col+="$(printf '%bG%s%b %b%s%b ' "$UI_C_DIM" "$g" "$UI_C_OFF" "$(ui_gate_color "$gv")" "$(ui_gate_mark "$gv" "$spin")" "$UI_C_OFF")"
         done
       elif [ "$status" = "done" ]; then
-        gates_plain="G0 ✓ G1 ✓ G2 ✓ G3 ✓ "
-        gates_col="$(printf '%bG0 ✓ G1 ✓ G2 ✓ G3 ✓%b ' "$UI_C_OK" "$UI_C_OFF")"
+        gates_plain="histórico não disponível"
+        gates_col="$(printf '%b%s%b' "$UI_C_DIM" "$gates_plain" "$UI_C_OFF")"
       else
         gates_plain="G0 · G1 · G2 · G3 · "
         gates_col="$(printf '%bG0 · G1 · G2 · G3 ·%b ' "$UI_C_PEND" "$UI_C_OFF")"
@@ -1549,7 +1602,7 @@ ui_sec_table() {
 
     local try="-"
     [ "$num" = "$UIV_phase_num" ] && try="$UIV_cycle"
-    [ "$status" = "done" ] && [ "$num" != "$UIV_phase_num" ] && try="1"
+    # Fases anteriores nao publicam tentativa: nao inventar um ciclo verde.
 
     local rp rc
     rp="$(ui_cell "F$num" "$c_id") $(ui_cell "$title" "$c_name") $(ui_cell "$(ui_status_plain "$status")" "$c_status")"
@@ -1598,7 +1651,8 @@ ui_sec_table() {
   printf '%s|%s|%s|%s\n' "$start" "$total" "$budget" "$cur_row" \
     > "$UI_VIEWPORT" 2> /dev/null || true
 
-  ui_box_top "$w" "FASES E TASKS"
+  if [ "$UI_LAYOUT" = focus ]; then ui_box_top "$w" "TAREFAS DA FASE"
+  else ui_box_top "$w" "FASES E TASKS"; fi
   ui_box_row "$w" "$head_plain" "$head_col"
   printf '%b├%s┤%b\n' "$UI_C_FRAME" "$(ui_rule $((w - 2)))" "$UI_C_OFF"
   local i last=$((start + budget))
@@ -1694,7 +1748,10 @@ ui_infer_tasks() {
   local out="$UI_TASKPROG" tmp="$UI_TASKPROG.tmp.$$"
   local pf
   pf="$(printf 'phase-%02d.md' "$phase_num" 2> /dev/null)"
-  [ -n "$phase_num" ] && [ "$phase_num" -gt 0 ] 2> /dev/null || { : > "$out" 2> /dev/null; return 0; }
+  if [ -z "$phase_num" ] || ! [ "$phase_num" -gt 0 ] 2> /dev/null; then
+    : > "$out" 2> /dev/null
+    return 0
+  fi
   [ -f "$PHASES_DIR/$pf" ] || { : > "$out" 2> /dev/null; return 0; }
 
   local anchors="$UI_DIR/.anchors.$$" paths="$UI_DIR/.paths.$$"
@@ -1866,25 +1923,287 @@ ui_sec_messages() {
   done < <(tail -n "$msg_budget" "$UI_MSG_FILE" 2> /dev/null || true)
 }
 
-# Desenha o frame inteiro. Altura livre: quem limita e o orcamento passado a
-# tabela, calculado a partir do que as outras secoes consomem.
+# Texto externo nunca pode mover o cursor ou introduzir uma linha no quadro.
+# LC_ALL=C: as faixas sao de BYTES ASCII. Em en_US.UTF-8 o GNU sed recusa
+# `[ -/]` pela collation ("Invalid range end") e todo ui_line saia em branco.
+# Byte a byte, o UTF-8 do texto passa intacto.
+ui_clean_text() {
+  LC_ALL=C sed -E $'s/\033\\][^\007]*(\007|\033\\\\)//g; s/\033\\[[0-?]*[ -/]*[@-~]//g' \
+    | tr -d '\000-\010\013-\037\177' | tr '\t\n' '  '
+}
+
+ui_line() {
+  local text
+  text="$(printf '%s' "$2" | ui_clean_text)"
+  printf '%b%s%b\n' "${3:-$UI_C_OFF}" "$(ui_cell "$text" "$1")" "$UI_C_OFF"
+}
+
+ui_gate_words() {
+  local status="$1" gate="${2:-}"
+  if [ "$gate" = 1 ]; then
+    case "$status" in
+      pass) printf 'alteração detectada'; return ;;
+      fail) printf 'sem alteração (sinal)'; return ;;
+    esac
+  fi
+  case "$status" in
+    pass) printf 'aprovado' ;; fail) printf 'falhou' ;;
+    skip) printf 'não executado' ;; running) printf 'em execução' ;;
+    *) printf 'aguardando' ;;
+  esac
+}
+
+ui_scope_words() {
+  case "$UIV_test_scope" in
+    full) printf 'completa' ;; scoped) printf 'escopada' ;;
+    skip) printf 'não executada' ;; *) printf 'a resolver' ;;
+  esac
+}
+
+ui_layout_header() {
+  local w="$1" name="$2" status elapsed=0 now
+  case "$UIV_run_status" in
+    done) status='CONCLUÍDO' ;; failed) status='FALHOU' ;;
+    aborted) status='INTERROMPIDO' ;; *) status='EM EXECUÇÃO' ;;
+  esac
+  [ "$UIV_env_abort" = 1 ] && status='AMBIENTE INDISPONÍVEL'
+  [ "$UIV_limit_waiting" = 1 ] && status='AGUARDANDO LIMITE'
+  now=$(date +%s)
+  case "$UIV_run_status" in done|failed|aborted) [ "$UIV_updated" -gt 0 ] && now=$UIV_updated ;; esac
+  [ "$UIV_started" -gt 0 ] && elapsed=$((now - UIV_started))
+  [ "$elapsed" -lt 0 ] && elapsed=0
+  ui_line "$w" "RALPH / $name · ${UIV_project:-$PROJECT_NAME} · ${UIV_engine:-$ENGINE}" "$UI_C_TITLE"
+  ui_line "$w" "$status · $(format_duration "$elapsed") · Ciclo $UIV_cycle/$UIV_max_cycles" "$UI_C_LABEL"
+  ui_line "$w" "Etapa: ${UIV_activity:-preparando} · Fase $UIV_phase_num/$UIV_phase_total"
+}
+
+ui_layout_tabs() {
+  local w="$1" text='1 Cockpit | 2 Foco | 3 Diagnóstico'
+  if [ "$UI_KEYS" = 1 ]; then
+    [ "$w" -ge 70 ] && text+='  ·  ^v rolar · f/a seguir'
+  else
+    text+=' (teclado desligado)'
+  fi
+  ui_line "$w" "$text" "$UI_C_LABEL"
+}
+
+# Jornada limitada ao entorno da fase corrente; planos longos nao escondem o
+# agora atras de dezenas de fases feitas. A tabela continua navegavel inteira.
+ui_journey() {
+  local w="$1" num status title mark text='JORNADA  ' n=0
+  while IFS='|' read -r num status title; do
+    [ -n "$num" ] || continue
+    [ "$num" -lt $((UIV_phase_num - 1)) ] && continue
+    case "$status" in done) mark='✓' ;; running) mark="$UI_G_RUN" ;; failed) mark='!' ;; skipped) mark='»' ;; *) mark='·' ;; esac
+    text+="$mark F$num ${title:0:14}   "
+    n=$((n + 1)); [ "$n" -ge 5 ] && break
+  done < <(cat "$UI_DIR/phases.txt" 2>/dev/null || true)
+  ui_line "$w" "$text" "$UI_C_DIM"
+}
+
+ui_cockpit_summary() {
+  local w="$1" wide="$2" row
+  local pdone=0 total=0 td=0 tt=0 num status
+  while IFS='|' read -r num status _; do
+    [ -n "$num" ] || continue
+    total=$((total + 1)); [ "$status" = "done" ] && pdone=$((pdone + 1))
+  done < <(cat "$UI_DIR/phases.txt" 2>/dev/null || true)
+  while IFS='|' read -r _ _ status _; do
+    [ -n "$status" ] || continue
+    tt=$((tt + 1)); [ "$status" = "done" ] && td=$((td + 1))
+  done < <(cat "$UI_DIR/tasks.txt" 2>/dev/null || true)
+  row="PROGRESSO  Fases $pdone/$total · Tasks $td/$tt concluídas"
+  ui_line "$w" "$row" "$UI_C_OK"
+  if [ "$wide" = 1 ]; then
+    printf '%s\n' "$(ui_bar "$pdone" "$total" $((w - 6)))"
+    ui_journey "$w"
+  fi
+}
+
+ui_current_box() {
+  local w="$1" mode="$2" text
+  ui_box_top "$w" "$mode"
+  ui_box_row "$w" "Fase $UIV_phase_num · $UIV_phase_title" "$(printf '%b%s%b' "$UI_C_TITLE" "Fase $UIV_phase_num · $UIV_phase_title" "$UI_C_OFF")"
+  text="${UIL_ACTIVE_TASK:-Nenhuma tarefa ativa identificada}"
+  case "$UIV_activity" in implementando*|corrigindo*) ;; *) text='Aguardando próxima sessão de implementação' ;; esac
+  ui_box_row "$w" "Task ativa (~): $text" "Task ativa (~): $text"
+  text="${UIL_TAIL:-${UIV_progress:-nenhuma ação ainda}}"
+  text="$(printf '%s' "$text" | ui_clean_text)"
+  ui_box_row "$w" "AO VIVO: $text" "AO VIVO: $text"
+  text="Ações do engine: ${UIL_ACTIONS:-0} · Árvore: ${UIL_DIRTY_N:-0} arquivo(s) tocado(s)"
+  ui_box_row "$w" "$text" "$text"
+  ui_box_bot "$w"
+}
+
+ui_gates_box() {
+  local w="$1" g val label text
+  ui_box_top "$w" 'VALIDAÇÃO DA FASE'
+  for g in 0 1 2 3; do
+    case "$g" in
+      0) val="$UIV_gate0"; label='Sessão' ;;
+      1) val="$UIV_gate1"; label='Código' ;;
+      2) val="$UIV_gate2"; label='Testes' ;;
+      3) val="$UIV_gate3"; label='Verificação' ;;
+    esac
+    text="G$g $(ui_cell "$label" 12) $(ui_gate_words "$val" "$g")"
+    [ "$g" = 2 ] && [ "$UIV_env_abort" = 1 ] && text='G2 Testes       ambiente indisponível'
+    ui_box_row "$w" "$text" "$(printf '%b%s%b' "$(ui_gate_color "$val")" "$text" "$UI_C_OFF")"
+  done
+  ui_box_bot "$w"
+}
+
+ui_cockpit_boxes() {
+  local w="$1" lw rw i
+  if [ "$w" -lt 100 ]; then
+    ui_current_box "$w" 'TRABALHO ATUAL'
+    return
+  fi
+  lw=$(((w - 2) / 2)); rw=$((w - 2 - lw))
+  local -a panel_left=() panel_right=()
+  mapfile -t panel_left < <(ui_current_box "$lw" 'TRABALHO ATUAL')
+  mapfile -t panel_right < <(ui_gates_box "$rw")
+  for ((i=0; i<${#panel_left[@]}; i++)); do printf '%s  %s\n' "${panel_left[$i]}" "${panel_right[$i]}"; done
+}
+
+ui_live_compact() {
+  local w="$1" text stage=0
+  [ "$UIV_stage_start" -gt 0 ] && stage=$(($(date +%s) - UIV_stage_start))
+  [ "$stage" -lt 0 ] && stage=0
+  text="AO VIVO · Ações do engine: ${UIL_ACTIONS:-0} · Etapa: $(format_duration "$stage")"
+  ui_line "$w" "$text" "$UI_C_LABEL"
+  ui_line "$w" "${UIL_TAIL:-${UIV_progress:-nenhuma ação ainda}}" "$UI_C_DIM"
+}
+
+ui_diagnostic_summary() {
+  local w="$1" compact="$2" text
+  if [ "$UIV_env_abort" = 1 ]; then
+    text='AMBIENTE INDISPONÍVEL: sem veredito sobre o código'
+  elif [ -n "$UIV_last_error" ]; then
+    text="ÚLTIMA FALHA / ${UIV_failure_gate:-gate não informado}"
+    [ "$UIV_failure_cycle" -gt 0 ] && text+=" · ciclo $UIV_failure_cycle"
+  else
+    text='SEM FALHA REGISTRADA NESTA FASE'
+  fi
+  ui_line "$w" "$text" "$UI_C_RUN"
+  ui_line "$w" "${UIV_last_error:-${UIV_activity:-aguardando execução}}"
+  [ "$compact" = 1 ] && return 0
+  ui_gates_box "$w"
+  ui_line "$w" "Suite: $(ui_scope_words) · ${UIV_test_scope_why:-escopo ainda não resolvido}" "$UI_C_DIM"
+  ui_line "$w" "Comando: ${UIV_test_scope_cmd:-$UI_G_NONE}" "$UI_C_DIM"
+  ui_line "$w" "Conserto: $UIV_repair_round/$UIV_max_repairs ($UIV_repair) · Resgate: $UIV_rescue_round/$UIV_max_rescues ($UIV_rescue)"
+}
+
+# O historico e um indice privado dos mesmos eventos publicados em JSONL.
+# O leitor nao precisa de jq/python e nao grava no contrato publico.
+ui_event_lines() {
+  local w="$1" count="$2" ts event detail
+  while IFS=$'\t' read -r ts event detail; do
+    case "$event" in
+      gate_start) event='Gate iniciado' ;; gate_end) event='Gate encerrado' ;;
+      phase_start) event='Fase iniciada' ;; phase_done) event='Fase concluída' ;;
+      phase_failed) event='Fase interrompida' ;; run_start) event='Run iniciado' ;;
+      run_done) event='Run encerrado' ;; repair_start) event='Conserto iniciado' ;;
+      repair_end) event='Conserto encerrado' ;; rescue_start) event='Resgate iniciado' ;;
+      rescue_end) event='Resgate encerrado' ;;
+    esac
+    ui_line "$w" "$ts $event · $detail" "$UI_C_DIM"
+  done < <(tail -n "$count" "$UI_DIR/events.tsv" 2>/dev/null || true)
+}
+
+ui_diagnostic_log() {
+  local w="$1" budget="$2" log="${UIV_failure_log:-${UIV_test_log:-${UIV_stdout_log:-}}}" text total start
+  local -a rows=()
+  # Somente logs locais publicados pelo produtor. Nunca interpreta comando.
+  if [[ "$log" == "$LOG_DIR/"* ]] && [[ "$log" != *'/../'* ]] && [ -f "$log" ]; then
+    mapfile -t rows < <(tail -c 16384 -- "$log" 2>/dev/null | tail -n 80)
+  fi
+  total=${#rows[@]}
+  start=$((total - budget))
+  [ "$UI_SCROLL" -ge 0 ] && start=$UI_SCROLL
+  start="$(ui_scroll_fit "$start" "$total" "$budget")"
+  printf '%s|%s|%s|0\n' "$start" "$total" "$budget" > "$UI_VIEWPORT" 2>/dev/null || true
+  ui_line "$w" "LOG DA ÚLTIMA FALHA / SESSÃO: ${log:-indisponível}" "$UI_C_LABEL"
+  if [ "$total" -eq 0 ]; then
+    ui_line "$w" 'Sem saída disponível; aguardando publicação.' "$UI_C_DIM"
+  else
+    local i
+    for ((i=start; i<start+budget && i<total; i++)); do
+      text="${rows[$i]}"
+      ui_line "$w" "$text" "$UI_C_DIM"
+    done
+  fi
+}
+
+# Altura medida, nao estimada: reserva rodape e uma linha contra scroll do
+# terminal. O modo compacto preserva fase, atividade, conteudo e atalhos.
 ui_frame() {
-  local tick="${1:-0}"
-  local w h spin
+  local tick="${1:-0}" w h spin name compact=0 rich=0 prefix suffix line budget
   w=$(ui_term_cols); h=$(ui_term_lines)
   spin="${UI_SPINNER:$((tick % 8)):1}"
   ui_load_state
+  [ "$h" -lt 24 ] && compact=1
+  [ "$h" -ge 34 ] && rich=1
+  case "$UI_LAYOUT" in focus) name='FOCO' ;; diagnostic) name='DIAGNÓSTICO' ;; *) name='COCKPIT' ;; esac
+  prefix="$(
+    ui_layout_header "$w" "$name"
+    case "$UI_LAYOUT" in
+      focus)
+        if [ "$compact" = 0 ]; then
+          ui_current_box "$w" 'TAREFA EM ANDAMENTO'
+          ui_line "$w" '~ inferido · Declarada = sessão · Concluída = fase/gate' "$UI_C_DIM"
+        fi
+        ;;
+      diagnostic) ui_diagnostic_summary "$w" "$compact" ;;
+      *)
+        ui_cockpit_summary "$w" "$rich"
+        if [ "$rich" = 1 ]; then ui_cockpit_boxes "$w"
+        elif [ "$compact" = 0 ]; then ui_live_compact "$w"; fi
+        ;;
+    esac
+  )"
+  suffix="$(
+    if [ "$UI_LAYOUT" = focus ] && [ "$compact" = 0 ]; then
+      ui_line "$w" 'SESSÃO > TESTES > VERIFICAÇÃO > COMMIT' "$UI_C_LABEL"
+      ui_line "$w" 'Os gates decidem o avanço; etapas puladas não são aprovações.' "$UI_C_DIM"
+    fi
+    if [ "$rich" = 1 ]; then
+      ui_line "$w" 'ÚLTIMOS EVENTOS' "$UI_C_LABEL"
+      ui_event_lines "$w" 2
+    fi
+    if [ "$UIV_limit_waiting" = 1 ]; then
+      local left=$((UIV_limit_until - $(date +%s)))
+      [ "$left" -lt 0 ] && left=0
+      ui_line "$w" "Limite: retoma automaticamente em $(format_duration "$left")" "$UI_C_RUN"
+    fi
+    ui_layout_tabs "$w"
+  )"
+  local pn=0 sn=0
+  while IFS= read -r line; do pn=$((pn+1)); done <<< "$prefix"
+  while IFS= read -r line; do sn=$((sn+1)); done <<< "$suffix"
+  budget=$((h - 1 - pn - sn))
+  printf '%s\n' "$prefix"
+  if [ "$UI_LAYOUT" = diagnostic ]; then
+    ui_diagnostic_log "$w" "$((budget > 1 ? budget - 1 : 1))"
+  elif [ "$budget" -ge 6 ]; then
+    ui_sec_table "$w" "$((budget - 5))" "$spin"
+  else
+    # Terminal curto: preserva uma tarefa navegavel sem a moldura da tabela.
+    ui_compact_tasks "$w" "$budget"
+  fi
+  printf '%s\n' "$suffix"
+}
 
-  local header_h=4 panels_h=6 live_h=7 msgs_h=2 table_chrome=5
-  [ "$w" -lt 100 ] && panels_h=12
-  local budget=$((h - header_h - panels_h - live_h - msgs_h - table_chrome))
-  [ "$budget" -lt 3 ] && budget=3
-
-  ui_sec_header "$w"
-  ui_sec_panels "$w"
-  ui_sec_table "$w" "$budget" "$spin"
-  ui_sec_live "$w"
-  ui_sec_messages "$w" "$msgs_h"
+ui_compact_tasks() {
+  local w="$1" budget="$2" num idx status label start total i
+  local -a rows=()
+  while IFS='|' read -r num idx status label; do
+    [ "$num" = "$UIV_phase_num" ] || continue
+    rows+=("T$idx $(ui_status_plain "$status") · $label")
+  done < <(cat "$UI_DIR/tasks.txt" 2>/dev/null || true)
+  total=${#rows[@]}; start=$UI_SCROLL
+  start="$(ui_scroll_fit "$start" "$total" "$budget")"
+  printf '%s|%s|%s|0\n' "$start" "$total" "$budget" > "$UI_VIEWPORT" 2>/dev/null || true
+  for ((i=start; i<total && i<start+budget; i++)); do ui_line "$w" "${rows[$i]}"; done
 }
 
 # ui_read_key <timeout> — espera o intervalo do frame E captura uma tecla.
@@ -1930,6 +2249,11 @@ ui_apply_key() {
   local key="$1"
   [ -n "$key" ] || return 0
 
+  case "$key" in
+    1) UI_LAYOUT=cockpit; UI_SCROLL=-1; return 0 ;;
+    2) UI_LAYOUT=focus; UI_SCROLL=-1; return 0 ;;
+    3) UI_LAYOUT=diagnostic; UI_SCROLL=-1; return 0 ;;
+  esac
   local vp start=0 total=0 budget=3
   vp="$(cat "$UI_VIEWPORT" 2> /dev/null || true)"
   if [ -n "$vp" ]; then
@@ -1954,7 +2278,7 @@ ui_apply_key() {
     $'\033[6~' | ' ')              delta=$budget ;;
     g | $'\033[H' | $'\033[1~')    target=0 ;;
     G | $'\033[F' | $'\033[4~')    target=$((total - budget)) ;;
-    a | A)
+    a | A | f | F)
       # Volta para auto: a janela passa a seguir a fase corrente de novo.
       UI_SCROLL=-1
       return 0
@@ -2579,7 +2903,7 @@ validate_input_format() {
   malformed=$(grep -E '^## Phase' "$INPUT_FILE" | grep -vE '^## Phase [0-9]+: ' || true)
   if [ -n "$malformed" ]; then
     fail "Contrato de formato violado: headings '## Phase' fora do formato '## Phase N: <titulo>':"
-    echo "$malformed" | sed 's/^/    /'
+    printf '    %s\n' "${malformed//$'\n'/$'\n    '}"
     fail "Uma fase com heading torto some silenciosamente do run. Corrija antes de gastar tokens."
     exit 1
   fi
@@ -2945,7 +3269,7 @@ split_phases() {
 
       local phase_num="${BASH_REMATCH[1]}"
       local phase_title="${BASH_REMATCH[2]}"
-      phase_title="$(echo "$phase_title" | sed 's/[[:space:]]*$//')"
+      phase_title="${phase_title%"${phase_title##*[![:space:]]}"}"
 
       local slug
       slug=$(printf 'phase-%02d' "$phase_num")
@@ -4627,6 +4951,8 @@ phase_changed_critical() {
 phase_declared_tests() {
   local phase_file="$1"
   [ -n "$phase_file" ] && [ -f "$PHASES_DIR/$phase_file" ] || return 0
+  # Crases delimitam caminhos no Markdown; nao sao substituicao de comando.
+  # shellcheck disable=SC2016
   grep -aoE '`[^`]+`' "$PHASES_DIR/$phase_file" 2> /dev/null \
     | tr -d '`' | grep -aE "$TEST_FILE_RE" | awk 'NF && !seen[$0]++' || true
 }
@@ -4770,10 +5096,12 @@ resolve_gate2_scope() {
 # fim dela e em toda mudanca critica.
 gate2_tests_pass() {
   local test_log="$1"
+  ST_TEST_LOG="$test_log"
 
   gate_start 2
 
   if [ -z "$TEST_CMD" ]; then
+    GATE2_SCOPE=skip; GATE2_SCOPE_CMD=""; GATE2_SCOPE_WHY="comando de teste ausente"
     gate_end 2 skip
     return 0
   fi
@@ -4901,7 +5229,7 @@ gate2_within_baseline() {
   # as falhas herdadas junto ja custou ciclos inteiros com o engine tentando
   # consertar codigo que a fase nunca tocou.
   if [ -n "$novos" ]; then
-    GATE2_DELTA_NOTE=" Falhas NOVAS em relacao a HEAD (as demais ja eram vermelhas antes do run e NAO sao desta fase — ignore-as):"$'\n'"$(echo "$novos" | sed 's/^/  - /')"$'\n'"Saida completa:"
+    GATE2_DELTA_NOTE=" Falhas NOVAS em relacao a HEAD (as demais ja eram vermelhas antes do run e NAO sao desta fase — ignore-as):"$'\n'"  - ${novos//$'\n'/$'\n  - '}"$'\n'"Saida completa:"
   else
     GATE2_DELTA_NOTE=" O total de falhas subiu de $BASELINE_COUNT para $count sem suite nova vermelha: um teste novo quebrou dentro de uma suite que ja estava na linha de base. Saida:"
   fi
@@ -5041,12 +5369,14 @@ sync_input_checkboxes() {
   local phase_num="$1"
   [ -n "$INPUT_FILE" ] && [ -f "$INPUT_FILE" ] || return 0
   local tmp="$INPUT_FILE.ralph.$$"
-  awk -v want="$phase_num" '
+  if ! awk -v want="$phase_num" '
     /^## Phase [0-9]+: / { split($0, h, /[ :]+/); inside = (h[3] + 0 == want + 0); print; next }
     /^## / { inside = 0 }
     inside && /^[[:space:]]*- \[ \]/ { sub(/- \[ \]/, "- [x]") }
     { print }
-  ' "$INPUT_FILE" > "$tmp" && mv -f "$tmp" "$INPUT_FILE" || rm -f "$tmp"
+  ' "$INPUT_FILE" > "$tmp" || ! mv -f "$tmp" "$INPUT_FILE"; then
+    rm -f "$tmp"
+  fi
 }
 
 gate3_independent_verify() {
@@ -5245,7 +5575,7 @@ gate3_independent_verify() {
   local vfile="$UI_DIR/verdicts-${ST_PHASE_NUM}.txt"
   if [ "$remapped_labels" -eq 0 ]; then
     local vtmp="$vfile.tmp.$$"
-    {
+    if ! {
       # Verificacao escopada julga so um recorte: reescrever o arquivo inteiro
       # apagaria o veredito das tasks que continuam validas e o painel as
       # mostraria como pendentes. Preserva o que esta fora do escopo.
@@ -5256,7 +5586,9 @@ gate3_independent_verify() {
       fi
       printf '%s\n' "$indices"    | awk 'NF { print $1 "|DONE" }'
       printf '%s\n' "$task_lines" | sed -nE 's/^TASK[[:space:]]+([0-9]+)[[:space:]]*:.*INCOMPLETE.*/\1|INCOMPLETE/p'
-    } > "$vtmp" 2> /dev/null && mv -f "$vtmp" "$vfile" 2> /dev/null || rm -f "$vtmp" 2> /dev/null
+    } > "$vtmp" 2> /dev/null || ! mv -f "$vtmp" "$vfile" 2> /dev/null; then
+      rm -f "$vtmp" 2> /dev/null
+    fi
   else
     rm -f "$vfile" 2> /dev/null || true
   fi
@@ -5531,6 +5863,9 @@ run_phase() {
   LIMIT_WAITS=0
   GATE_CAUSE=""
   ST_LAST_ERROR=""
+  ST_FAILURE_GATE=""; ST_FAILURE_CYCLE=0; ST_FAILURE_LOG=""; ST_TEST_LOG=""
+  GATE2_SCOPE=""; GATE2_SCOPE_CMD=""; GATE2_SCOPE_WHY=""
+  ST_GATE0=pending; ST_GATE1=pending; ST_GATE2=pending; ST_GATE3=pending
   # Memoria do gate 2 e abortos sao POR FASE: a fase seguinte parte de outra
   # arvore e nao pode herdar veredito nem desistencia da anterior.
   GATE2_LAST_SIG=""
@@ -5695,6 +6030,8 @@ run_phase() {
     if [ "$gate0_ok" -eq 0 ]; then
       LAST_GATE="gate 0 — engine nao concluiu"
       ST_LAST_ERROR="$(gate_cause_summary)"
+      ST_FAILURE_GATE=gate0; ST_FAILURE_CYCLE="$ST_CYCLE"; ST_FAILURE_LOG="$log_file"
+      state_sync
       # Engine morto nao tem erro de codigo para apontar: nada a reparar.
       fail "Gate 0 vermelho"
     else
@@ -5735,6 +6072,10 @@ run_phase() {
 
         GATE_CAUSE="${no_change_note}${GATE_CAUSE}"
         ST_LAST_ERROR="$(gate_cause_summary)"
+        ST_FAILURE_GATE="$failed_gate"; ST_FAILURE_CYCLE="$ST_CYCLE"
+        if [ "$failed_gate" = gate2 ]; then ST_FAILURE_LOG="$test_log"
+        else ST_FAILURE_LOG="$LOG_DIR/${phase_file%.md}.verify-${cycle_label}${GATE_TAG}.log"; fi
+        state_sync
 
         # Ambiente fora do ar nao e vermelho da fase: nao gasta ciclo, nao gasta
         # conserto cirurgico e nao condena o codigo ja escrito. O gate 2 ja
@@ -6127,7 +6468,9 @@ main() {
 
   local run_summary
   run_summary="Run encerrado em $(format_duration "$total_duration"): ${#completed_phases[@]} completa(s), ${#failed_phases[@]} falharam, ${#skipped_phases[@]} pulada(s)."
-  if [ ${#failed_phases[@]} -gt 0 ]; then
+  if [ "$ENV_ABORT" -eq 1 ]; then
+    run_summary="Run interrompido pelo ambiente em $(format_duration "$total_duration"): ${#completed_phases[@]} completa(s), 1 fase interrompida sem veredito sobre o codigo, ${#skipped_phases[@]} pulada(s). Restabeleca os servicos e retome o Ralph."
+  elif [ ${#failed_phases[@]} -gt 0 ]; then
     run_summary="$run_summary Falharam: $(printf '%s; ' "${failed_phases[@]}")"
   fi
   notify_and_record run_done "$run_summary"
