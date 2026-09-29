@@ -94,7 +94,7 @@ Antes de implementar, leia:
 1. `.spec/features/ralph-painel-fiel-artefatos/SPEC.md` — requisitos RIGID que esta fase cobre
 2. `.spec/features/ralph-painel-fiel-artefatos/PLAN.md` — decomposição completa, dependências e riscos
 
-- [ ] T01 — `ralph-watch.sh` = mesmo painel do run (PLAN: T09)
+- [x] T01 — `ralph-watch.sh` = mesmo painel do run (PLAN: T09)
       Arquivos: `scripts/ralph.sh`, `scripts/ralph-watch.sh`, `scripts/test-ralph.sh`
       Mudança: última linha do `ralph.sh` vira `[ "${RALPH_LIB_ONLY:-0}" = "1" ] || main`; bloco de medição do pintor extraído para `ui_measure_live`; `ralph-watch.sh` resolve `ralph.sh` (`RALPH_BIN` ou irmão; ausente → erro e exit 1), faz `cd` no repo, no modo ao vivo faz `exec bash ralph.sh --attach`, no `--once` carrega o lib com `RALPH_LIB_ONLY=1` (com `$@` limpo), usa `RALPH_WATCH_COLS/LINES`, chama `ui_frame` uma vez sem escrever em `.phases/`; `--no-color` remove ANSI; sai o contrato `run.tsv`/`live.tsv` e a menção a `--dashboard`.
       Cobre: RF-09, RNF-05, RF-03

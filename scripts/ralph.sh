@@ -3097,6 +3097,58 @@ ui_start() {
   UI_PAINTER_PID=$!
 }
 
+# ui_measure_live — medicoes vivas de um tick do pintor: ultima acao do
+# engine, contagem de acoes, arvore suja e republicacao de tasks/inferencia.
+# Roda no corpo do laco (nao dentro de ui_frame, que e subshell); usa as
+# locais `last_heavy`, `now_ts`, `sl` e `ol` de quem chama (escopo dinamico)
+# para que a taxa entre ticks persista.
+ui_measure_live() {
+  sl=""; ol=""
+  if [ -f "$UI_DIR/state.env" ]; then
+    sl="$(sed -n 's/^stderr_log=//p' "$UI_DIR/state.env" | tail -1)"
+    ol="$(sed -n 's/^stdout_log=//p' "$UI_DIR/state.env" | tail -1)"
+  fi
+
+  now_ts=$(date +%s)
+
+  # Ultima acao do engine. Fonte preferida: o NDJSON do stdout, onde cada
+  # ferramenta usada vira um evento assim que acontece. O stderr e fallback
+  # (codex, e claude quando o stream ainda nao produziu tool_use nenhum).
+  UIL_TAIL=""
+  UIL_ACTIONS=0
+  if [ -n "$ol" ] && [ -s "$ol" ]; then
+    UIL_ACTIONS="$(engine_action_count "$ol")"
+    UIL_TAIL="$(engine_last_action "$ol" | cut -c1-200 || true)"
+  fi
+  [ -z "$UIL_TAIL" ] && [ -n "$sl" ] && [ -s "$sl" ] && \
+    UIL_TAIL="$(grep -v '^[[:space:]]*$' "$sl" 2> /dev/null | tail -n 1 | cut -c1-200 || true)"
+
+  # git status varre a arvore inteira: a 2 fps num repo grande isso pesaria.
+  # A cada ~3s e sinal de vida suficiente e custo desprezivel. O corte e por
+  # RELOGIO, nao por contagem de tick: com teclado o tick anda mais rapido
+  # que o frame (a tecla encurta a espera) e `tick % 6` dispararia a
+  # varredura a cada seta apertada.
+  if [ $((now_ts - last_heavy)) -ge 3 ]; then
+    last_heavy=$now_ts
+    local dirty
+    dirty="$(git status --porcelain -uall 2> /dev/null || true)"
+    UIL_DIRTY_N="$(printf '%s' "$dirty" | grep -c . || true)"
+
+    local pnum
+    pnum="$(sed -n 's/^phase_num=//p' "$UI_DIR/state.env" 2> /dev/null | tail -1)"
+
+    # Republicar tasks.txt AQUI, e nao so no state_sync, e o que faz o
+    # checkbox aparecer. Durante a sessao do engine o processo principal
+    # fica bloqueado em run_split e nao sincroniza nada por minutos —
+    # justamente quando as tasks vao sendo marcadas. O pintor le
+    # PROGRESS_FILE e os arquivos de fase do disco, entao nao depende do
+    # estado congelado que herdou no fork.
+    ui_tasks_cache 2> /dev/null || true
+    ui_infer_tasks "${pnum:-0}" "$ol" 2> /dev/null || true
+
+  fi
+}
+
 ui_painter_loop() {
   local tick_interval="$1"
   # Grupo `{ }`, nao subshell `( )`: `{ }` nao forka. O unico fork e o do `&`
@@ -3111,50 +3163,7 @@ ui_painter_loop() {
     # o subshell as herda.
     local last_heavy=0 now_ts sl ol
     while true; do
-      sl=""; ol=""
-      if [ -f "$UI_DIR/state.env" ]; then
-        sl="$(sed -n 's/^stderr_log=//p' "$UI_DIR/state.env" | tail -1)"
-        ol="$(sed -n 's/^stdout_log=//p' "$UI_DIR/state.env" | tail -1)"
-      fi
-
-      now_ts=$(date +%s)
-
-      # Ultima acao do engine. Fonte preferida: o NDJSON do stdout, onde cada
-      # ferramenta usada vira um evento assim que acontece. O stderr e fallback
-      # (codex, e claude quando o stream ainda nao produziu tool_use nenhum).
-      UIL_TAIL=""
-      UIL_ACTIONS=0
-      if [ -n "$ol" ] && [ -s "$ol" ]; then
-        UIL_ACTIONS="$(engine_action_count "$ol")"
-        UIL_TAIL="$(engine_last_action "$ol" | cut -c1-200 || true)"
-      fi
-      [ -z "$UIL_TAIL" ] && [ -n "$sl" ] && [ -s "$sl" ] && \
-        UIL_TAIL="$(grep -v '^[[:space:]]*$' "$sl" 2> /dev/null | tail -n 1 | cut -c1-200 || true)"
-
-      # git status varre a arvore inteira: a 2 fps num repo grande isso pesaria.
-      # A cada ~3s e sinal de vida suficiente e custo desprezivel. O corte e por
-      # RELOGIO, nao por contagem de tick: com teclado o tick anda mais rapido
-      # que o frame (a tecla encurta a espera) e `tick % 6` dispararia a
-      # varredura a cada seta apertada.
-      if [ $((now_ts - last_heavy)) -ge 3 ]; then
-        last_heavy=$now_ts
-        local dirty
-        dirty="$(git status --porcelain -uall 2> /dev/null || true)"
-        UIL_DIRTY_N="$(printf '%s' "$dirty" | grep -c . || true)"
-
-        local pnum
-        pnum="$(sed -n 's/^phase_num=//p' "$UI_DIR/state.env" 2> /dev/null | tail -1)"
-
-        # Republicar tasks.txt AQUI, e nao so no state_sync, e o que faz o
-        # checkbox aparecer. Durante a sessao do engine o processo principal
-        # fica bloqueado em run_split e nao sincroniza nada por minutos —
-        # justamente quando as tasks vao sendo marcadas. O pintor le
-        # PROGRESS_FILE e os arquivos de fase do disco, entao nao depende do
-        # estado congelado que herdou no fork.
-        ui_tasks_cache 2> /dev/null || true
-        ui_infer_tasks "${pnum:-0}" "$ol" 2> /dev/null || true
-
-      fi
+      ui_measure_live
 
       # Falha ao desenhar nao pode matar o pintor nem o run: o painel e
       # apresentacao, o veredito vive no state e nos logs.
@@ -7319,4 +7328,5 @@ main() {
   [ ${#failed_phases[@]} -eq 0 ] || exit 1
 }
 
-main
+# RALPH_LIB_ONLY=1 carrega as funcoes sem executar o run (ralph-watch.sh --once).
+[ "${RALPH_LIB_ONLY:-0}" = "1" ] || main

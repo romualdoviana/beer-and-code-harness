@@ -2597,7 +2597,13 @@ if case_enabled interrupt; then
       exec bash "$RALPH" --engine claude --test-cmd "$d/test.sh" --max-cycles 5
   ) > "$d/out.log" 2>&1 &
   rpid=$!
-  sleep 2
+  # Espera a sessao do engine comecar (o mock conta impl_calls antes do sleep
+  # de 5s), nao um tempo fixo: sob carga o preflight passava de 2s e o sinal
+  # chegava antes de qualquer ciclo.
+  for _ in $(seq 1 300); do
+    [ -f "$d/state/impl_calls" ] && break
+    sleep 0.1
+  done
   kill -INT "$rpid" 2> /dev/null || true
   rc=0
   wait "$rpid" || rc=$?
@@ -3995,6 +4001,85 @@ for line in open(sys.argv[1]):
 PY
   then ok "events.jsonl: linhas validas no formato de sempre"
   else bad "events.jsonl: linhas validas no formato de sempre"; fi
+fi
+
+# O watch nao pode ter renderizador proprio nem escrever estado (RF-09, RNF-05).
+if case_enabled watch-parity; then
+  header "watch: --once desenha o mesmo frame do run e nao toca em .phases/"
+  wp="$TMP/watch-parity"
+  mkdir -p "$wp/repo/.phases/ui" "$wp/repo/.phases/logs" "$wp/ref"
+  WATCH="$(dirname "$RALPH")/ralph-watch.sh"
+  sed '$d' "$RALPH" > "$wp/lib.sh"
+  printf 'phase-01.md|1|Setup\nphase-02.md|2|API de pedidos\n' > "$wp/repo/.phases/manifest.txt"
+  printf -- '- [x] T1 — Configurar projeto\n' > "$wp/repo/.phases/phase-01.md"
+  printf -- '- [x] T1 — Criar entidade\n- [ ] T2 — Validar estoque — antes de criar pedido\n' > "$wp/repo/.phases/phase-02.md"
+  cat > "$wp/repo/.phases/ui/state.env" <<'ENV'
+run_status=running
+project=watch-test
+engine=codex
+phase_num=2
+phase_total=2
+phase_title=API de pedidos
+cycle=1
+max_cycles=2
+activity=corrigindo a fase
+failure_gate=gate2
+failure_log=.phases/logs/test.log
+failure_name=rejects insufficient stock
+failure_message=Expected [422] but received [201].
+failure_headline=rejects insufficient stock: Expected [422] but received [201].
+task_active=2
+status_word=CORRIGINDO
+status_tone=warn
+phases_done=1
+phases_total=2
+percent=50
+gate0=pass
+gate1=pass
+gate2=fail
+gate3=pending
+task=1	done	Criar entidade	
+task=2	pending	Validar estoque	antes de criar pedido
+ENV
+  printf '1|done|Setup\n2|running|API de pedidos\n' > "$wp/repo/.phases/ui/phases.txt"
+  printf '%s\n' '1|1|done|Configurar projeto' '2|1|done|Criar entidade' \
+    '2|2|pending|Validar estoque — antes de criar pedido' > "$wp/repo/.phases/ui/tasks.txt"
+  printf '14:35:08\tgate_end\tF2 C1 gate=2 verdict=fail duration=3\n' > "$wp/repo/.phases/ui/events.tsv"
+  printf 'FAIL rejects insufficient stock\nExpected [422] but received [201].\n' > "$wp/repo/.phases/logs/test.log"
+  cp -R "$wp/repo" "$wp/refrepo"
+
+  # Referencia: o ui_frame do proprio ralph, numa copia do fixture (o frame do
+  # run grava hitmap/viewport, e isso nao pode sujar o checksum do watch).
+  cat > "$wp/ref.sh" <<'REF'
+lib="$1"; out="$2"; set --
+source "$lib" > /dev/null 2>&1
+set +eu
+ui_term_cols() { echo 144; }
+ui_term_lines() { echo 40; }
+for layout in cockpit focus diagnostic; do
+  UI_LAYOUT="$layout"
+  ui_frame 0 2> /dev/null | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' > "$out/$layout.txt"
+done
+REF
+  (cd "$wp/refrepo" && bash "$wp/ref.sh" "$wp/lib.sh" "$wp/ref") 2> /dev/null
+
+  sum_before="$(cd "$wp/repo" && find .phases -type f -exec md5sum {} + | sort)"
+  for layout in cockpit focus diagnostic; do
+    RALPH_UI_LAYOUT="$layout" RALPH_WATCH_COLS=144 RALPH_WATCH_LINES=40 \
+      bash "$WATCH" --once --no-color "$wp/repo" > "$wp/$layout.txt" 2> "$wp/$layout.err"
+    if [ -s "$wp/ref/$layout.txt" ] && cmp -s "$wp/ref/$layout.txt" "$wp/$layout.txt"; then
+      ok "watch --once ($layout 144x40) = ui_frame do run"
+    else
+      bad "watch --once ($layout 144x40) = ui_frame do run"
+      diff "$wp/ref/$layout.txt" "$wp/$layout.txt" 2> /dev/null | head -5 || true
+    fi
+    if grep -q $'\033' "$wp/$layout.txt"; then bad "watch --once --no-color ($layout) sem ANSI"
+    else ok "watch --once --no-color ($layout) sem ANSI"; fi
+  done
+  sum_after="$(cd "$wp/repo" && find .phases -type f -exec md5sum {} + | sort)"
+  assert_eq "$sum_before" "$sum_after" "watch --once nao cria nem altera nada em .phases/"
+  assert_not_contains "$WATCH" "run.tsv" "watch sem o contrato run.tsv/live.tsv"
+  assert_not_contains "$WATCH" "--dashboard" "watch sem mencao a --dashboard"
 fi
 
 # ---------------------------------------------------------------------------
