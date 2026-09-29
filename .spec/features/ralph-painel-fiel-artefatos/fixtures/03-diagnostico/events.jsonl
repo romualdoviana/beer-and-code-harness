@@ -1,0 +1,9 @@
+{"ts": 1790000000, "event": "run_start", "phase": 0, "cycle": 0, "message": "Run iniciado"}
+{"ts": 1790000420, "event": "phase_done", "phase": 2, "cycle": 1, "message": "Fase 2 concluida"}
+{"ts": 1790000473, "event": "phase_start", "phase": 3, "cycle": 1, "title": "API de pedidos", "seq": 3, "total": 6}
+{"ts": 1790000604, "event": "gate_start", "phase": 3, "cycle": 1, "gate": 1}
+{"ts": 1790000605, "event": "gate_end", "phase": 3, "cycle": 1, "gate": 1, "verdict": "pass", "duration": 1}
+{"ts": 1790001040, "event": "gate_end", "phase": 3, "cycle": 1, "gate": 0, "verdict": "pass", "duration": 560}
+{"ts": 1790001046, "event": "gate_end", "phase": 3, "cycle": 1, "gate": 2, "verdict": "fail", "duration": 5}
+{"ts": 1790001048, "event": "gate_end", "phase": 3, "cycle": 1, "gate": 3, "verdict": "skip", "duration": 0}
+{"ts": 1790001050, "event": "gate_start", "phase": 3, "cycle": 2, "gate": 0}

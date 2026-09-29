@@ -324,7 +324,7 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | `RALPH_UI` | Painel: `auto` (default) \| `panel` \| `plain` |
 | `RALPH_UI_LAYOUT` | Tela inicial: `cockpit` (padrão), `focus`, `diagnostic` |
 | `RALPH_UI_FPS` | Repinturas do painel por segundo (default: 2) |
-| `RALPH_UI_KEYS` | Navegação por teclado na tabela do painel: `1` (default) \| `0` desliga |
+| `RALPH_UI_KEYS` | Teclado e mouse no painel (exige `/dev/tty` legível): `1` (default) \| `0` desliga os dois |
 | `RALPH_SERVE_PORT` | Primeira porta tentada pelo `--serve` (default: 7433) |
 
 Durante cada sessão, o ralph exporta `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, `RALPH_PHASE_MAX_ATTEMPTS` `RALPH_PHASE_REPAIR` (round de conserto; `0` = nenhum) e `RALPH_PHASE_RESCUE` (round de resgate; `0` = nenhum).
@@ -334,54 +334,64 @@ Durante cada sessão, o ralph exporta `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PH
 Run é coisa de olhar, não de ler. O ralph desenha um painel de tela cheia enquanto o run acontece:
 
 ```text
-RALPH / COCKPIT · beer-and-code · codex
-EM EXECUÇÃO · 18m 42s · Ciclo 1/2
-Etapa: implementando a fase · Fase 3/6
-PROGRESSO  Fases 2/6 · Tasks 7/20 concluídas
-JORNADA  ✓ F2 Dados   > F3 API   · F4 Interface
-┌──────── TRABALHO ATUAL ────────┐  ┌──── VALIDAÇÃO DA FASE ────┐
-│ Fase 3 · API de pedidos        │  │ G0 Sessão     aguardando │
-│ Task ativa (~): Validar estoque│  │ G1 Código     aguardando │
-│ AO VIVO: Edit OrderService.php │  │ G2 Testes     aguardando │
-│ Ações do engine: 18            │  │ G3 Verificação aguardando│
-└───────────────────────────────┘  └───────────────────────────┘
-... fases e tarefas ...
-1 Cockpit | 2 Foco | 3 Diagnóstico · ^v rolar · f/a seguir
+RALPH   beer-and-code                                  CODEX      ● IMPLEMENTANDO
+─────────────────────────────────────────────────────────────────────────────────
+TEMPO TOTAL        FASES CONCLUÍDAS       CICLO ATUAL          PROGRESSO / FASES
+18m 42s            02 / 06                01 / 05              33%
+▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+✓ 01 Setup     ✓ 02 Dados     ▶ 03 API     · 04 UI     · 05 Integração     · 06 Final
+  EM ANDAMENTO / FASE 03                        VALIDAÇÃO DA FASE
+  API de pedidos                                G0 Sessão       aguardando
+  ▶ Tarefa 3: Validar estoque                   G1 Código       alteração detectada
+  2 verificadas / 1 ativa / 2 pendentes         G2 Testes       aguardando
+  › Editando OrderService.php                   G3 Verificação  aguardando
+ÚLTIMOS EVENTOS
+14:32:08    Fase 02 concluída e commit registrado
+─────────────────────────────────────────────────────────────────────────────────
+ 1 Visão geral      2 Foco      3 Diagnóstico                 f Seguir    q Sair
 ```
 
-O painel roda no **buffer alternado** do terminal (como `vim` ou `less`): ocupa a tela inteira durante o run e, ao sair, devolve o terminal com o scrollback anterior intacto. É o que permite layout de altura variável — a tabela cresce com o número de fases e tasks do documento.
+O painel roda no **buffer alternado** do terminal (como `vim` ou `less`): ocupa a tela inteira durante o run e, ao sair, devolve o terminal com o scrollback anterior intacto. É o que permite um layout que se adapta ao tamanho do terminal.
 
-As teclas **1 / 2 / 3** alternam entre três telas sem interromper a execução:
+As teclas **1 / 2 / 3** (ou o clique na aba) alternam entre três telas sem interromper a execução:
 
 | Tela | Conteúdo |
 |---|---|
-| **1 · Cockpit** (padrão) | Progresso, jornada de fases, atividade, gates e tabela navegável |
-| **2 · Foco** | Tarefa ativa inferida, ações do engine e somente as tarefas da fase atual |
-| **3 · Diagnóstico** | Última causa e ciclo da falha, gates atuais, escopo/comando dos testes, consertos, resgates e trecho do log |
+| **1 · Visão geral** (padrão) | Cabeçalho, quatro métricas, barra segmentada, jornada de fases, caixas da tarefa em andamento e da validação da fase, últimos eventos |
+| **2 · Foco** | Fase e tarefa correntes (ou clicadas) com subtítulo e ação ao vivo, confirmação independente, tarefas da fase, pipeline e próximo passo |
+| **3 · Diagnóstico** | Banner do gate que falhou com manchete e escopo do teste, tentativa anterior, correção atual, linha do tempo e saída do teste — ou a faixa verde `● Nenhum gate falhou` quando nenhum gate falhou |
 
-Escolha a tela inicial com `--ui-layout cockpit|focus|diagnostic` ou `RALPH_UI_LAYOUT`. Também funciona em `--attach`, inclusive para acompanhar um run que já estava aberto:
+Escolha a tela inicial com `--ui-layout cockpit|focus|diagnostic` ou `RALPH_UI_LAYOUT` (`cockpit` segue como nome da Visão geral). Também funciona em `--attach`, inclusive para acompanhar um run que já estava aberto:
 
 ```bash
 ./ralph.sh --attach --ui-layout diagnostic
 ```
 
-A composição respeita largura e altura: quadros lado a lado a partir de 100 colunas, detalhes adicionais a partir de 34 linhas e modo compacto abaixo de 24 linhas. O rodapé sempre mantém as teclas de troca de tela. No diagnóstico, a rolagem percorre as últimas 80 linhas do log (limitadas a 16 KiB); `f` acompanha o fim. Sem o cache novo em um run antigo, os dados adicionais aparecem como indisponíveis.
+A composição segue o tamanho do terminal: em 144×40 as caixas ficam lado a lado e todas as regiões aparecem; entre 100×24 e 144×40 as caixas empilham e, quando falta altura, as regiões caem numa ordem fixa — primeiro `ÚLTIMOS EVENTOS` (Visão geral), depois `LINHA DO TEMPO` e `SAÍDA DO TESTE` (Diagnóstico). Abaixo de 100×24 o painel mostra só o aviso `aumente para 100×24`; o run segue normalmente. Campo sem valor aparece como `—` na mesma posição.
 
 `Declarada` significa que a sessão marcou a task; não é confirmação independente. A inferência `~` nunca sobrescreve um veredito. Gates pulados continuam distintos de aprovados, G1 é um sinal de alteração e fases anteriores sem histórico publicado não recebem gates verdes inventados. Interrupção por ambiente tem indicação própria.
 
-Quando a tabela não cabe na tela, dá para **andar pelas linhas** sem parar o run:
+Teclado e mouse funcionam sem parar o run:
 
-| Tecla | Ação |
+| Tecla / clique | Ação |
 | --- | --- |
-| `1` / `2` / `3` | Cockpit / Foco / Diagnóstico |
-| `↑` / `↓`, `k` / `j` | Uma linha para cima / para baixo |
+| `1` / `2` / `3`, clique na aba | Visão geral / Foco / Diagnóstico |
+| `↑` / `↓`, `k` / `j`, roda do mouse sobre uma lista | Uma linha para cima / para baixo |
 | `PgUp` / `PgDn`, espaço | Uma tela para cima / para baixo |
 | `g` / `Home`, `G` / `End` | Primeira / última linha |
-| `a` / `f` | Volta ao modo automático (a janela segue a fase corrente) |
+| clique numa fase da jornada ou numa tarefa | Abre o Foco com aquela fase/tarefa selecionada (o seguir fica suspenso) |
+| `a` / `f`, clique em `f Seguir` | Volta ao modo automático: segue a fase e a tarefa correntes, desfazendo seleção e rolagem manual |
+| `q`, clique em `q Sair` | Fecha **só o painel** (ver abaixo) |
 
-O rodapé da tabela mostra a faixa visível e o modo atual (`↑↓ rolar` = automático, `manual` = topo fixado por você). A leitura de tecla **não bloqueia nada**: ela substitui a espera entre repinturas, então o run segue nos gates independente do que for digitado — a invariante "zero perguntas" continua de pé. Sem `/dev/tty` legível, ou com `RALPH_UI_KEYS=0`, o painel volta ao comportamento anterior (janela sempre automática).
+O mouse segue o mesmo interruptor do teclado: só liga com `RALPH_UI_KEYS=1` (padrão) e `/dev/tty` legível. Sem TTY, com `RALPH_UI_KEYS=0` ou com `/dev/tty` ilegível, nenhuma sequência de relato de mouse é emitida e o painel volta ao comportamento anterior. **Com o relato de mouse ligado, copiar texto do terminal exige Shift+arrastar** — arrastar sem Shift chega ao painel como clique.
 
-Uma sessão do engine dura minutos e a CLI pode não emitir nada legível nesse tempo. A seção **AO VIVO** existe para responder a uma pergunta só: *está travado ou trabalhando?* Tudo nela é medido **pelo processo que pinta a tela**, não publicado pelo orquestrador — durante `run_split` o processo principal está bloqueado esperando o engine e não teria como republicar nada:
+A leitura de tecla ou clique **não bloqueia nada**: ela substitui a espera entre repinturas, então o run segue nos gates independente do que for digitado — a invariante "zero perguntas" continua de pé. Sequência de mouse truncada ou desconhecida é ignorada.
+
+`q` / `q Sair` no run ao vivo fecha o painel e restaura o terminal (mouse desligado, cursor visível, tela principal, `stty` como antes). **O run continua** no placar em linha corrida até o fim, com o mesmo exit code, os mesmos vereditos e os mesmos commits de um run em que ninguém apertou `q`. Reabra o painel de qualquer terminal com `./ralph.sh --attach`. No `--attach` e no `ralph-watch.sh`, `q` sai do visualizador sem tocar no run.
+
+`./ralph-watch.sh [repo]` delega ao `ralph.sh`: o modo ao vivo vira `ralph.sh --attach` (mesmas telas, teclas, mouse e `q`), e `--once` desenha um único frame com o mesmo renderizador do run, sem escrever nada em `.phases/`.
+
+Uma sessão do engine dura minutos e a CLI pode não emitir nada legível nesse tempo. A linha viva `›` da caixa EM ANDAMENTO (junto com a linha de etapa) existe para responder a uma pergunta só: *está travado ou trabalhando?* Tudo nela é medido **pelo processo que pinta a tela**, não publicado pelo orquestrador — durante `run_split` o processo principal está bloqueado esperando o engine e não teria como republicar nada:
 
 | Sinal | Fonte | Por que muda sozinho |
 |---|---|---|
@@ -409,7 +419,7 @@ Marcas de status: `✓ Concluída`, `▶ Em execução`, `! Incompleta`, `✗ Fa
 
 `RALPH_UI=auto` (o default) desenha o painel **só** quando stdout é um TTY. Sob `nohup`, em CI ou através de pipe a saída é o placar em linha corrida, byte a byte igual à de um ralph sem painel — essa compatibilidade é asserção da suite. `--verbose` sempre ganha: os dois streams do engine precisam do terminal. Com o painel ativo o placar é desviado para `.phases/ui/messages.log`, aparece no rodapé e é **reimpresso por inteiro na tela normal** quando o painel sai — sem isso ele existiria só no arquivo. Saída longa (causa de gate vermelho, relatório final) vem sempre depois de desmontar o painel. **Falha ao desenhar degrada para o placar: o painel nunca altera veredito de gate nem exit code.**
 
-O `--serve` adicionalmente escreve um `.phases/ui/index.html` auto-contido (sem CDN, sem fonte remota, sem fetch externo) e sobe `python3 -m http.server` preso a `127.0.0.1`, na primeira porta livre a partir de 7433. A URL sai uma vez no topo; o navegador **não** é aberto. A página mostra a fase corrente, o veredito de cada gate, a lista de fases e uma timeline com duração por gate. O trap de saída mata o servidor; o estado fica em disco para inspeção depois. Sem `python3` no `PATH` → aviso alto e o run segue só com o painel.
+O `--serve` adicionalmente escreve um `.phases/ui/index.html` auto-contido (sem CDN, sem fonte remota, sem fetch externo — a DejaVu Sans Mono vai embutida na página) e sobe `python3 -m http.server` preso a `127.0.0.1`, na primeira porta livre a partir de 7433. A página é reescrita no início de cada run, então um dashboard antigo nunca é servido. A URL sai uma vez no topo; o navegador **não** é aberto. A página mostra as mesmas três abas do terminal (1 Visão geral, 2 Foco, 3 Diagnóstico) com os mesmos valores, lidos só de `../state.json` e `../events.jsonl` a cada 1,5 s; abas, `f Seguir`, fases e tarefas são clicáveis e trocam na hora, e não existe `Sair` no navegador. O trap de saída mata o servidor; o estado fica em disco para inspeção depois. Sem `python3` no `PATH` → aviso alto e o run segue só com o painel.
 
 ### Estado estruturado
 

@@ -1609,6 +1609,11 @@ if case_enabled serve; then
 
   if command -v python3 > /dev/null 2>&1; then
     d2=$(new_case serve-up)
+    # HTML de um run anterior no disco (RF-13): o servido tem que ser o deste
+    # run. Ignorado pelo git para nao sujar a arvore que o preflight exige limpa.
+    mkdir -p "$d2/repo/.phases/ui"
+    echo '.phases/' >> "$d2/repo/.git/info/exclude"
+    echo '<html>DASHBOARD-DE-RUN-ANTERIOR</html>' > "$d2/repo/.phases/ui/index.html"
     rc=$(run_ralph "$d2" ok --engine codex --serve --test-cmd "$d2/test.sh")
     assert_eq 0 "$rc" "com python3: exit 0 (o dashboard nunca muda o veredito)"
     assert_contains "$d2/out.log" "Dashboard web: http://127.0.0.1:" "URL impressa no topo"
@@ -1620,6 +1625,19 @@ if case_enabled serve; then
     fi
     # Auto-contido: uma referencia externa quebra a pagina em maquina sem rede.
     assert_not_contains "$d2/repo/.phases/ui/index.html" "https://" "html sem referencia externa"
+
+    html="$d2/repo/.phases/ui/index.html"
+    assert_not_contains "$html" "DASHBOARD-DE-RUN-ANTERIOR" "html de run anterior substituido"
+    assert_contains "$html" 'data-region="journey"' "html e o dashboard das tres abas"
+    # Fonte e dado embutido (data:); qualquer outra URL e origem externa.
+    ext="$(grep -oE 'https?://[^"'"'"' )<>]*' "$html" | grep -vE '^http://127\.0\.0\.1([:/]|$)' | sort -u | head -3)"
+    assert_eq "" "$ext" "html sem origem fora de 127.0.0.1"
+    assert_not_contains "$html" "@import" "html sem @import"
+    # Base64 da fonte fora da busca: "Sair" pode surgir ali por acaso.
+    sair="$(grep -v 'base64,' "$html" | grep -c 'Sair' || true)"
+    assert_eq 0 "$sair" "html sem acao Sair (o navegador nao encerra nada)"
+    fetches="$(grep -v 'base64,' "$html" | grep -oE "fetch\([^,)]*" | sed -E "s/^fetch\(['\"]?//; s/['\"]$//" | sort -u | tr '\n' ' ')"
+    assert_eq "../events.jsonl ../state.json " "$fetches" "fetch so de ../state.json e ../events.jsonl"
 
     port=$(grep -oE '127\.0\.0\.1:[0-9]+' "$d2/out.log" | head -1 | cut -d: -f2)
     if [ -n "$port" ] && ! (exec 3<> "/dev/tcp/127.0.0.1/$port") 2> /dev/null; then

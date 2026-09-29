@@ -1,0 +1,141 @@
+{
+  "schema": 1,
+  "project": "beer-and-code",
+  "engine": "codex",
+  "input": ".spec/features/api-pedidos/PHASES.md",
+  "test_cmd": "composer test",
+  "started_at": 1790000000,
+  "updated_at": 1790001122,
+  "run_status": "running",
+  "phase": {
+    "num": 3,
+    "seq": 3,
+    "total": 6,
+    "title": "API de pedidos",
+    "status": "running",
+    "cycle": 1,
+    "max_cycles": 5,
+    "started_at": 1790000480
+  },
+  "gates": {
+    "0": "pending",
+    "1": "pass",
+    "2": "pending",
+    "3": "pending"
+  },
+  "repair": {
+    "status": "idle",
+    "round": 0,
+    "max": 2
+  },
+  "rescue": {
+    "status": "idle",
+    "round": 0,
+    "max": 2
+  },
+  "limit": {
+    "waiting": false,
+    "until": 0,
+    "waits": 0,
+    "max_waits": 20
+  },
+  "progress_line": "",
+  "activity": "Edit OrderService.php",
+  "last_error": "",
+  "pid": 4242,
+  "run_id": "fixture",
+  "phases": [
+    {
+      "num": 1,
+      "title": "Setup",
+      "status": "done"
+    },
+    {
+      "num": 2,
+      "title": "Dados",
+      "status": "done"
+    },
+    {
+      "num": 3,
+      "title": "API",
+      "status": "running"
+    },
+    {
+      "num": 4,
+      "title": "UI",
+      "status": "pending"
+    },
+    {
+      "num": 5,
+      "title": "Integração",
+      "status": "pending"
+    },
+    {
+      "num": 6,
+      "title": "Final",
+      "status": "pending"
+    }
+  ],
+  "failure": {
+    "gate": "",
+    "cycle": 0,
+    "headline": "",
+    "name": "",
+    "message": "",
+    "log": ""
+  },
+  "test": {
+    "scope": "",
+    "file": "",
+    "log": ""
+  },
+  "tasks": [
+    {
+      "idx": 1,
+      "title": "Criar entidade",
+      "subtitle": "",
+      "status": "done"
+    },
+    {
+      "idx": 2,
+      "title": "Persistir itens",
+      "subtitle": "",
+      "status": "done"
+    },
+    {
+      "idx": 3,
+      "title": "Validar estoque",
+      "subtitle": "antes de criar pedido",
+      "status": "running"
+    },
+    {
+      "idx": 4,
+      "title": "Expor endpoint",
+      "subtitle": "",
+      "status": "pending"
+    },
+    {
+      "idx": 5,
+      "title": "Tratar erro",
+      "subtitle": "",
+      "status": "pending"
+    }
+  ],
+  "task_active": 3,
+  "correction": {
+    "title": ""
+  },
+  "previous_gates": {
+    "0": "pending",
+    "1": "pending",
+    "2": "pending",
+    "3": "pending"
+  },
+  "display": {
+    "status_word": "IMPLEMENTANDO",
+    "status_tone": "run",
+    "phases_done": 2,
+    "phases_total": 6,
+    "percent": 33
+  }
+}

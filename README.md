@@ -328,7 +328,7 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `RALPH_UI` | Panel: `auto` (default) \| `panel` \| `plain` |
 | `RALPH_UI_LAYOUT` | Initial screen: `cockpit` (default), `focus`, `diagnostic` |
 | `RALPH_UI_FPS` | Panel repaints per second (default: 2) |
-| `RALPH_UI_KEYS` | Keyboard navigation in the panel table: `1` (default) \| `0` disables |
+| `RALPH_UI_KEYS` | Keyboard and mouse in the panel (needs a readable `/dev/tty`): `1` (default) \| `0` disables both |
 | `RALPH_SERVE_PORT` | First port `--serve` tries (default: 7433) |
 
 During each session, ralph exports `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, `RALPH_PHASE_MAX_ATTEMPTS`, `RALPH_PHASE_REPAIR` (repair round; `0` = none), and `RALPH_PHASE_RESCUE` (rescue round; `0` = none).
@@ -338,54 +338,64 @@ During each session, ralph exports `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE
 A run is watched, not read. ralph draws a full-screen panel while the run happens:
 
 ```text
-RALPH / COCKPIT · beer-and-code · codex
-EM EXECUÇÃO · 18m 42s · Ciclo 1/2
-Etapa: implementando a fase · Fase 3/6
-PROGRESSO  Fases 2/6 · Tasks 7/20 concluídas
-JORNADA  ✓ F2 Dados   > F3 API   · F4 Interface
-┌──────── TRABALHO ATUAL ────────┐  ┌──── VALIDAÇÃO DA FASE ────┐
-│ Fase 3 · API de pedidos        │  │ G0 Sessão     aguardando │
-│ Task ativa (~): Validar estoque│  │ G1 Código     aguardando │
-│ AO VIVO: Edit OrderService.php │  │ G2 Testes     aguardando │
-│ Ações do engine: 18            │  │ G3 Verificação aguardando│
-└───────────────────────────────┘  └───────────────────────────┘
-... fases e tarefas ...
-1 Cockpit | 2 Foco | 3 Diagnóstico · ^v rolar · f/a seguir
+RALPH   beer-and-code                                  CODEX      ● IMPLEMENTANDO
+─────────────────────────────────────────────────────────────────────────────────
+TEMPO TOTAL        FASES CONCLUÍDAS       CICLO ATUAL          PROGRESSO / FASES
+18m 42s            02 / 06                01 / 05              33%
+▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+✓ 01 Setup     ✓ 02 Dados     ▶ 03 API     · 04 UI     · 05 Integração     · 06 Final
+  EM ANDAMENTO / FASE 03                        VALIDAÇÃO DA FASE
+  API de pedidos                                G0 Sessão       aguardando
+  ▶ Tarefa 3: Validar estoque                   G1 Código       alteração detectada
+  2 verificadas / 1 ativa / 2 pendentes         G2 Testes       aguardando
+  › Editando OrderService.php                   G3 Verificação  aguardando
+ÚLTIMOS EVENTOS
+14:32:08    Fase 02 concluída e commit registrado
+─────────────────────────────────────────────────────────────────────────────────
+ 1 Visão geral      2 Foco      3 Diagnóstico                 f Seguir    q Sair
 ```
 
-The panel runs in the terminal's **alternate screen buffer** (like `vim` or `less`): it owns the screen during the run and, on exit, gives the terminal back with the previous scrollback intact. That is what allows a variable-height layout — the table grows with the number of phases and tasks in the document.
+The panel runs in the terminal's **alternate screen buffer** (like `vim` or `less`): it owns the screen during the run and, on exit, gives the terminal back with the previous scrollback intact. That is what allows a layout that adapts to the terminal size.
 
-Use **1 / 2 / 3** to switch screens without interrupting execution:
+Use **1 / 2 / 3** (or click the tab) to switch screens without interrupting execution:
 
 | Screen | Content |
 |---|---|
-| **1 · Cockpit** (default) | Progress, phase journey, live activity, gates, and scrollable phase/task table |
-| **2 · Focus** | Inferred active task, engine activity, and only the current phase's tasks |
-| **3 · Diagnostics** | Last failure and its cycle, current gates, test scope/command, repairs, rescues, and log output |
+| **1 · Visão geral** (overview, default) | Header, four metrics, segmented progress bar, phase journey, current task and phase validation boxes, latest events |
+| **2 · Foco** (focus) | Current (or clicked) phase and task with its subtitle and live action, independent confirmation count, the phase's task list, pipeline and next step |
+| **3 · Diagnóstico** (diagnostics) | Failed gate banner with headline and test scope, previous attempt, current correction, timeline and test output — or a green `● Nenhum gate falhou` strip when no gate failed |
 
-Select the initial screen with `--ui-layout cockpit|focus|diagnostic` or `RALPH_UI_LAYOUT`. This also works with `--attach`, including runs already in progress:
+Select the initial screen with `--ui-layout cockpit|focus|diagnostic` or `RALPH_UI_LAYOUT` (`cockpit` is kept as the name of the overview). This also works with `--attach`, including runs already in progress:
 
 ```bash
 ./ralph.sh --attach --ui-layout diagnostic
 ```
 
-The layout respects both dimensions: side-by-side boxes from 100 columns, additional detail from 34 rows, and a compact mode below 24 rows. Screen shortcuts remain visible. Diagnostics scrolls through the latest 80 log lines (bounded to 16 KiB); `f` follows the tail. Older runs without the new cache show unavailable fields explicitly.
+The layout follows the terminal size: at 144×40 the boxes sit side by side and every region shows; between 100×24 and 144×40 the boxes stack and, when height runs out, regions drop in a fixed order — first `ÚLTIMOS EVENTOS` (overview), then `LINHA DO TEMPO` and `SAÍDA DO TESTE` (diagnostics). Below 100×24 the panel shows only the warning `aumente para 100×24`; the run keeps going. An empty field shows `—` in the same position.
 
 `Declarada` means the engine marked a task; it is not independent verification. Inference (`~`) never overrides a verdict. Skipped gates remain distinct from passed gates, G1 is a change signal, and prior phases without published gate history do not receive invented green verdicts. Infrastructure interruptions have their own indication.
 
-When the table does not fit on screen, you can **walk through the rows** without stopping the run:
+Keys and mouse work without stopping the run:
 
-| Key | Action |
+| Key / click | Action |
 | --- | --- |
-| `1` / `2` / `3` | Cockpit / Focus / Diagnostics |
-| `↑` / `↓`, `k` / `j` | One row up / down |
+| `1` / `2` / `3`, click on a tab | Visão geral / Foco / Diagnóstico |
+| `↑` / `↓`, `k` / `j`, mouse wheel over a list | One row up / down |
 | `PgUp` / `PgDn`, space | One screen up / down |
 | `g` / `Home`, `G` / `End` | First / last row |
-| `a` / `f` | Back to automatic mode (the window follows the current phase) |
+| click on a journey phase or on a task | Opens Foco with that phase/task selected (following is suspended) |
+| `a` / `f`, click on `f Seguir` | Back to automatic mode: follow the current phase and active task, dropping manual selection and scroll |
+| `q`, click on `q Sair` | Closes **only the panel** (see below) |
 
-The table footer shows the visible range and the current mode (`↑↓ rolar` = automatic, `manual` = top pinned by you). Reading a key **blocks nothing**: it replaces the wait between repaints, so the run keeps moving through the gates regardless of what is typed — the "zero questions" invariant still holds. With no readable `/dev/tty`, or with `RALPH_UI_KEYS=0`, the panel falls back to the previous behavior (always-automatic window).
+The mouse follows the same switch as the keyboard: it is enabled only with `RALPH_UI_KEYS=1` (default) and a readable `/dev/tty`. With no TTY, with `RALPH_UI_KEYS=0`, or with an unreadable `/dev/tty`, no mouse-reporting sequence is ever emitted and the panel falls back to the previous behavior. **While mouse reporting is on, copying text from the terminal requires Shift+drag** — plain dragging is delivered to the panel as clicks.
 
-An engine session runs for minutes and the CLI may emit nothing readable in that time. The **AO VIVO** section answers one question: *is it stuck or working?* Everything in it is measured **by the process painting the screen**, not published by the orchestrator — during `run_split` the main process is blocked waiting on the engine and could not republish anything:
+Reading a key or a click **blocks nothing**: it replaces the wait between repaints, so the run keeps moving through the gates regardless of what is typed — the "zero questions" invariant still holds. Malformed or unknown mouse sequences are ignored.
+
+`q` / `q Sair` in a live run closes the panel and restores the terminal (mouse off, cursor visible, main screen, `stty` as before). **The run keeps going** in the line-by-line scoreboard until the end, with the same exit code, verdicts and commits as a run where nobody pressed `q`. Reopen the panel from any terminal with `./ralph.sh --attach`. In `--attach` and in `ralph-watch.sh`, `q` leaves the viewer without touching the run.
+
+`./ralph-watch.sh [repo]` delegates to `ralph.sh`: live mode becomes `ralph.sh --attach` (same screens, keys, mouse and `q`), and `--once` draws a single frame with the same renderer as the run, writing nothing to `.phases/`.
+
+An engine session runs for minutes and the CLI may emit nothing readable in that time. The live `›` line of the EM ANDAMENTO box (plus the stage line) answers one question: *is it stuck or working?* Everything in it is measured **by the process painting the screen**, not published by the orchestrator — during `run_split` the main process is blocked waiting on the engine and could not republish anything:
 
 | Signal | Source | Why it moves on its own |
 |---|---|---|
@@ -413,7 +423,7 @@ Status marks: `✓ Concluída`, `▶ Em execução`, `! Incompleta`, `✗ Falhou
 
 `RALPH_UI=auto` (the default) draws the panel **only** when stdout is a TTY. Under `nohup`, in CI, or through a pipe the output is the line-by-line scoreboard, byte for byte identical to a ralph without the panel — that compatibility is asserted by the suite. `--verbose` always wins: the two engine streams need the terminal. With the panel active the scoreboard is diverted to `.phases/ui/messages.log`, shows in the footer, and is **reprinted in full on the normal screen** when the panel exits — otherwise it would live only in the file. Long output (a red gate's cause, the final report) always comes after the panel is torn down. **A failure to draw degrades to the scoreboard: the panel never changes a gate verdict or the exit code.**
 
-`--serve` additionally writes a self-contained `.phases/ui/index.html` (no CDN, no remote font, no external fetch) and starts `python3 -m http.server` bound to `127.0.0.1`, on the first free port from 7433. The URL is printed once at the top; the browser is **not** opened. The page shows the current phase, every gate's verdict, the phase list, and a timeline with per-gate duration. The exit trap kills the server; the state stays on disk for later inspection. No `python3` in `PATH` → loud warning and the run proceeds with the panel only.
+`--serve` additionally writes a self-contained `.phases/ui/index.html` (no CDN, no remote font, no external fetch — DejaVu Sans Mono is embedded in the page) and starts `python3 -m http.server` bound to `127.0.0.1`, on the first free port from 7433. The page is rewritten at the start of every run, so an old dashboard is never served. The URL is printed once at the top; the browser is **not** opened. The page shows the same three tabs as the terminal (1 Visão geral, 2 Foco, 3 Diagnóstico) with the same values, read only from `../state.json` and `../events.jsonl` every 1.5 s; tabs, `f Seguir`, phases and tasks are clickable and switch immediately, and there is no `Sair` in the browser. The exit trap kills the server; the state stays on disk for later inspection. No `python3` in `PATH` → loud warning and the run proceeds with the panel only.
 
 ### Structured state
 

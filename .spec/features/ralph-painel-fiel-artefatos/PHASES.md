@@ -112,40 +112,40 @@ Antes de implementar, leia:
 
 Captura: esta fase roda com `RALPH_UI_SHOT_CMD` local do desenvolvedor (Playwright chromium em `~/.cache/ms-playwright`) servindo `.spec/features/ralph-painel-fiel-artefatos/` em `127.0.0.1`; o repo não ganha script nem dependência de captura.
 
-- [ ] T01 — Fixtures de estado para captura do dashboard (PLAN: T10)
+- [x] T01 — Fixtures de estado para captura do dashboard (PLAN: T10)
       Arquivos: `.spec/features/ralph-painel-fiel-artefatos/fixtures/01-visao-geral/`, `.spec/features/ralph-painel-fiel-artefatos/fixtures/02-foco/`, `.spec/features/ralph-painel-fiel-artefatos/fixtures/03-diagnostico/`, `.spec/features/ralph-painel-fiel-artefatos/fixtures/03-diagnostico-ok/`, `.spec/features/ralph-painel-fiel-artefatos/fixtures/build.sh`
       Mudança: quatro diretórios no formato de `.phases/` (`state.json`, `events.jsonl`, `logs/`) com os dados ilustrativos dos artboards e só as chaves publicadas na fase 1; `03-diagnostico-ok` sem falha; `build.sh` gera `ui/index.html` de cada fixture carregando `scripts/ralph.sh` com `RALPH_LIB_ONLY=1` e chamando `write_dashboard_html` com `UI_HTML` na fixture.
       Cobre: UI-04, UI-05, UI-06, RF-16
       Acceptance criteria: cada `state.json` é JSON válido com só chaves de CT-01 mais as da fase 1; `bash .spec/features/ralph-painel-fiel-artefatos/fixtures/build.sh` gera os quatro `ui/index.html` sem erro; as rotas `/fixtures/01-visao-geral/ui/`, `/fixtures/02-foco/ui/`, `/fixtures/03-diagnostico/ui/` servidas a partir de `.spec/features/ralph-painel-fiel-artefatos/` resolvem `../state.json`.
       Testes: none — dado de demonstração; o contrato de estado é testado na fase 1
-- [ ] T02 — Fonte DejaVu Sans Mono embutida no dashboard (PLAN: T11)
+- [x] T02 — Fonte DejaVu Sans Mono embutida no dashboard (PLAN: T11)
       Arquivos: `scripts/ralph.sh`
       Mudança: função `ui_dashboard_font_css` com `@font-face` `data:font/ttf;base64` para DejaVu Sans Mono regular e bold, embutidos como heredoc base64 no `ralph.sh` (arquivo único, ~900 KB aceito pelo desenvolvedor), com aviso de licença Bitstream Vera/DejaVu em comentário; chamada por `write_dashboard_html`.
       Cobre: UI-04, UI-05, UI-06, CT-03, RNF-02
       Acceptance criteria: o `index.html` gerado contém os dois `@font-face` com `data:` e nenhuma URL de fonte externa; `font-family` das regiões é DejaVu Sans Mono; `scripts/check-shell.sh` passa.
       Testes: none — asset; ausência de origem externa afirmada no caso `serve` (T03 desta fase)
-- [ ] T03 — Dashboard: shell, abas, cliques e aba "1 Visão geral" (PLAN: T12)
+- [x] T03 — Dashboard: shell, abas, cliques e aba "1 Visão geral" (PLAN: T12)
       Arquivos: `scripts/ralph.sh`, `scripts/test-ralph.sh`, `.spec/features/ralph-painel-fiel-artefatos/fixtures/*/ui/index.html`
       Mudança: reescrever `write_dashboard_html`: CSS custom properties dos 11 tokens, painel interno 1440×1000 sem moldura, abas por estado em memória + `location.hash` (troca imediata), `f Seguir` que zera seleção e rolagem, nenhum "Sair", `cursor:pointer` só em aba/Seguir/fase/tarefa, `wheel` em listas `overflow:auto`, poll de `../state.json` e `../events.jsonl` a cada 1,5 s como único fetch, valores de `display.*`/`phase`/`gates`/`tasks` sem recálculo; aba 1 com as 7 regiões de UI-01 marcadas por `data-region`; abaixo de 900 px caixas empilham sem rolagem horizontal; `serve_start` segue reescrevendo o HTML a cada run; fixtures regeneradas com `build.sh`.
       Cobre: UI-04, UI-07, RF-01, RF-02, RF-03, RF-10, RF-13, CT-03, RNF-01
       Acceptance criteria: a captura da rota mostra as 7 regiões do artboard 01 na mesma posição relativa, cores só dos tokens da SPEC, fonte DejaVu Sans Mono, aba `1 Visão geral` ativa com fundo `#233b48`, `f Seguir` à direita e nenhum "Sair"; clique em aba troca a tela sem esperar o poll; `index.html` antigo semeado antes do run é substituído; a página não referencia origem fora de `127.0.0.1`; os `ui/index.html` das fixtures estão regenerados e em sincronia com o heredoc.
       Testes: `scripts/test-ralph.sh` — caso `serve` estendido (HTML antigo substituído, sem origem externa, sem "Sair", fetch só de `../state.json` e `../events.jsonl`), provado vermelho via `RALPH_BIN`
       Tela: /fixtures/01-visao-geral/ui/#visao-geral | [data-region="header"], [data-region="metrics"], [data-region="journey"], [data-tab="1"][aria-selected="true"] | .spec/features/ralph-painel-fiel-artefatos/artboards/01-visao-geral.png
-- [ ] T04 — Dashboard: aba "2 Foco" com seleção (PLAN: T13)
+- [x] T04 — Dashboard: aba "2 Foco" com seleção (PLAN: T13)
       Arquivos: `scripts/ralph.sh`, `.spec/features/ralph-painel-fiel-artefatos/fixtures/*/ui/index.html`
       Mudança: 8 regiões de UI-02 com `data-region`; clique em fase ou tarefa abre Foco com a seleção e suspende o seguir; fase não corrente com a regra M6 (concluída = `verificada`, futura = `pendente`); subtítulo vazio = linha em branco; `wheel` na lista de tarefas rola uma linha; fixtures regeneradas com `build.sh`.
       Cobre: UI-05, RF-04, RF-05, RF-14
       Acceptance criteria: a captura da rota mostra as 8 regiões do artboard 02 na mesma posição relativa, a tarefa corrente destacada no bloco principal com faixa ciano e na caixa TAREFAS DA FASE, pipeline com `[ IMPLEMENTAÇÃO ]` ativo e aba `2 Foco` ativa; os `ui/index.html` das fixtures estão em sincronia com o heredoc.
       Testes: none — seleção do navegador espelha a do terminal já coberta nas fases 2 e 3; evidência é a captura
       Tela: /fixtures/02-foco/ui/#foco | [data-region="task-highlight"], [data-region="phase-tasks"], [data-region="pipeline"], [data-tab="2"][aria-selected="true"] | .spec/features/ralph-painel-fiel-artefatos/artboards/02-foco.png
-- [ ] T05 — Dashboard: aba "3 Diagnóstico" e estado sem falha (PLAN: T14)
+- [x] T05 — Dashboard: aba "3 Diagnóstico" e estado sem falha (PLAN: T14)
       Arquivos: `scripts/ralph.sh`, `.spec/features/ralph-painel-fiel-artefatos/fixtures/*/ui/index.html`
       Mudança: 8 regiões de UI-03 com `data-region`; banner vermelho com `failure.*` ou faixa verde `● Nenhum gate falhou` quando `failure.gate` vazio; `—` em campo vazio; linha do tempo e saída do teste roláveis; mesmas regiões e posições nas fixtures com e sem falha; fixtures regeneradas com `build.sh`.
       Cobre: UI-06, RF-16, RF-14
       Acceptance criteria: a captura da rota mostra as 8 regiões do artboard 03 na mesma posição relativa, banner `G2 / TESTES FALHARAM` com faixa vermelha e fundo `#291c25`, `FAIL  rejects insufficient stock` em vermelho e aba `3 Diagnóstico` ativa; a fixture `03-diagnostico-ok` mostra `● Nenhum gate falhou` em verde, sem `FALHARAM`, com `—` nos campos vazios e as mesmas regiões; os `ui/index.html` das fixtures estão em sincronia.
       Testes: none — renderização; a regra de estado sem falha é testada no terminal (fase 2) e a evidência web é a captura
       Tela: /fixtures/03-diagnostico/ui/#diagnostico | [data-region="failure-banner"], [data-region="previous-attempt"], [data-region="test-output"], [data-tab="3"][aria-selected="true"] | .spec/features/ralph-painel-fiel-artefatos/artboards/03-diagnostico.png
-- [ ] T06 — Documentação: mouse, Shift+arrastar, "q Sair", watch (PLAN: T15)
+- [x] T06 — Documentação: mouse, Shift+arrastar, "q Sair", watch (PLAN: T15)
       Arquivos: `scripts/ralph.sh`, `README.md`, `README.pt-BR.md`
       Mudança: no cabeçalho do `--help` e nos dois READMEs, documentar: mouse segue `RALPH_UI_KEYS` + `/dev/tty`; copiar texto com mouse ativo exige Shift+arrastar; `q`/"q Sair" fecha só o painel e o run segue em placar corrido, reabrível com `--attach`; `ralph-watch.sh` delega ao `ralph.sh`; nomes das abas; aviso `aumente para 100×24`. Inglês no README.md, português no README.pt-BR.md e no `--help`.
       Cobre: RF-03, RF-07

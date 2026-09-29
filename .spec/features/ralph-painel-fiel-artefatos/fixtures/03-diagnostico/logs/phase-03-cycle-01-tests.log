@@ -1,0 +1,8 @@
+   PASS  Tests\Feature\OrderStockTest
+  ✓ creates order with stock available
+   FAIL  Tests\Feature\OrderStockTest
+  ⨯ rejects insufficient stock
+  Expected [422] but received [201].
+  Failed asserting that 201 is identical to 422.
+
+  Tests:    1 failed, 1 passed (2 assertions)
