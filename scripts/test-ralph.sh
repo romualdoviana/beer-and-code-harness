@@ -1611,20 +1611,24 @@ if case_enabled ui-tty; then
       PATH="$d/bin:$PATH" \
       MOCK_STATE="$d/state" MOCK_SCENARIO=ok MOCK_TEST_CMD="$d/test.sh" \
       RALPH_HEARTBEAT=0 \
-        script -qec "bash '$RALPH' --engine codex --test-cmd '$d/test.sh'" /dev/null
+        script -qec "stty rows 40 cols 144; bash '$RALPH' --engine codex --test-cmd '$d/test.sh'" /dev/null
     ) > "$d/out.log" 2>&1 || rc=$?
 
     assert_eq 0 "$rc" "exit 0"
     assert_contains "$d/out.log" "RALPH" "cabecalho do painel desenhado"
-    assert_contains "$d/out.log" "FASES E TASKS" "tabela de fases e tasks desenhada"
-    assert_contains "$d/out.log" "PROGRESSO" "painel de progresso desenhado"
+    # Regioes da Visao geral (artboard 01): a caixa da fase corrente e a da
+    # validacao por gate substituem a tabela e o bloco de progresso antigos.
+    assert_contains "$d/out.log" "EM ANDAMENTO / FASE 01" "caixa da fase em andamento desenhada"
+    assert_contains "$d/out.log" "VALIDAÇÃO DA FASE" "caixa de validacao dos gates desenhada"
+    assert_contains "$d/out.log" "1 Visão geral" "barra de abas desenhada"
     # Buffer alternado: sem o par 1049h/1049l o scrollback do dev e destruido.
     assert_contains "$d/out.log" $'\033[?1049h' "entrou no buffer alternado"
     assert_contains "$d/out.log" $'\033[?1049l' "saiu do buffer alternado"
     assert_contains "$d/out.log" $'\033[?25l' "cursor escondido durante o painel"
     # Cursor nao restaurado deixa o terminal do dev inutilizavel depois do run.
     assert_contains "$d/out.log" $'\033[?25h' "cursor restaurado no fim"
-    assert_contains "$d/out.log" "AO VIVO" "secao de atividade ao vivo desenhada"
+    # Prova de vida da caixa EM ANDAMENTO: a linha `›` com a atividade corrente.
+    assert_contains "$d/out.log" "› " "linha de atividade ao vivo desenhada"
     # Prova de vida medida pelo pintor: sem isso a tela fica estatica durante a
     # sessao do engine, que e justamente a etapa mais longa do run.
     assert_contains "$d/out.log" "Ações do engine:" "contador de acoes do engine no painel"
@@ -1778,9 +1782,9 @@ ANCHORMOCK
 
     # O `~` e o contrato visual: distingue palpite de veredito do gate 3.
     assert_contains "$d/out.log" "~100%" "percentual inferido marcado com ~"
-    assert_contains "$d/out.log" "Task ativa" "task ativa nomeada no painel"
+    assert_contains "$d/out.log" "▶ Tarefa 1:" "task ativa nomeada no painel"
     # Fechada a fase, o veredito do gate 3 substitui a inferencia.
-    assert_contains "$d/out.log" "Concluída" "gate 3 sobrepoe o palpite no fim"
+    assert_contains "$d/out.log" "3 verificadas" "gate 3 sobrepoe o palpite no fim"
   fi
 fi
 
@@ -1830,8 +1834,8 @@ DECLMOCK
     ) > "$d/out.log" 2>&1 || rc=$?
 
     assert_eq 0 "$rc" "exit 0"
-    assert_contains "$d/out.log" "Declarada" "task marcada pelo engine aparece na tabela durante a sessao"
-    assert_contains "$d/out.log" "Concluída" "no fim o veredito do gate 3 assume"
+    assert_contains "$d/out.log" "1 declaradas" "task marcada pelo engine aparece no painel durante a sessao"
+    assert_contains "$d/out.log" "1 verificadas" "no fim o veredito do gate 3 assume"
     # Marcar checkbox mexe so em .phases/ (que esta em .git/info/exclude): nao
     # pode virar prova de que a sessao escreveu codigo.
     assert_not_contains "$d/repo/.phases/phase-01.md" "- [ ] **Task:** cria o arquivo A" \
@@ -1889,7 +1893,7 @@ LIARMOCK
 
     assert_eq 0 "$rc" "exit 0"
     assert_contains "$d/out.log" "Gate 3 vermelho" "gate 3 reprovou a fase mesmo com tudo marcado"
-    assert_contains "$d/out.log" "Incompleta" "task marcada e reprovada aparece Incompleta"
+    assert_contains "$d/out.log" "1 incompletas" "task marcada e reprovada aparece incompleta"
   fi
 fi
 
@@ -1966,14 +1970,18 @@ fi
 # fases e state.env: assim o caso mede a rolagem, e nao o mock do engine.
 # ---------------------------------------------------------------------------
 if case_enabled ui-keys; then
-  header "45. navegacao por teclado na tabela do painel"
+  header "45. navegacao por teclado no painel"
   if ! command -v script > /dev/null 2>&1; then
     echo "  (pulado: 'script' nao esta no PATH, sem pty para simular o terminal)"
   else
     d=$(new_case ui-keys)
     mkdir -p "$d/repo/.phases/ui"
-    # 8 fases x 3 tasks = 32 linhas, muito acima do orcamento de um terminal de
-    # 30 linhas: sem isso nao ha o que rolar e o caso passaria por vacuidade.
+    # 30 eventos, muito acima das 8 linhas que a Visao geral de um terminal de
+    # 30 linhas reserva a ULTIMOS EVENTOS: sem isso nao ha o que rolar e o
+    # caso passaria por vacuidade.
+    for n in $(seq -w 1 30); do
+      printf '10:00:%s\tgate_start\tF5 C1 gate=%s\n' "$n" "$((10#$n % 4))" >> "$d/repo/.phases/ui/events.tsv"
+    done
     for n in 1 2 3 4 5 6 7 8; do
       printf 'phase-0%s.md|%s|Fase numero %s\n' "$n" "$n" "$n" >> "$d/repo/.phases/manifest.txt"
       {
@@ -2020,44 +2028,55 @@ UISTATE
           "cd '$d/repo' && stty rows 30 cols 150 && $* RALPH_ATTACH_INTERVAL=1 RALPH_UI=panel bash '$RALPH' --attach" \
           /dev/null > "$out" 2>&1 || true
     }
-    # Cockpit de 30 linhas reserva 17 linhas para a tabela.
+    # Visao geral de 30 linhas reserva 8 linhas para os eventos; em auto a
+    # janela mostra os mais recentes (23-30).
     # A janela desenhada em cada frame, sem os escapes de cor.
     ui_keys_windows() {
       sed -r 's/\x1B\[[0-9;?]*[A-Za-z]//g' "$1" \
         | grep -oE 'mostrando [0-9]+[-–][0-9]+' | sed 's/–/-/' | uniq | tr '\n' ' ' | sed 's/ *$//'
     }
+    # Texto do ULTIMO frame pintado (cada frame comeca com cursor no topo).
+    ui_keys_last() {
+      python3 -c "import re,sys; t=open(sys.argv[1],encoding='utf-8',errors='replace').read().split('\x1b[H')[-1]; print(re.sub(r'\x1b\[[0-9;?]*[A-Za-z]','',t))" "$1"
+    }
 
-    ui_keys_run "$d/down.raw" '\033[B\033[B\033[B'
-    assert_eq "mostrando 9-25 mostrando 10-26 mostrando 11-27 mostrando 12-28" \
-      "$(ui_keys_windows "$d/down.raw")" \
-      "cada seta para baixo anda UMA linha (rajada de CSI nao pode virar uma tecla so)"
+    ui_keys_run "$d/up.raw" '\033[A\033[A\033[A'
+    assert_eq "mostrando 23-30 mostrando 22-29 mostrando 21-28 mostrando 20-27" \
+      "$(ui_keys_windows "$d/up.raw")" \
+      "cada seta para cima anda UMA linha (rajada de CSI nao pode virar uma tecla so)"
 
-    ui_keys_run "$d/end.raw" 'G'
-    assert_eq "mostrando 9-25 mostrando 16-32" "$(ui_keys_windows "$d/end.raw")" \
+    ui_keys_run "$d/end.raw" 'gGj'
+    assert_eq "mostrando 23-30 mostrando 1-8 mostrando 23-30" "$(ui_keys_windows "$d/end.raw")" \
       "G vai para o fim e para na ultima linha (sem linha vazia no rodape)"
 
     # `uniq` colapsa frames iguais: subir no topo NAO pode gerar janela nova.
     ui_keys_run "$d/top.raw" 'gk'
-    assert_eq "mostrando 9-25 mostrando 1-17" "$(ui_keys_windows "$d/top.raw")" \
+    assert_eq "mostrando 23-30 mostrando 1-8" "$(ui_keys_windows "$d/top.raw")" \
       "g vai para o topo e subir dali nao move a janela"
 
-    ui_keys_run "$d/auto.raw" 'Ga'
-    assert_eq "mostrando 9-25 mostrando 16-32 mostrando 9-25" "$(ui_keys_windows "$d/auto.raw")" \
-      "'a' devolve a janela ao modo automatico, centrada na fase corrente"
+    ui_keys_run "$d/auto.raw" 'gf'
+    assert_eq "mostrando 23-30 mostrando 1-8 mostrando 23-30" "$(ui_keys_windows "$d/auto.raw")" \
+      "'f' devolve a janela ao modo automatico, nos eventos mais recentes"
 
-    assert_contains "$d/end.raw" "manual" "rodape avisa que a janela esta no modo manual"
+    assert_contains "$d/top.raw" "manual" "rodape avisa que a janela esta no modo manual"
 
-    ui_keys_run "$d/off.raw" 'jjjG' RALPH_UI_KEYS=0
-    assert_eq "mostrando 9-25" "$(ui_keys_windows "$d/off.raw")" \
+    ui_keys_run "$d/off.raw" 'kkkg' RALPH_UI_KEYS=0
+    assert_eq "mostrando 23-30" "$(ui_keys_windows "$d/off.raw")" \
       "RALPH_UI_KEYS=0 desliga a rolagem"
-    assert_not_contains "$d/off.raw" "↑↓ rolar" "sem teclado o rodape nao promete navegacao"
+    assert_not_contains "$d/off.raw" "j/k rolar" "sem teclado o rodape nao promete navegacao"
 
-    ui_keys_run "$d/layouts.raw" '231'
-    assert_contains "$d/layouts.raw" 'RALPH / FOCO' "tecla 2 abre foco no TTY"
-    assert_contains "$d/layouts.raw" 'RALPH / DIAGNÓSTICO' "tecla 3 abre diagnostico no TTY"
-    assert_contains "$d/layouts.raw" 'RALPH / COCKPIT' "tecla 1 volta ao cockpit"
+    ui_keys_run "$d/layouts.raw" '2'
+    assert_contains "$d/layouts.raw" 'TAREFAS DA FASE' "tecla 2 abre foco no TTY"
+    ui_keys_run "$d/layouts3.raw" '3'
+    assert_contains "$d/layouts3.raw" 'TENTATIVA ANTERIOR' "tecla 3 abre diagnostico no TTY"
+    ui_keys_run "$d/layouts1.raw" '31'
+    if ui_keys_last "$d/layouts1.raw" | grep -q 'VALIDAÇÃO DA FASE'; then
+      ok "tecla 1 volta a visao geral"
+    else
+      bad "tecla 1 volta a visao geral"
+    fi
     ui_keys_run "$d/layout-env.raw" '' RALPH_UI_LAYOUT=diagnostic
-    assert_contains "$d/layout-env.raw" 'RALPH / DIAGNÓSTICO' "env seleciona tela inicial no attach"
+    assert_contains "$d/layout-env.raw" 'TENTATIVA ANTERIOR' "env seleciona tela inicial no attach"
 
     # O painel desliga o eco para ler tecla; sair tem que devolver o terminal.
     ( sleep 2; printf 'jj'; sleep 1; printf '\003'; sleep 3 ) \
@@ -2096,19 +2115,19 @@ if case_enabled ui-painter-exit; then
       MOCK_STATE="$d/state" MOCK_SCENARIO=ok MOCK_TEST_CMD="$d/test.sh" \
       RALPH_HEARTBEAT=0 \
         timeout 120 script -qec \
-          "bash '$RALPH' --engine codex --test-cmd '$d/test.sh'; echo RALPH_SAIU; sleep 2" \
+          "stty rows 40 cols 144; bash '$RALPH' --engine codex --test-cmd '$d/test.sh'; echo RALPH_SAIU; sleep 2" \
           /dev/null
     ) > "$d/out.log" 2>&1 || true
 
     assert_contains "$d/out.log" "RALPH_SAIU" "o run terminou dentro do pty"
-    assert_contains "$d/out.log" "FASES E TASKS" "o painel chegou a desenhar"
+    assert_contains "$d/out.log" "EM ANDAMENTO" "o painel chegou a desenhar"
 
     # Tudo que saiu DEPOIS do marcador. Com pintor orfao, mais frames caem aqui.
     sed -n '/RALPH_SAIU/,$p' "$d/out.log" > "$d/depois.log"
-    assert_not_contains "$d/depois.log" "FASES E TASKS" \
-      "nenhuma tabela repintada depois do fim do run"
-    assert_not_contains "$d/depois.log" "PROGRESSO" \
-      "nenhuma barra de progresso repintada depois do fim do run"
+    assert_not_contains "$d/depois.log" "EM ANDAMENTO" \
+      "nenhuma caixa da fase repintada depois do fim do run"
+    assert_not_contains "$d/depois.log" "VALIDAÇÃO DA FASE" \
+      "nenhuma caixa de gates repintada depois do fim do run"
 
     # Varredura de seguranca, nao assert: sob `script` o pty morre junto com o
     # run e leva o orfao a tiracolo, entao a checagem de processo nunca ficaria
@@ -2965,113 +2984,110 @@ fi
 # colapsaria, nao so a linha com a marca.
 # ---------------------------------------------------------------------------
 if case_enabled ui-box-width; then
-  header "painel: largura das caixas em toda janela"
+  header "painel: nenhuma linha passa da janela, com glifo ambiguo largo"
 
   ub="$TMP/uibox"
-  mkdir -p "$ub/.phases/ui"
+  mkdir -p "$ub/.phases/ui" "$ub/.phases/logs"
   # ralph.sh sem a ultima linha (`main`): da para sourcear so as funcoes.
   sed '$d' "$RALPH" > "$ub/ui.sh"
+  # Prova red: o mesmo painel medindo glifo ambiguo como 1 coluna.
+  sed "s/^UI_AMB=.*/UI_AMB=''/" "$ub/ui.sh" > "$ub/ui-narrow.sh"
 
-  cat > "$ub/.phases/manifest.txt" <<'MAN'
-phase-01.md|1|Estrutura e exposição do dado legado
+  # Titulos longos e cheios de glifo ambiguo (—): o pior caso de corte.
+  long='Estrutura — exposição — dado legado — lote — recusa — exclusão — download — marca — origem — disco'
+  cat > "$ub/.phases/manifest.txt" <<MAN
+phase-01.md|1|$long
 phase-02.md|2|Download de lote e recusa de exclusão
 MAN
-  cat > "$ub/.phases/ui/phases.txt" <<'PH'
-1|running|Estrutura e exposição do dado legado
-2|pending|Download de lote e recusa de exclusão
-PH
-  cat > "$ub/.phases/ui/tasks.txt" <<'TK'
-1|1|pending|Migrations de estrutura: marca de origem, data aproximada e disco
-1|2|pending|Flags de origem e disponibilidade no model `RemittanceBatch`
-1|3|declared|Eager loading de `uploads` na listagem administrativa
-2|1|pending|VO e resolver de arquivo de lote (`payload` ou metadado)
+  printf '1|running|%s\n2|pending|Download de lote e recusa de exclusão\n' "$long" > "$ub/.phases/ui/phases.txt"
+  cat > "$ub/.phases/ui/tasks.txt" <<TK
+1|1|pending|Migrations de estrutura — $long
+1|2|pending|Flags de origem e disponibilidade no model \`RemittanceBatch\`
+1|3|declared|Eager loading de \`uploads\` na listagem administrativa
+2|1|pending|VO e resolver de arquivo de lote (\`payload\` ou metadado)
 TK
-  printf '1|0|0\n2|75|0\n3|100|1\n' > "$ub/.phases/ui/taskprog.txt"
+  printf '14:00:01\tgate_end\tF1 C1 gate=2 verdict=fail\n14:00:02\trepair_start\tF1 C1 gate=gate2 round=1\n' > "$ub/.phases/ui/events.tsv"
+  printf 'FAIL %s\n' "$long" > "$ub/.phases/logs/t.log"
   cat > "$ub/.phases/ui/state.env" <<ENV
 run_status=running
 phase_num=1
-phase_seq=1
 phase_total=2
-phase_title=Estrutura e exposição do dado legado
-cycle=1
+phase_title=$long
+cycle=2
 max_cycles=5
-phase_start=$(($(date +%s) - 37))
 gate0=pass
 gate1=pass
 gate2=running
 gate3=pending
-activity=implementando a fase
-last_error=
-pid=$$
-run_id=run-$$
+activity=corrigindo — $long
 started=$(($(date +%s) - 37))
 stage_start=$(($(date +%s) - 36))
 engine=claude
-project=bench
+project=bench — $long
+task_active=1
+failure_gate=gate2
+failure_log=.phases/logs/t.log
+failure_name=$long
+failure_message=Expected — $long
+failure_headline=$long
+correction_title=Ciclo de correção 2/5 — $long
+test_file=tests/$long.php
+test_scope=scoped
+prev_gate0=pass
+prev_gate1=pass
+prev_gate2=fail
+status_word=CORRIGINDO
+status_tone=warn
 ENV
 
   cat > "$ub/render.sh" <<'REN'
-W="$2"; H="$3"
-source "$1" > /dev/null 2>&1
+# Nomes com prefixo: o ralph sourceado define globais curtos (W, H...).
+BOX_W="$2"; BOX_H="$3"; BOX_L="$4"; lib="$1"; set --
+source "$lib" > /dev/null 2>&1
 set +eu
-ui_term_cols()  { echo "$W"; }
-ui_term_lines() { echo "$H"; }
+ui_term_cols()  { echo "$BOX_W"; }
+ui_term_lines() { echo "$BOX_H"; }
+UI_LAYOUT="$BOX_L"
 ui_frame 0 2> /dev/null
 REN
 
-  # Mede a largura RENDERIZADA: ambiguo fora da moldura conta 2 colunas, que e
-  # o pior caso real (Windows Terminal sobre WSL com fallback de fonte).
+  # Mede a largura RENDERIZADA: ambiguo conta 2 colunas, que e o pior caso
+  # real (Windows Terminal sobre WSL). Latin-1 e a regua (─) medem 1 em toda
+  # fonte monoespacada.
   cat > "$ub/check.py" <<'CHK'
 import re, sys, unicodedata as u
-FRAME = set('─│┌┐└┘├┤')
 ESC = re.compile(r'\x1b\[[0-9;]*m')
 W = int(sys.argv[1])
-
 def cols(p):
-    n = 0
-    for c in p:
-        o = ord(c)
-        # ASCII, moldura, meio-ponto e Latin-1 acentuado: 1 coluna em qualquer
-        # fonte monoespacada — sao os que o terminal sempre tem.
-        if o < 128 or c in FRAME or o == 0xB7 or 0xC0 <= o <= 0xFF:
-            n += 1
-        elif u.east_asian_width(c) in ('A', 'W', 'F'):
-            n += 2
-        else:
-            n += 1
-    return n
-
-bad = []
-for raw in sys.stdin.read().split('\n'):
-    p = ESC.sub('', raw)
-    if not p.strip() or p[0] not in FRAME:
-        continue
-    if len(p) != W or cols(p) != W:
-        bad.append('%d/%d %s' % (len(p), cols(p), p[:50]))
+    return sum(2 if ord(c) > 255 and c != '─' and u.east_asian_width(c) in 'AWF' else 1 for c in p)
+lines = [ESC.sub('', raw) for raw in sys.stdin.read().split('\n')]
+# Frame vazio nao prova nada: conta como falha, nunca como verde.
+bad = [p for p in lines if cols(p) > W] if len(lines) > 10 else ['frame vazio']
 print(len(bad))
 for b in bad[:3]:
-    print('    ' + b, file=sys.stderr)
+    print('    %d %s' % (cols(b), b[:50]), file=sys.stderr)
 CHK
 
   (
     cd "$ub" || exit 1
-    for w in 74 80 96 100 120 160 200; do
-      printf '%s\n' "$(bash "$ub/render.sh" "$ub/ui.sh" "$w" 45 | python3 "$ub/check.py" "$w")" \
-        > "$ub/out-$w.txt" 2> "$ub/err-$w.txt"
-    done
-    # Prova red: com o conjunto antigo de marcas o mesmo painel estoura.
-    RALPH_UI_GLYPHS=unicode bash "$ub/render.sh" "$ub/ui.sh" 120 45 \
-      | python3 "$ub/check.py" 120 > "$ub/out-legacy.txt" 2> /dev/null
+    for w in 100 120 144 160 200; do
+      for h in 24 40; do
+        for l in cockpit focus diagnostic; do
+          bash "$ub/render.sh" "$ub/ui.sh" "$w" "$h" "$l" | python3 "$ub/check.py" "$w"
+        done
+      done
+    done 2> "$ub/err.txt" | awk '{ s += $1 } END { print s + 0 }' > "$ub/out.txt"
+    for l in cockpit focus diagnostic; do
+      bash "$ub/render.sh" "$ub/ui-narrow.sh" 144 40 "$l" | python3 "$ub/check.py" 144
+    done 2> /dev/null | awk '{ s += $1 } END { print s + 0 }' > "$ub/out-narrow.txt"
   )
 
-  for w in 74 80 96 100 120 160 200; do
-    assert_eq 0 "$(cat "$ub/out-$w.txt")" "painel fecha em $w colunas"
-  done
+  assert_eq 0 "$(cat "$ub/out.txt")" "nenhuma linha larga demais nas 3 telas, 100 a 200 colunas"
   # Sem isso o teste passaria mesmo se o medidor estivesse quebrado.
-  if [ "$(cat "$ub/out-legacy.txt")" -gt 0 ]; then
-    ok "o medidor pega o conjunto antigo de marcas (prova red)"
+  if [ "$(cat "$ub/out-narrow.txt")" -gt 0 ]; then
+    ok "o medidor pega o painel que conta ambiguo como 1 coluna (prova red)"
   else
-    bad "o medidor NAO pega o conjunto antigo: o teste nao prova nada"
+    bad "o medidor NAO pega o ambiguo contado como 1: o teste nao prova nada"
   fi
 fi
 
@@ -3221,86 +3237,232 @@ fi
 
 # As telas nao podem inventar progresso nem ultrapassar o terminal.
 if case_enabled ui-layouts; then
-  header "telas: cockpit, foco e diagnostico"
+  header "telas: visao geral, foco e diagnostico (regioes, ordem, adaptacao)"
   ul="$TMP/layouts"
-  mkdir -p "$ul/.phases/ui" "$ul/.phases/logs"
+  mkdir -p "$ul/full/.phases/ui" "$ul/full/.phases/logs" "$ul/ok/.phases/ui" "$ul/empty/.phases/ui"
   sed '$d' "$RALPH" > "$ul/lib.sh"
-  cat > "$ul/.phases/ui/state.env" <<'ENV'
+
+  # Fixture equivalente aos artboards: fase 2 de 3 em correcao, G2 vermelho.
+  cat > "$ul/full/.phases/manifest.txt" <<'MAN'
+phase-01.md|1|Setup
+phase-02.md|2|API de pedidos
+phase-03.md|3|Interface futura
+MAN
+  printf -- '- [x] T1 — Configurar projeto\n- [x] T2 — Criar banco\n' > "$ul/full/.phases/phase-01.md"
+  printf -- '- [x] T1 — Criar entidade\n- [ ] T2 — Validar estoque — antes de criar pedido\n- [ ] T3 — Expor endpoint\n' > "$ul/full/.phases/phase-02.md"
+  printf -- '- [ ] T1 — Tela futura\n- [ ] T2 — Estilo final\n' > "$ul/full/.phases/phase-03.md"
+  cat > "$ul/full/.phases/ui/state.env" <<'ENV'
 run_status=running
 project=layout-test
 engine=codex
 phase_num=2
-phase_seq=2
 phase_total=3
 phase_title=API de pedidos
 cycle=2
-max_cycles=2
+max_cycles=5
 activity=corrigindo a fase
-last_error=Estoque insuficiente: esperado 422
+last_error=Estoque insuficiente
 failure_gate=gate2
 failure_log=.phases/logs/test.log
+failure_name=rejects insufficient stock
+failure_message=Expected [422] but received [201].
+failure_headline=rejects insufficient stock: Expected [422] but received [201].
+test_file=tests/Feature/OrderStockTest.php
 test_scope=scoped
-test_scope_why=1 arquivo de teste
-test_scope_cmd=pytest tests/test_stock.py
+task_active=2
+correction_title=Ciclo de correção 2/5 — rejects insufficient stock
+prev_gate0=pass
+prev_gate1=pass
+prev_gate2=fail
+prev_gate3=pending
+status_word=CORRIGINDO
+status_tone=warn
+phases_done=1
+phases_total=3
+percent=33
 gate0=pass
-gate1=pass
-gate2=skip
-gate3=pending
+gate1=running
+gate2=pending
+gate3=skip
 ENV
-  printf '1|done|Setup\n2|running|API de pedidos\n3|pending|Interface futura\n' > "$ul/.phases/ui/phases.txt"
-  printf '1|1|done|Configurar projeto\n2|1|declared|Persistir pedido\n2|2|partial|Validar estoque\n3|1|pending|Tela futura\n' > "$ul/.phases/ui/tasks.txt"
-  printf '2|80|1\n' > "$ul/.phases/ui/taskprog.txt"
-  printf '14:35:08\tgate_end\tF2 C2 gate=2 verdict=fail\n' > "$ul/.phases/ui/events.tsv"
-  printf '\033[2JFAIL estoque\r\nexpected 422\n' > "$ul/.phases/logs/test.log"
+  printf '1|done|Setup\n2|running|API de pedidos\n3|pending|Interface futura\n' > "$ul/full/.phases/ui/phases.txt"
+  printf '%s\n' '1|1|done|Configurar projeto' '1|2|done|Criar banco' '2|1|done|Criar entidade' \
+    '2|2|pending|Validar estoque — antes de criar pedido' '2|3|pending|Expor endpoint' \
+    '3|1|pending|Tela futura' '3|2|pending|Estilo final' > "$ul/full/.phases/ui/tasks.txt"
+  printf '14:32:08\tphase_done\tF1 C1 message=ok\n14:33:01\tphase_start\tF2 C1 title=API\n14:35:08\tgate_end\tF2 C1 gate=2 verdict=fail duration=3\n14:35:10\trepair_start\tF2 C1 gate=gate2 round=1\n' \
+    > "$ul/full/.phases/ui/events.tsv"
+  printf '\033[2JFAIL estoque\r\nexpected 422\n' > "$ul/full/.phases/logs/test.log"
+
+  # Mesmo run sem falha registrada (RF-16) e run sem nenhum campo novo (RF-14).
+  cp -R "$ul/full/.phases" "$ul/ok/"
+  sed -i '/^failure_\|^last_error=\|^correction_title=\|^prev_gate\|^test_file=/d' "$ul/ok/.phases/ui/state.env"
+  printf 'run_status=running\nphase_num=1\nphase_total=1\nphase_title=Fase vazia\n' > "$ul/empty/.phases/ui/state.env"
+
   cat > "$ul/probe.sh" <<'PROBE'
-lib="$1"; out="$2"
+lib="$1"; out="$2"; fixture="$3"; set --
 source "$lib" > /dev/null 2>&1
 set +eu
 ui_term_cols() { echo "$width"; }
 ui_term_lines() { echo "$height"; }
+cd "$fixture" || exit 1
 for layout in cockpit focus diagnostic; do
   UI_LAYOUT="$layout"
-  for width in 40 80 120 160; do
-    for height in 12 24 45; do
-      ui_frame 0 > "$out/$layout-$width-$height.raw"
-    done
+  for size in 144x40 120x40 100x24 99x24 100x23; do
+    width="${size%x*}"; height="${size#*x}"
+    ui_frame 0 > "$out/$layout-$width-$height.raw"
   done
 done
-UI_SCROLL=8
-ui_apply_key 2
-printf '%s|%s\n' "${UI_LAYOUT:-}" "$UI_SCROLL" > "$out/keys.txt"
-ui_apply_key 3
-printf '%s\n' "${UI_LAYOUT:-}" >> "$out/keys.txt"
-ui_apply_key 1
-printf '%s\n' "${UI_LAYOUT:-}" >> "$out/keys.txt"
-UI_SCROLL=7; ui_apply_key f
-printf '%s\n' "$UI_SCROLL" >> "$out/keys.txt"
+width=144; height=40
+UI_LAYOUT=focus
+UI_SEL_PHASE=1; ui_frame 0 > "$out/sel1-144-40.raw"
+UI_SEL_PHASE=3; ui_frame 0 > "$out/sel3-144-40.raw"
+UI_SEL_PHASE=""; UI_SEL_TASK=3; ui_frame 0 > "$out/task3-144-40.raw"
+UI_SEL_TASK=""
+cp .phases/ui/.hitmap "$out/hitmap.txt" 2> /dev/null
+UI_SCROLL_tasks=1; UI_SEL_PHASE=1; UI_SEL_TASK=2
+ui_apply_key 2; printf '%s\n' "$UI_LAYOUT" > "$out/keys.txt"
+ui_apply_key 3; printf '%s\n' "$UI_LAYOUT" >> "$out/keys.txt"
+ui_apply_key 1; printf '%s\n' "$UI_LAYOUT" >> "$out/keys.txt"
+ui_apply_key f; printf '%s|%s|%s\n' "$UI_SCROLL_tasks" "$UI_SEL_PHASE" "$UI_SEL_TASK" >> "$out/keys.txt"
 PROBE
-  (cd "$ul" && bash "$ul/probe.sh" "$ul/lib.sh" "$ul")
-  assert_contains "$ul/cockpit-120-45.raw" "COCKPIT" "cockpit identificado"
-  assert_contains "$ul/focus-120-45.raw" "FOCO" "foco identificado"
-  assert_not_contains "$ul/focus-120-45.raw" "Tela futura" "foco so mostra tarefas da fase atual"
-  assert_contains "$ul/focus-120-45.raw" "Declarada" "declarada nao vira verificada"
-  assert_contains "$ul/focus-120-45.raw" "Incompleta" "veredito vence inferencia"
-  assert_contains "$ul/diagnostic-120-45.raw" "DIAGNÓSTICO" "diagnostico identificado"
-  assert_contains "$ul/diagnostic-120-45.raw" "Estoque insuficiente" "causa da falha visivel"
-  assert_contains "$ul/diagnostic-120-45.raw" "FAIL estoque" "saida do log real"
-  assert_contains "$ul/diagnostic-120-45.raw" "não executado" "skip nao vira aprovado"
-  assert_contains "$ul/diagnostic-120-45.raw" "escopada" "escopo executado visivel"
-  assert_eq $'focus|-1\ndiagnostic\ncockpit\n-1' "$(cat "$ul/keys.txt")" "1/2/3 trocam tela e f segue a fase"
-  python3 - "$ul" <<'CHK' > "$ul/geometry.txt"
-import pathlib, re, sys
-for path in pathlib.Path(sys.argv[1]).glob('*.raw'):
-    _, w, h = path.stem.split('-')
-    clean = re.sub(r'\x1b\[[0-9;]*m', '', path.read_text())
-    assert '\x1b' not in clean, (path.name, 'controle de log vazou')
-    lines = clean.splitlines()
-    assert len(lines) <= int(h)-1, (path.name, len(lines))
-    assert all(len(line) <= int(w) for line in lines), path.name
-    assert '1 Cockpit' in clean and '3 Diagnóstico' in clean, path.name
-print('OK')
+  for fx in full ok empty; do
+    mkdir -p "$ul/out-$fx"
+    bash "$ul/probe.sh" "$ul/lib.sh" "$ul/out-$fx" "$ul/$fx" 2> /dev/null
+  done
+  assert_eq $'focus\ndiagnostic\ncockpit\n-1||' "$(cat "$ul/out-full/keys.txt")" \
+    "1/2/3 trocam tela e f desfaz selecao e rolagem"
+
+  python3 - "$ul" > "$ul/regions.txt" 2>&1 <<'CHK'
+import pathlib, re, sys, unicodedata as u
+root = pathlib.Path(sys.argv[1])
+SGR = re.compile(r'\x1b\[[0-9;]*m')
+def frame(fx, name):
+    return SGR.sub('', (root / ('out-' + fx) / (name + '.raw')).read_text()).split('\n')[:-1]
+def first(lines, needle):
+    for i, l in enumerate(lines):
+        if needle in l:
+            return i
+    return -1
+REGIONS = {
+    # regiao -> marca textual unica, na ordem do artboard
+    'cockpit': ['RALPH', 'TEMPO TOTAL', '▶ 02 API de pedidos', 'EM ANDAMENTO / FASE 02',
+                'ÚLTIMOS EVENTOS', '1 Visão geral'],
+    'focus': ['RALPH', 'FASE 02 / 03', 'TAREFA 02 / 03', 'CONFIRMAÇÃO INDEPENDENTE',
+              'IMPLEMENTAÇÃO', 'Ciclo 2/5', '1 Visão geral'],
+    'diagnostic': ['RALPH', 'CICLO 02 / 05', 'G2 / TESTES FALHARAM', 'TENTATIVA ANTERIOR',
+                   'LINHA DO TEMPO', '1 Visão geral'],
+}
+# Caixas que ficam lado a lado em 144x40 e empilhadas abaixo disso.
+PAIRS = {'cockpit': ('EM ANDAMENTO / FASE', 'VALIDAÇÃO DA FASE'),
+         'focus': ('Validar estoque', 'TAREFAS DA FASE'),
+         'diagnostic': ('TENTATIVA ANTERIOR', 'CORREÇÃO ATUAL')}
+EXTRA = {'cockpit': ['VALIDAÇÃO DA FASE'], 'focus': ['TAREFAS DA FASE'],
+         'diagnostic': ['CORREÇÃO ATUAL', 'SAÍDA DO TESTE']}
+ALL = sorted({m for v in list(REGIONS.values()) + list(EXTRA.values()) for m in v if m != 'RALPH'})
+errs = []
+def check(cond, msg):
+    if not cond:
+        errs.append(msg)
+
+for layout, marks in REGIONS.items():
+    for size in ('144-40', '120-40'):
+        f = frame('full', layout + '-' + size)
+        pos = [first(f, m) for m in marks]
+        check(all(p >= 0 for p in pos), '%s %s: regiao ausente %s' % (layout, size, [m for m, p in zip(marks, pos) if p < 0]))
+        check(pos == sorted(pos), '%s %s: ordem %s' % (layout, size, pos))
+        check(all(first(f, m) >= 0 for m in EXTRA[layout]), '%s %s: caixa ausente' % (layout, size))
+        a, b = (first(f, m) for m in PAIRS[layout])
+        if size == '144-40':
+            check(a >= 0 and a == b, '%s 144x40: caixas nao lado a lado (%s,%s)' % (layout, a, b))
+        else:
+            check(a >= 0 and b > a + 1, '%s 120x40: caixas nao empilhadas (%s,%s)' % (layout, a, b))
+
+# 7 regioes da visao geral; barra segmentada entre metricas e jornada; sem tabela.
+raw = (root / 'out-full' / 'cockpit-144-40.raw').read_text().split('\n')
+f = frame('full', 'cockpit-144-40')
+check(any('\x1b[48' in raw[i] for i in range(first(f, 'TEMPO TOTAL') + 2, first(f, '▶ 02'))), 'barra segmentada ausente')
+check(first(f, 'FASES E TASKS') < 0, 'tabela FASES E TASKS ainda na visao geral')
+tabs = f[first(f, '1 Visão geral')]
+check(tabs.index('f Seguir') > tabs.index('3 Diagnóstico') and tabs.index('q Sair') > tabs.index('f Seguir'), 'Seguir/Sair fora da direita')
+tabraw = [l for l in raw if '1 Visão geral' in SGR.sub('', l)][0]
+check(re.search(r'\x1b\[48;[25];[0-9;]*m(\x1b\[[0-9;]*m)* 1 Visão geral', tabraw) is not None, 'aba ativa sem fundo')
+check(first(f, '▶ Tarefa 2: Validar estoque') >= 0, 'tarefa ativa na caixa EM ANDAMENTO')
+
+# Foco: tarefa corrente destacada nos dois lugares; subtitulo; M6.
+f = frame('full', 'focus-144-40')
+check(f[first(f, 'TAREFA 02 / 03') + 1].strip().startswith('Validar estoque'), 'titulo da tarefa corrente no destaque')
+check('antes de criar pedido' in f[first(f, 'TAREFA 02 / 03') + 2], 'subtitulo da tarefa')
+check('em andamento' in f[first(f, '02   Validar estoque') + 1], 'tarefa corrente em andamento na caixa')
+f = frame('full', 'task3-144-40')
+i = first(f, 'TAREFA 03 / 03')
+sub = f[i + 2][:f[i + 2].find('TAREFAS DA FASE') if 'TAREFAS DA FASE' in f[i + 2] else 80]
+check(i >= 0 and sub.strip() == '', 'subtitulo vazio deixa linha em branco: %r' % sub)
+f = frame('full', 'sel1-144-40')
+box = '\n'.join(l[80:] for l in f)
+check(first(f, 'FASE 01 / 03') >= 0, 'fase selecionada no cabecalho do foco')
+check('Configurar projeto' in box and 'Criar banco' in box and box.count('verificada') == 2
+      and 'pendente' not in box and 'em andamento' not in box, 'fase concluida: todas verificadas')
+f = frame('full', 'sel3-144-40')
+box = '\n'.join(l[80:] for l in f)
+check(first(f, 'FASE 03 / 03') >= 0 and 'Tela futura' in box and box.count('pendente') == 2
+      and 'verificada' not in box, 'fase futura: todas pendentes')
+
+# Diagnostico com e sem falha: mesmas regioes nas mesmas linhas.
+f = frame('full', 'diagnostic-144-40')
+check(first(f, 'rejects insufficient stock: Expected [422]') >= 0, 'headline da falha')
+check(first(f, 'FAIL  rejects insufficient stock') >= 0, 'linha FAIL')
+check(first(f, 'FAIL estoque') >= 0, 'saida do log real, sem controle')
+check(first(f, 'escopada') >= 0 and first(f, 'tests/Feature/OrderStockTest.php') >= 0, 'escopo executado')
+check(first(f, 'Não executado') >= 0, 'skip nao vira aprovado')
+g = frame('ok', 'diagnostic-144-40')
+check(first(g, '● Nenhum gate falhou') >= 0 and first(g, 'FALHARAM') < 0, 'faixa verde sem falha')
+DIAG = ['TENTATIVA ANTERIOR', 'CORREÇÃO ATUAL', 'LINHA DO TEMPO', 'SAÍDA DO TESTE', '1 Visão geral']
+check([first(f, m) for m in DIAG] == [first(g, m) for m in DIAG], 'diagnostico muda de layout sem falha')
+check(first(g, '▶ —') >= 0 and first(g, 'Log: —') >= 0 and first(g, '· G0 —') >= 0, 'campos vazios com — sem falha')
+
+# Campos novos vazios: "—" nas mesmas posicoes.
+e = frame('empty', 'diagnostic-144-40')
+check([first(e, m) for m in DIAG] == [first(g, m) for m in DIAG], 'fixture vazia muda o layout do diagnostico')
+check(first(e, '▶ —') >= 0 and first(e, 'Escopo executado: —  ·  —') >= 0 and first(e, 'CICLO — / —') >= 0, 'diagnostico vazio com —')
+e = frame('empty', 'cockpit-144-40')
+check(first(e, '▶ Tarefa —') >= 0 and e[first(e, 'ÚLTIMOS EVENTOS') + 1].strip() == '—', 'visao geral vazia com —')
+e = frame('empty', 'focus-144-40')
+check(first(e, 'TAREFA — / —') >= 0 and first(e, '› —') >= 0, 'foco vazio com —')
+
+# Ordem de corte e limiar (RF-15).
+for layout, gone in (('cockpit', ['ÚLTIMOS EVENTOS']), ('diagnostic', ['LINHA DO TEMPO', 'SAÍDA DO TESTE']), ('focus', [])):
+    f = frame('full', layout + '-100-24')
+    keep = [m for m in REGIONS[layout] + EXTRA[layout] if m not in gone]
+    check(all(first(f, m) >= 0 for m in keep), '%s 100x24 perdeu regiao %s' % (layout, [m for m in keep if first(f, m) < 0]))
+    check(all(first(f, m) < 0 for m in gone), '%s 100x24 nao cortou %s' % (layout, gone))
+    for small in ('99-24', '100-23'):
+        f = frame('full', layout + '-' + small)
+        check(first(f, 'aumente para 100×24') >= 0, '%s %s sem aviso' % (layout, small))
+        check(all(first(f, m) < 0 for m in ALL + ['RALPH']), '%s %s desenhou regiao' % (layout, small))
+
+# Geometria: nunca mais que h-1 linhas nem w colunas (ambiguo = 2), sem ESC.
+def cols(p):
+    return sum(2 if ord(c) > 255 and c != '─' and u.east_asian_width(c) in 'AWF' else 1 for c in p)
+for path in root.glob('out-*/*.raw'):
+    w, h = map(int, path.stem.split('-')[-2:])
+    clean = SGR.sub('', path.read_text())
+    check('\x1b' not in clean, '%s: controle vazou' % path.name)
+    lines = clean.split('\n')[:-1]
+    check(len(lines) <= h - 1, '%s: %d linhas' % (path.name, len(lines)))
+    check(all(cols(l) <= w for l in lines), '%s: linha larga demais' % path.name)
+
+# Mapa de cliques do ultimo frame desenhado: abas, Seguir, Sair, tarefas.
+hm = (root / 'out-full' / 'hitmap.txt').read_text()
+for act in ('tab:1', 'tab:2', 'tab:3', 'follow', 'quit', 'task:2:3'):
+    check(re.search(r'^\d+\|\d+\|\d+\|' + re.escape(act) + '$', hm, re.M) is not None, 'alvo %s ausente do mapa' % act)
+
+print('\n'.join(errs) if errs else 'OK')
 CHK
-  assert_contains "$ul/geometry.txt" "OK" "geometria, controles e atalhos preservados"
+  if [ "$(tail -n 1 "$ul/regions.txt")" = "OK" ]; then
+    ok "regioes, ordem, corte, aviso, campo vazio e geometria das tres telas"
+  else
+    bad "regioes/ordem/corte/geometria das telas: $(head -n 5 "$ul/regions.txt" | tr '\n' ';')"
+  fi
 fi
 
 # Curl fake: sem rede, tokens reais ou mensagens enviadas.
@@ -3425,6 +3587,7 @@ run_status=running
 phase_num=1
 phase_total=1
 phase_title=Fase de locale
+activity=atividade de locale
 engine=claude
 project=locale-bench
 started=$(date +%s)
@@ -3439,8 +3602,10 @@ ui_term_lines() { echo 30; }
 ui_frame 0 2> /dev/null
 REN
     ( cd "$ul" && LC_ALL=en_US.UTF-8 bash "$ul/render.sh" "$ul/ui.sh" > "$ul/frame.txt" 2> /dev/null )
-    assert_contains "$ul/frame.txt" "RALPH / COCKPIT" "cabecalho do cockpit visivel em en_US.UTF-8"
-    assert_contains "$ul/frame.txt" "1 Cockpit" "abas visiveis em en_US.UTF-8"
+    # A linha `›` da caixa EM ANDAMENTO passa por ui_clean_text: com o sed
+    # quebrado pelo locale ela sairia como "› —".
+    assert_contains "$ul/frame.txt" "› atividade de locale" "atividade limpa visivel em en_US.UTF-8"
+    assert_contains "$ul/frame.txt" "1 Visão geral" "abas visiveis em en_US.UTF-8"
   fi
 fi
 
