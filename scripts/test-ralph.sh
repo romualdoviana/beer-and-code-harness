@@ -396,6 +396,11 @@ if [ "$scenario" = "scoped-tests" ] && [ "$n" -eq 2 ]; then
   mkdir -p tests/Feature
   echo "teste da fase 2" > tests/Feature/AlvoTest.py
 fi
+# scoped-prefix: arquivo de teste nomeado pelo PREFIXO (test_*.py do pytest,
+# test-*.sh), fora de pasta tests/ e sem sufixo Test/_test.
+if [ "$scenario" = "scoped-prefix" ] && [ "$n" -eq 2 ]; then
+  echo "teste da fase 2" > test_alvo.py
+fi
 if [ "$scenario" = "critical-change" ] && [ "$n" -eq 2 ]; then
   mkdir -p database/migrations
   echo "migration da fase 2" > database/migrations/2026_01_01_000000_cria_tabela.php
@@ -2769,6 +2774,21 @@ if case_enabled gate2-escopado; then
   assert_contains "$d/out.log" "rodando os testes desta fase" "o log separa escopo de suite"
   assert_contains "$d/out.log" "ultima fase do documento — gate final da spec" "a suite completa e o gate da spec"
   assert_contains "$d/out.log" "a suite completa roda na fase 3" "o run anuncia onde a suite inteira roda"
+fi
+
+# 66b. Arquivo de teste reconhecido pelo PREFIXO (test_alvo.py, test-ralph.sh).
+#      Sem isso a fase que so mexe em test-*.sh cai em "nao alterou teste" e o
+#      gate 2 e pulado — regressao so aparecia na ultima fase.
+if case_enabled gate2-prefixo-test; then
+  header "66b. arquivo test_* conta como teste da fase"
+  CASE_PHASES="$PHASES_FIXTURE_3"
+  d=$(new_case gate2-prefixo-test)
+  unset CASE_PHASES
+  rc=$(run_ralph "$d" scoped-prefix --engine claude --test-cmd "$d/pytest")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 2 "$(cat "$d/state/test_calls")" "2 execucoes: a fase 2 (escopada) e a fase 3 (completa)"
+  assert_eq "test_alvo.py" "$(test_args_line "$d" 1)" "a fase 2 rodou o teste test_alvo.py que criou"
+  assert_contains "$d/out.log" "rodando os testes desta fase" "o gate 2 da fase 2 rodou escopado, nao foi pulado"
 fi
 
 # 67. Fase mecanica (nenhum teste alterado, nada critico) -> gate 2 nao executa.

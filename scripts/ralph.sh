@@ -543,8 +543,10 @@ FINAL_PHASE_FILE=""
 # schema, dependencia, config global, bootstrap, imagem, pipeline. Escopo ali
 # nao protege ninguem, entao a suite inteira roda na propria fase.
 CRITICAL_PATHS_RE="${RALPH_CRITICAL_PATHS:-(^|/)(database/migrations|migrations|db/migrate|prisma)/|(^|/)(composer\.(json|lock)|package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|go\.(mod|sum)|Cargo\.(toml|lock)|pyproject\.toml|Gemfile(\.lock)?)$|(^|/)(config|bootstrap)/|(^|/)\.env\.example$|(^|/)(Dockerfile|docker-compose\.ya?ml)$|(^|/)\.github/workflows/}"
-# O que conta como arquivo de teste, em qualquer stack.
-TEST_FILE_RE="${RALPH_TEST_FILE_RE:-(^|/)(tests?|spec|specs|__tests__)/|(Test|Spec)\.[A-Za-z0-9]+$|_test\.[A-Za-z0-9]+$|\.(test|spec)\.[A-Za-z0-9]+$}"
+# O que conta como arquivo de teste, em qualquer stack. O prefixo `test_`/`test-`
+# cobre o pytest (test_*.py) e suites em script (scripts/test-ralph.sh): sem ele
+# a fase que so mexe nesses arquivos tinha o gate 2 pulado.
+TEST_FILE_RE="${RALPH_TEST_FILE_RE:-(^|/)(tests?|spec|specs|__tests__)/|(^|/)test[-_][^/]*$|(Test|Spec)\.[A-Za-z0-9]+$|_test\.[A-Za-z0-9]+$|\.(test|spec)\.[A-Za-z0-9]+$}"
 # Gate 3 com prova: DONE sem evidencia e "linguagem confiante", nao veredito.
 VERIFY_EVIDENCE_MODE="${RALPH_VERIFY_EVIDENCE:-required}"
 # Evidencia visual: o ralph fotografa toda task com `Tela:` ANTES do
