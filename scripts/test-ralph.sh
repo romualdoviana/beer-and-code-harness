@@ -14,6 +14,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RALPH="${RALPH_BIN:-$ROOT/scripts/ralph.sh}"
 ONLY="${1:-}"
 
+# O ambiente de quem roda a suite nao entra nos ralph aninhados: um
+# `RALPH_UI=plain` exportado (o proprio ralph rodando esta suite como gate 2)
+# derrubava todos os casos de painel. Cada caso declara o que quer.
+while IFS= read -r _v; do
+  [ "$_v" = RALPH_BIN ] || unset "$_v"
+done < <(compgen -e | grep -E '^(RALPH_|CAVEMAN_DEFAULT_MODE$)' || true)
+unset _v
+
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -1822,12 +1830,16 @@ sleep 2; echo "Done."
 ANCHORMOCK
     chmod +x "$d/bin/codex"
 
+    # O veredito do gate 3 chega no fim do run; sem pausa depois dele o pintor
+    # (2 fps) morre antes de desenhar o frame final. A pausa vinha, sem querer,
+    # do RALPH_NOTIFY_CMD real herdado do shell do dev. Agora e explicita.
+    printf '#!/usr/bin/env bash\nsleep 1.5\n' > "$d/bin/notify-lento"; chmod +x "$d/bin/notify-lento"
     rc=0
     (
       cd "$d/repo" || exit 1
       PATH="$d/bin:$PATH" \
       MOCK_STATE="$d/state" MOCK_SCENARIO=ok MOCK_TEST_CMD="$d/test.sh" \
-      RALPH_HEARTBEAT=0 RALPH_UI_FPS=2 \
+      RALPH_HEARTBEAT=0 RALPH_UI_FPS=2 RALPH_NOTIFY_CMD="$d/bin/notify-lento" \
         script -qec "stty rows 42 cols 132; bash '$RALPH' --engine codex --test-cmd '$d/test.sh'" /dev/null
     ) > "$d/out.log" 2>&1 || rc=$?
 
@@ -1885,12 +1897,16 @@ echo "Done."
 DECLMOCK
     chmod +x "$d/bin/codex"
 
+    # O veredito do gate 3 chega no fim do run; sem pausa depois dele o pintor
+    # (2 fps) morre antes de desenhar o frame final. A pausa vinha, sem querer,
+    # do RALPH_NOTIFY_CMD real herdado do shell do dev. Agora e explicita.
+    printf '#!/usr/bin/env bash\nsleep 1.5\n' > "$d/bin/notify-lento"; chmod +x "$d/bin/notify-lento"
     rc=0
     (
       cd "$d/repo" || exit 1
       PATH="$d/bin:$PATH" \
       MOCK_STATE="$d/state" MOCK_SCENARIO=ok MOCK_TEST_CMD="$d/test.sh" \
-      RALPH_HEARTBEAT=0 RALPH_UI_FPS=2 \
+      RALPH_HEARTBEAT=0 RALPH_UI_FPS=2 RALPH_NOTIFY_CMD="$d/bin/notify-lento" \
         script -qec "stty rows 42 cols 132; bash '$RALPH' --engine codex --test-cmd '$d/test.sh'" /dev/null
     ) > "$d/out.log" 2>&1 || rc=$?
 
@@ -2789,6 +2805,18 @@ if case_enabled gate2-prefixo-test; then
   assert_eq 2 "$(cat "$d/state/test_calls")" "2 execucoes: a fase 2 (escopada) e a fase 3 (completa)"
   assert_eq "test_alvo.py" "$(test_args_line "$d" 1)" "a fase 2 rodou o teste test_alvo.py que criou"
   assert_contains "$d/out.log" "rodando os testes desta fase" "o gate 2 da fase 2 rodou escopado, nao foi pulado"
+fi
+
+# 66c. Variavel RALPH_* exportada por quem roda a suite nao vaza para os casos.
+#      Reexecuta a suite num caso barato com um valor que faria o preflight
+#      abortar se chegasse ao ralph aninhado.
+if case_enabled env-isolado; then
+  header "66c. ambiente do chamador nao vaza para os ralph aninhados"
+  out="$TMP/env-isolado.log"
+  RALPH_TEST_SCOPE=invalido RALPH_UI=plain CAVEMAN_DEFAULT_MODE=ultra \
+    bash "$0" ok-first > "$out" 2>&1
+  assert_eq 0 "$?" "a suite aninhada ficou verde com RALPH_TEST_SCOPE=invalido exportado"
+  assert_not_contains "$out" "FAIL" "nenhum assert do caso aninhado falhou"
 fi
 
 # 67. Fase mecanica (nenhum teste alterado, nada critico) -> gate 2 nao executa.
