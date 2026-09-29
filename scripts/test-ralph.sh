@@ -654,7 +654,7 @@ run_ralph() {
     MOCK_STATE="$dir/state" \
     MOCK_SCENARIO="$scenario" \
     MOCK_TEST_CMD="$dir/test.sh" \
-    RALPH_LIMIT_WAIT_DEFAULT=1 \
+    RALPH_LIMIT_WAIT_DEFAULT="${CASE_LIMIT_WAIT:-1}" \
     RALPH_LIMIT_BUFFER=1 \
     RALPH_VERBOSE="${CASE_VERBOSE:-0}" \
     RALPH_HEARTBEAT="${CASE_HEARTBEAT:-0}" \
@@ -858,13 +858,17 @@ fi
 if case_enabled false-429; then
   header "7. 429 no meio do log nao dispara espera"
   d=$(new_case false-429)
+  # Espera de fallback longa SO neste caso: com o default de 1s do helper, uma
+  # espera falsa custava 1s e o limite de tempo media overhead de processo, nao
+  # espera (flake em maquina carregada). Com 60s, uma espera falsa estoura o
+  # limite de 30s com folga e o overhead normal (~6s) nunca chega perto.
   start=$(date +%s)
-  rc=$(run_ralph "$d" false-429 --engine codex --test-cmd "$d/test.sh" --max-cycles 1)
+  rc=$(CASE_LIMIT_WAIT=60 run_ralph "$d" false-429 --engine codex --test-cmd "$d/test.sh" --max-cycles 1)
   elapsed=$(($(date +%s) - start))
   assert_eq 0 "$rc" "exit 0"
   assert_not_contains "$d/out.log" "Limite de uso atingido" "nao interpretou 429 de teste como limite"
   assert_contains "$d/repo/.phases/logs/phase-01.cycle-1.log" "429 Too Many Requests" "o 429 realmente estava no log"
-  if [ "$elapsed" -lt 5 ]; then
+  if [ "$elapsed" -lt 30 ]; then
     ok "sem espera (${elapsed}s)"
   else
     bad "sem espera (${elapsed}s)"
