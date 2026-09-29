@@ -3696,7 +3696,12 @@ check(first(f, 'FASES E TASKS') < 0, 'tabela FASES E TASKS ainda na visao geral'
 tabs = f[first(f, '1 Visão geral')]
 check(tabs.index('f Seguir') > tabs.index('3 Diagnóstico') and tabs.index('q Sair') > tabs.index('f Seguir'), 'Seguir/Sair fora da direita')
 tabraw = [l for l in raw if '1 Visão geral' in SGR.sub('', l)][0]
-check(re.search(r'\x1b\[48;[25];[0-9;]*m(\x1b\[[0-9;]*m)* 1 Visão geral', tabraw) is not None, 'aba ativa sem fundo')
+check(re.search(r'\x1b\[48;[25];[0-9;]*m(\x1b\[[0-9;]*m)* ▸ 1 Visão geral', tabraw) is not None, 'aba ativa sem fundo')
+# RNF-03: a aba ativa tem marca textual, nao so fundo — uma por tela, so nela.
+for layout, label in (('cockpit', '1 Visão geral'), ('focus', '2 Foco'), ('diagnostic', '3 Diagnóstico')):
+    g = frame('full', layout + '-144-40')
+    t = g[first(g, '1 Visão geral')]
+    check(('▸ ' + label) in t and t.count('▸') == 1, '%s: aba ativa sem marca textual: %r' % (layout, t.strip()))
 check(first(f, '▶ Tarefa 2: Validar estoque') >= 0, 'tarefa ativa na caixa EM ANDAMENTO')
 
 # Foco: tarefa corrente destacada nos dois lugares; subtitulo; M6.
@@ -3708,6 +3713,12 @@ f = frame('full', 'task3-144-40')
 i = first(f, 'TAREFA 03 / 03')
 sub = f[i + 2][:f[i + 2].find('TAREFAS DA FASE') if 'TAREFAS DA FASE' in f[i + 2] else 80]
 check(i >= 0 and sub.strip() == '', 'subtitulo vazio deixa linha em branco: %r' % sub)
+# RNF-03: tarefa escolhida que nao e a ativa tem marca textual na caixa; a
+# ativa segue identificada pela palavra, sem marca.
+check(first(f, '03 ▸ Expor endpoint') >= 0, 'tarefa selecionada sem marca textual na caixa')
+check(first(f, '02   Validar estoque') >= 0, 'tarefa ativa nao selecionada ganhou marca')
+check(first(frame('full', 'focus-144-40'), '▸ Validar') < 0 and first(frame('full', 'focus-144-40'), '02   Validar estoque') >= 0,
+      'sem selecao explicita a caixa nao marca nenhuma tarefa')
 f = frame('full', 'sel1-144-40')
 box = '\n'.join(l[80:] for l in f)
 check(first(f, 'FASE 01 / 03') >= 0, 'fase selecionada no cabecalho do foco')

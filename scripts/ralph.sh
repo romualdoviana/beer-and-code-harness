@@ -1538,9 +1538,11 @@ UI_K_OFF=$'\033[0m'
 if [ "${RALPH_UI_GLYPHS:-}" = "ascii" ]; then
   UI_GL_OK='v'; UI_GL_RUN='>'; UI_GL_DOT='*'; UI_GL_X='x'; UI_GL_NONE='-'
   UI_GL_ACT='>'; UI_GL_ARROW='->'; UI_GL_NE='!='; UI_GL_CUT='+'; UI_GL_BAR='='
+  UI_GL_SEL='>'
 else
   UI_GL_OK='✓'; UI_GL_RUN='▶'; UI_GL_DOT='●'; UI_GL_X='×'; UI_GL_NONE='—'
   UI_GL_ACT='›'; UI_GL_ARROW='→'; UI_GL_NE='≠'; UI_GL_CUT='…'; UI_GL_BAR=''
+  UI_GL_SEL='▸'
 fi
 UI_GL_PEND='·'
 
@@ -2298,6 +2300,8 @@ ui_region_tabs() {
     col=${cols[$i]}; label=" ${labels[$i]} "
     ui_rpad "$col"; t0=$UIR_W
     if [ "$((i + 1))" = "$active" ]; then
+      # RNF-03: o fundo sozinho nao diz qual aba esta aberta.
+      label=" $UI_GL_SEL ${labels[$i]} "
       ui_fit "$label" 20
       printf -v UI_PAD '%*s' $((20 - ${#UI_FIT} > 0 ? 20 - ${#UI_FIT} : 0)) ''
       UIR_P+="$UI_FIT$UI_PAD"; UIR_C+="$UI_K_TAB$UI_K_B$UI_K_CYAN$UI_FIT$UI_PAD$UI_K_OFF"
@@ -2615,7 +2619,11 @@ ui_screen_focus() {
     color="$UTC"; tcolor="$UI_K_TEXT"
     case "${UDT_status[$i]}" in done) tcolor="$UI_K_GREEN" ;; pending) tcolor="$UI_K_DIM" ;; esac
     [ "${UDT_idx[$i]}" = "$sel" ] && tcolor="$UI_K_CYAN"
-    ui_r0; ui_rt "$UI_K_B$tcolor" "$(ui_nn "${UDT_idx[$i]}")"; ui_rpad 5; ui_rt "$tcolor" "${UDT_title[$i]}"
+    ui_r0; ui_rt "$UI_K_B$tcolor" "$(ui_nn "${UDT_idx[$i]}")"
+    # RNF-03: tarefa escolhida pelo dev leva marca alem do ciano. A ativa sem
+    # escolha explicita ja e dita pela palavra "em andamento" logo abaixo.
+    if [ -n "${UI_SEL_TASK:-}" ] && [ "${UDT_idx[$i]}" = "$sel" ]; then ui_rpad 3; ui_rt "$UI_K_CYAN" "$UI_GL_SEL"; fi
+    ui_rpad 5; ui_rt "$tcolor" "${UDT_title[$i]}"
     ui_rhit "task:$ph:${UDT_idx[$i]}" 0; ui_rhit scroll:tasks 0
     ui_emit_boxed FOR "$rw"
     ui_r0; ui_rpad 5; ui_rt "$color" "$UTW"; ui_rhit "task:$ph:${UDT_idx[$i]}" 0; ui_rhit scroll:tasks 0
@@ -2875,8 +2883,24 @@ ui_frame() {
       done
     } > "$tmp" 2> /dev/null
     mv -f "$tmp" "$UI_HITMAP" 2> /dev/null || rm -f "$tmp" 2> /dev/null
+    # Corte de seguranca agiu: so fica a janela de lista com alguma linha
+    # ainda no frame (alvo scroll:<lista> num row mantido). Rolar lista que
+    # nao aparece moveria o que o dev nao ve.
+    local keep="" name
+    if [ "${#FR_P[@]}" -gt "$n" ]; then
+      for hh in "${FR_H[@]}"; do
+        row="${hh%%|*}"
+        [ "$row" -lt "$n" ] && [[ "$hh" == *"|scroll:"* ]] && keep+=" ${hh##*|scroll:} "
+      done
+    fi
     tmp="$UI_VIEWPORT.tmp.$$"
-    { for hh in "${UI_VP[@]}"; do printf '%s\n' "$hh"; done; } > "$tmp" 2> /dev/null
+    {
+      for hh in "${UI_VP[@]}"; do
+        name="${hh%%|*}"
+        [ "${#FR_P[@]}" -le "$n" ] || [[ "$keep" == *" $name "* ]] || continue
+        printf '%s\n' "$hh"
+      done
+    } > "$tmp" 2> /dev/null
     mv -f "$tmp" "$UI_VIEWPORT" 2> /dev/null || rm -f "$tmp" 2> /dev/null
   fi
   return 0
