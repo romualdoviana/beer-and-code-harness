@@ -1528,6 +1528,28 @@ if case_enabled ui-non-tty; then
   else
     bad "auto sem TTY produz a mesma saida que plain"
   fi
+
+  # Relato de mouse (RF-07): ligar o mouse fora do terminal interativo deixaria
+  # o shell do dev imprimindo sequencias de escape a cada clique. Nenhum DECSET
+  # de mouse sem TTY, nem com o teclado desligado num TTY de verdade.
+  for m in 1000 1002 1003 1006 1015; do
+    assert_not_contains "$d/out.log" $'\033'"[?${m}h" "sem TTY: nenhum DECSET $m"
+    assert_not_contains "$d2/out.log" $'\033'"[?${m}h" "RALPH_UI=panel sem TTY: nenhum DECSET $m"
+  done
+  if command -v script > /dev/null 2>&1; then
+    d4=$(new_case ui-keys-off-tty)
+    (
+      cd "$d4/repo" || exit 1
+      PATH="$d4/bin:$PATH" \
+      MOCK_STATE="$d4/state" MOCK_SCENARIO=ok MOCK_TEST_CMD="$d4/test.sh" \
+      RALPH_HEARTBEAT=0 RALPH_UI=panel RALPH_UI_KEYS=0 \
+        script -qec "stty rows 40 cols 144; bash '$RALPH' --engine codex --test-cmd '$d4/test.sh'" /dev/null
+    ) > "$d4/out.log" 2>&1 || true
+    assert_contains "$d4/out.log" $'\033[?1049h' "RALPH_UI_KEYS=0 no pty: painel desenhado"
+    for m in 1000 1002 1003 1006 1015; do
+      assert_not_contains "$d4/out.log" $'\033'"[?${m}h" "RALPH_UI_KEYS=0 no pty: nenhum DECSET $m"
+    done
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1988,11 +2010,17 @@ if case_enabled ui-keys; then
     done
     for n in 1 2 3 4 5 6 7 8; do
       printf 'phase-0%s.md|%s|Fase numero %s\n' "$n" "$n" "$n" >> "$d/repo/.phases/manifest.txt"
+      # A fase corrente (5) tem 12 tarefas: a caixa TAREFAS DA FASE mostra so
+      # 5, e a roda do mouse precisa de linha escondida para rolar.
       {
         echo "## Fase $n"
-        echo "- [ ] T1 — task um da fase $n"
-        echo "- [ ] T2 — task dois da fase $n"
-        echo "- [ ] T3 — task tres da fase $n"
+        if [ "$n" = 5 ]; then
+          for t in $(seq 1 12); do echo "- [ ] T$t — task $t da fase $n"; done
+        else
+          echo "- [ ] T1 — task um da fase $n"
+          echo "- [ ] T2 — task dois da fase $n"
+          echo "- [ ] T3 — task tres da fase $n"
+        fi
       } > "$d/repo/.phases/phase-0$n.md"
       st=pending; [ "$n" -lt 5 ] && st="done"; [ "$n" = 5 ] && st=running
       printf '%s|%s|Fase numero %s\n' "$n" "$st" "$n" >> "$d/repo/.phases/ui/phases.txt"
@@ -2026,10 +2054,10 @@ UISTATE
 
     # ui_keys_run <arquivo-de-saida> <teclas> [env...]
     ui_keys_run() {
-      local out="$1" keys="$2"; shift 2
+      local out="$1" keys="$2" rows="${UI_KEYS_ROWS:-30}"; shift 2
       ( sleep 2; printf '%b' "$keys"; sleep 2 ) \
         | timeout 15 script -qec \
-          "cd '$d/repo' && stty rows 30 cols 150 && $* RALPH_ATTACH_INTERVAL=1 RALPH_UI=panel bash '$RALPH' --attach" \
+          "cd '$d/repo' && stty rows $rows cols 150 && $* RALPH_ATTACH_INTERVAL=1 RALPH_UI=panel bash '$RALPH' --attach" \
           /dev/null > "$out" 2>&1 || true
     }
     # Visao geral de 30 linhas reserva 8 linhas para os eventos; em auto a
@@ -2081,6 +2109,69 @@ UISTATE
     fi
     ui_keys_run "$d/layout-env.raw" '' RALPH_UI_LAYOUT=diagnostic
     assert_contains "$d/layout-env.raw" 'TENTATIVA ANTERIOR' "env seleciona tela inicial no attach"
+
+    # --- mouse (RF-01, RF-02, RF-04, RF-05, RF-11) ---------------------------
+    # Os cliques miram o mapa de cliques que o proprio frame escreveu: a
+    # coordenada sai do desenho, nao de uma conta paralela no teste.
+    # ui_keys_hit <acao> -> "col;linha" do primeiro alvo daquela acao.
+    ui_keys_hit() {
+      awk -F'|' -v a="$1" '$4 == a { print $2 ";" $1; exit }' "$d/repo/.phases/ui/.hitmap.attach" 2> /dev/null
+    }
+    # Clique SGR = press (M) + release (m) na mesma celula.
+    ui_keys_click() { printf '\\033[<0;%sM\\033[<0;%sm' "$1" "$1"; }
+    # 28 linhas: a caixa TAREFAS DA FASE do Foco comporta 5 das 12 tarefas.
+    UI_KEYS_ROWS=28
+
+    ui_keys_run "$d/map-ov.raw" ''
+    assert_contains "$d/map-ov.raw" $'\033[?1000h\033[?1006h' "painel com teclado liga o relato de mouse SGR"
+    hit_tab2=$(ui_keys_hit tab:2); hit_ph1=$(ui_keys_hit phase:1)
+    ui_keys_run "$d/map-fo.raw" '' RALPH_UI_LAYOUT=focus
+    hit_tasks=$(ui_keys_hit scroll:tasks); hit_follow=$(ui_keys_hit follow)
+    if [ -n "$hit_tab2" ] && [ -n "$hit_ph1" ] && [ -n "$hit_tasks" ] && [ -n "$hit_follow" ]; then
+      ok "mapa de cliques tem aba, fase, lista de tarefas e Seguir"
+    else
+      bad "mapa de cliques tem aba, fase, lista de tarefas e Seguir (tab2=$hit_tab2 ph1=$hit_ph1 tasks=$hit_tasks follow=$hit_follow)"
+    fi
+
+    ui_keys_run "$d/click-tab.raw" "$(ui_keys_click "$hit_tab2")"
+    if ui_keys_last "$d/click-tab.raw" | grep -q 'TAREFAS DA FASE'; then
+      ok "clique em '2 Foco' abre a tela Foco"
+    else
+      bad "clique em '2 Foco' abre a tela Foco"
+    fi
+
+    assert_eq "mostrando 1-5" "$(ui_keys_windows "$d/map-fo.raw")" \
+      "fixture: 12 tarefas, 5 visiveis em TAREFAS DA FASE"
+    ui_keys_run "$d/wheel.raw" "\\033[<65;${hit_tasks}M" RALPH_UI_LAYOUT=focus
+    assert_eq "mostrando 1-5 mostrando 2-6" "$(ui_keys_windows "$d/wheel.raw")" \
+      "roda para baixo sobre TAREFAS DA FASE rola uma linha"
+    ui_keys_run "$d/wheel-out.raw" '\033[<65;3;1M\033[<64;3;1M' RALPH_UI_LAYOUT=focus
+    assert_eq "mostrando 1-5" "$(ui_keys_windows "$d/wheel-out.raw")" \
+      "roda sobre o cabecalho nao rola nada"
+
+    ui_keys_run "$d/click-ph.raw" "$(ui_keys_click "$hit_ph1")"
+    if ui_keys_last "$d/click-ph.raw" | grep -q 'FASE 01 / 08'; then
+      ok "clique na fase 01 abre Foco na fase 01 e a selecao sobrevive aos frames seguintes"
+    else
+      bad "clique na fase 01 abre Foco na fase 01 e a selecao sobrevive aos frames seguintes"
+    fi
+    # A barra de abas acompanha a altura do Foco, que depende das tarefas da
+    # fase mostrada: o Seguir e mirado no mapa do Foco da fase 01.
+    hit_follow=$(ui_keys_hit follow)
+    ui_keys_run "$d/click-follow.raw" "$(ui_keys_click "$hit_ph1")$(ui_keys_click "$hit_follow")"
+    if ui_keys_last "$d/click-follow.raw" | grep -q 'FASE 05 / 08'; then
+      ok "clique em 'f Seguir' volta a fase corrente"
+    else
+      bad "clique em 'f Seguir' volta a fase corrente"
+    fi
+
+    # Sequencia truncada (o terminal cortou o relato) seguida de seta: a seta
+    # vale, o lixo some sem virar texto no frame.
+    ui_keys_run "$d/trunc.raw" '\033[<0;77\033[B' RALPH_UI_LAYOUT=focus
+    assert_eq "mostrando 1-5 mostrando 2-6" "$(ui_keys_windows "$d/trunc.raw")" \
+      "sequencia de mouse truncada + seta para baixo rola uma linha"
+    assert_not_contains "$d/trunc.raw" '0;77' "bytes da sequencia truncada nao aparecem no frame"
+    UI_KEYS_ROWS=30
 
     # O painel desliga o eco para ler tecla; sair tem que devolver o terminal.
     ( sleep 2; printf 'jj'; sleep 1; printf '\003'; sleep 3 ) \

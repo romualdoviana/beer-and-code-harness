@@ -66,7 +66,7 @@ Antes de implementar, leia:
 1. `.spec/features/ralph-painel-fiel-artefatos/SPEC.md` — requisitos RIGID que esta fase cobre
 2. `.spec/features/ralph-painel-fiel-artefatos/PLAN.md` — decomposição completa, dependências e riscos
 
-- [ ] T01 — Mouse SGR, mapa de cliques e seleção (PLAN: T07)
+- [x] T01 — Mouse SGR, mapa de cliques e seleção (PLAN: T07)
       Arquivos: `scripts/ralph.sh`, `scripts/test-ralph.sh`
       Mudança: `ui_start` emite `ESC[?1000h ESC[?1006h` só no ramo `UI_KEYS=1 && -r /dev/tty`; `ui_read_key` lê CSI `<b;x;y(M|m)` byte a byte até 16 bytes e descarta sequência truncada/desconhecida; `ui_apply_key` resolve o press contra `.hitmap`: `tab:1..3` = teclas `1/2/3`, `follow` = `f/a` (zera seleção e rolagens), `phase:N`/`task:F:I` abrem Foco com seleção e suspendem o seguir, botões 64/65 rolam 1 linha a lista sob o ponteiro, fora de lista nada, release ignorado; teclas atuais agem sobre a lista primária da tela com o mesmo efeito de hoje.
       Cobre: RF-01, RF-02, RF-04, RF-05, RF-06, RF-07, RF-11, CT-04, RNF-01

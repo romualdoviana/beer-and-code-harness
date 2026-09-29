@@ -687,6 +687,7 @@ UI_KEY=""
 # sozinho ao voltar — mas o pintor morre por sinal (ui_stop, Ctrl-C), e ai o
 # restore nao acontece e o dev fica com um terminal mudo depois do run.
 UI_TTY_STATE=""
+UI_MOUSE=false
 SERVE_PID=""
 SERVE_URL=""
 RUN_START_EPOCH=0
@@ -2858,11 +2859,45 @@ ui_read_key() {
   # ha mais de uma sequencia na fila, e um bloco engoliria o ESC da proxima —
   # as duas setas viravam uma sequencia desconhecida e a janela travava depois
   # de andar uma linha.
-  IFS= read -rsn1 -t 0.05 c 2> /dev/null || true
-  case "$c" in
-    '[' | 'O') seq="$k$c" ;;
-    *) UI_KEY="$k$c"; return 0 ;;
-  esac
+  while true; do
+    c=""
+    IFS= read -rsn1 -t 0.05 c 2> /dev/null || true
+    case "$c" in
+      '[' | 'O') seq="$k$c" ;;
+      *) UI_KEY="$k$c"; return 0 ;;
+    esac
+
+    # Relato de mouse SGR (ESC [ < b ; x ; y M|m). Tambem byte a byte, ate 16
+    # bytes: o terminal pode cortar o relato (buffer cheio, sessao remota) e o
+    # que vier depois e outra tecla. Sequencia truncada ou malformada e
+    # descartada sem efeito (RF-11) — se o corte foi um ESC, ele abre a
+    # proxima sequencia, que segue valendo.
+    if [ "$seq" = $'\033[' ]; then
+      c=""
+      IFS= read -rsn1 -t 0.05 c 2> /dev/null || true
+      if [ "$c" = '<' ]; then
+        seq+="$c"
+        for ((i = 0; i < 16; i++)); do
+          c=""
+          IFS= read -rsn1 -t 0.05 c 2> /dev/null || true
+          case "$c" in
+            [0-9\;]) seq+="$c" ;;
+            M | m) seq+="$c"; break ;;
+            *) break ;;
+          esac
+        done
+        if [[ "$seq" =~ ^$'\033'\[\<[0-9]+\;[0-9]+\;[0-9]+[Mm]$ ]]; then
+          UI_KEY="$seq"; return 0
+        fi
+        [ "$c" = $'\033' ] && continue
+        return 0
+      fi
+      [ -n "$c" ] || { UI_KEY="$seq"; return 0; }
+      seq+="$c"
+      case "$c" in [A-Za-z~]) UI_KEY="$seq"; return 0 ;; esac
+    fi
+    break
+  done
   for ((i = 0; i < 6; i++)); do
     c=""
     IFS= read -rsn1 -t 0.05 c 2> /dev/null || true
@@ -2880,28 +2915,11 @@ ui_primary_list() {
   case "$UI_LAYOUT" in focus) printf 'tasks' ;; diagnostic) printf 'testout' ;; *) printf 'events' ;; esac
 }
 
-# Aplica a tecla. Os numeros da janela vem do ultimo frame desenhado — o
-# pintor nao monta as linhas, entao nao tem como saber sozinho quantas sao.
-ui_apply_key() {
-  local key="$1"
-  [ -n "$key" ] || return 0
-
-  # shellcheck disable=SC2034
-  case "$key" in
-    1) UI_LAYOUT=cockpit; return 0 ;;
-    2) UI_LAYOUT=focus; return 0 ;;
-    3) UI_LAYOUT=diagnostic; return 0 ;;
-    a | A | f | F)
-      # Seguir (RF-02): desfaz selecao manual e toda rolagem manual; as listas
-      # voltam a acompanhar o run.
-      UI_SCROLL_events=-1; UI_SCROLL_tasks=-1; UI_SCROLL_timeline=-1; UI_SCROLL_testout=-1
-      UI_SEL_PHASE=""; UI_SEL_TASK=""
-      return 0
-      ;;
-  esac
-
-  local list var vp start=0 total=0 budget=3
-  list="$(ui_primary_list)"
+# ui_scroll_list <lista> <tecla> — move a janela de uma lista como a tecla de
+# rolagem manda. Os numeros da janela vem do ultimo frame desenhado — o pintor
+# nao monta as linhas, entao nao tem como saber sozinho quantas sao.
+ui_scroll_list() {
+  local list="$1" key="$2" var vp start=0 total=0 budget=3
   var="UI_SCROLL_$list"
   vp="$(grep "^$list|" "$UI_VIEWPORT" 2> /dev/null | tail -n 1 || true)"
   [ -n "$vp" ] && IFS='|' read -r _ start total budget <<< "$vp"
@@ -2929,6 +2947,83 @@ ui_apply_key() {
   if [ -n "$target" ]; then base="$target"; else base=$((base + delta)); fi
   printf -v "$var" '%s' "$(ui_scroll_fit "$base" "$total" "$budget")"
   return 0
+}
+
+# ui_hit_at <col> <linha> <prefixo> -> UI_HIT_ACT: acao do alvo do ultimo frame
+# que contem a celula. Com prefixo, so alvos daquele tipo (scroll:); sem, o
+# primeiro alvo que nao e de rolagem (a linha de tarefa e as duas coisas).
+ui_hit_at() {
+  UI_HIT_ACT="$(awk -F'|' -v x="$1" -v y="$2" -v p="$3" '
+    $1 == y && x >= $2 && x <= $3 {
+      if (p != "" && index($4, p) == 1) { print $4; exit }
+      if (p == "" && index($4, "scroll:") != 1) { print $4; exit }
+    }' "$UI_HITMAP" 2> /dev/null || true)"
+}
+
+# ui_apply_mouse <b> <x> <y> <M|m> — clique e roda contra o mapa de cliques do
+# ultimo frame (CT-04). So o press conta; o release chega depois de todo clique
+# e repetiria a acao.
+ui_apply_mouse() {
+  local b="$1" x="$2" y="$3" fin="$4" act
+  [ "$fin" = M ] || return 0
+  # Bits 4/8/16 = Shift/Meta/Ctrl: a roda com modificador ainda e roda.
+  b=$((b & ~28))
+  case "$b" in
+    64 | 65)
+      ui_hit_at "$x" "$y" scroll:
+      [ -n "$UI_HIT_ACT" ] || return 0
+      if [ "$b" = 64 ]; then ui_scroll_list "${UI_HIT_ACT#scroll:}" k; else ui_scroll_list "${UI_HIT_ACT#scroll:}" j; fi
+      return 0
+      ;;
+    0) ;;
+    *) return 0 ;;
+  esac
+  ui_hit_at "$x" "$y" ""
+  act="$UI_HIT_ACT"
+  # shellcheck disable=SC2034
+  case "$act" in
+    tab:[123]) ui_apply_key "${act#tab:}" ;;
+    follow) ui_apply_key f ;;
+    phase:*)
+      # Selecao manual (RF-05): o Foco fica na fase clicada ate o Seguir,
+      # mesmo com o run avancando.
+      UI_SEL_PHASE="${act#phase:}"; UI_SEL_TASK=""; UI_SCROLL_tasks=-1
+      UI_LAYOUT=focus
+      ;;
+    task:*:*)
+      act="${act#task:}"
+      UI_SEL_PHASE="${act%%:*}"; UI_SEL_TASK="${act#*:}"; UI_SCROLL_tasks=-1
+      UI_LAYOUT=focus
+      ;;
+  esac
+  return 0
+}
+
+# Aplica a tecla (ou o relato de mouse lido por ui_read_key).
+ui_apply_key() {
+  local key="$1"
+  [ -n "$key" ] || return 0
+
+  if [[ "$key" =~ ^$'\033'\[\<([0-9]+)\;([0-9]+)\;([0-9]+)([Mm])$ ]]; then
+    ui_apply_mouse "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
+    return 0
+  fi
+
+  # shellcheck disable=SC2034
+  case "$key" in
+    1) UI_LAYOUT=cockpit; return 0 ;;
+    2) UI_LAYOUT=focus; return 0 ;;
+    3) UI_LAYOUT=diagnostic; return 0 ;;
+    a | A | f | F)
+      # Seguir (RF-02): desfaz selecao manual e toda rolagem manual; as listas
+      # voltam a acompanhar o run.
+      UI_SCROLL_events=-1; UI_SCROLL_tasks=-1; UI_SCROLL_timeline=-1; UI_SCROLL_testout=-1
+      UI_SEL_PHASE=""; UI_SEL_TASK=""
+      return 0
+      ;;
+  esac
+
+  ui_scroll_list "$(ui_primary_list)" "$key"
 }
 
 ui_start() {
@@ -2961,6 +3056,11 @@ ui_start() {
   # por cima da tela normal depois do 1049l, engolindo o relatorio final.
   if [ "$UI_KEYS" = "1" ] && [ -r /dev/tty ]; then
     UI_TTY_STATE="$(stty -g < /dev/tty 2> /dev/null || true)"
+    # Relato de mouse (1000 = clique e roda, 1006 = formato SGR, sem limite de
+    # coluna) so aqui: quem le o relato e o pintor, e sem teclado ninguem o
+    # consumiria — cada clique viraria lixo no terminal (RF-07).
+    printf '\033[?1000h\033[?1006h'
+    UI_MOUSE=true
     ui_painter_loop "$tick_interval" < /dev/tty &
   else
     UI_KEYS=0
@@ -3079,6 +3179,9 @@ ui_stop() {
   # 0m antes de sair: o pintor pode ter morrido no meio de um frame, com cor
   # aberta. O SGR atravessa a troca de buffer — sem o reset o relatorio final
   # sairia tingido com a ultima cor do painel.
+  # Mouse desligado antes de sair do buffer: ligado, cada clique depois do run
+  # imprimiria a sequencia do relato no shell do dev.
+  if $UI_MOUSE; then printf '\033[?1006l\033[?1000l'; UI_MOUSE=false; fi
   printf '\033[0m\033[?25h\033[?1049l'
 
   # O painel viveu numa tela que acabou de ser descartada. Sem reimprimir, o
