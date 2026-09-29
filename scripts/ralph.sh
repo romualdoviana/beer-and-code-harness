@@ -652,6 +652,12 @@ $ATTACH && UI_VIEWPORT="$UI_DIR/.viewport.attach"
 # regioes clicaveis exatamente como foram desenhadas.
 UI_HITMAP="$UI_DIR/.hitmap"
 $ATTACH && UI_HITMAP="$UI_DIR/.hitmap.attach"
+# "q Sair" (RF-03): o pintor fecha o painel sozinho e deixa aqui quantas linhas
+# do messages.log ja reimprimiu. O principal le a contagem e reimprime so o
+# resto — nem linha perdida, nem linha em dobro. O attach tem o seu: o run que
+# ele acompanha pode estar com o painel proprio aberto.
+UI_PANEL_FLAG="$UI_DIR/.panel-closed"
+$ATTACH && UI_PANEL_FLAG="$UI_DIR/.panel-closed.attach"
 UI_HTML="$UI_DIR/index.html"
 
 MAX_LIMIT_WAITS="${RALPH_MAX_LIMIT_WAITS:-20}"
@@ -683,6 +689,8 @@ UI_KEYS="${RALPH_UI_KEYS:-1}"
 # Rolagem por lista (UI_SCROLL_<lista>) e selecao (UI_SEL_*) vivem no processo
 # do pintor, unico que le teclado — ver ui_list_window.
 UI_KEY=""
+UI_QUIT=0
+UI_REPRINTED=0
 # Termios de antes do painel. O `read -s` do pintor desliga o eco e o restaura
 # sozinho ao voltar — mas o pintor morre por sinal (ui_stop, Ctrl-C), e ai o
 # restore nao acontece e o dev fica com um terminal mudo depois do run.
@@ -770,10 +778,23 @@ ui_sink() {
   printf '%s\t%s\t%s\n' "$(date '+%H:%M:%S')" "$1" "$2" >> "$UI_MSG_FILE" 2> /dev/null || true
 }
 
-log()     { if $UI_ACTIVE; then ui_sink info "$1"; else echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $1"; fi; }
-success() { if $UI_ACTIVE; then ui_sink ok   "$1"; else echo -e "${GREEN}[$(date '+%H:%M:%S')] $1${NC}"; fi; }
-warn()    { if $UI_ACTIVE; then ui_sink warn "$1"; else echo -e "${YELLOW}[$(date '+%H:%M:%S')] $1${NC}"; fi; }
-fail()    { if $UI_ACTIVE; then ui_sink fail "$1"; else echo -e "${RED}[$(date '+%H:%M:%S')] $1${NC}"; fi; }
+# O painel ainda esta na tela? Com "q Sair" (ou o pintor morto) ele ja nao
+# esta: o principal passa para o placar corrido na primeira linha que loga.
+# Subshell nao consegue mudar o estado do pai — so decide a propria linha.
+ui_panel_live() {
+  $UI_ACTIVE || return 1
+  if [ "$BASHPID" != "$RALPH_PID" ]; then
+    [ -f "$UI_PANEL_FLAG" ] && return 1
+    return 0
+  fi
+  if ui_panel_gone; then ui_panel_closed; return 1; fi
+  return 0
+}
+
+log()     { if ui_panel_live; then ui_sink info "$1"; else echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $1"; fi; }
+success() { if ui_panel_live; then ui_sink ok   "$1"; else echo -e "${GREEN}[$(date '+%H:%M:%S')] $1${NC}"; fi; }
+warn()    { if ui_panel_live; then ui_sink warn "$1"; else echo -e "${YELLOW}[$(date '+%H:%M:%S')] $1${NC}"; fi; }
+fail()    { if ui_panel_live; then ui_sink fail "$1"; else echo -e "${RED}[$(date '+%H:%M:%S')] $1${NC}"; fi; }
 
 # ---------------------------------------------------------------------------
 # Notificacao externa (opcional)
@@ -2984,6 +3005,7 @@ ui_apply_mouse() {
   case "$act" in
     tab:[123]) ui_apply_key "${act#tab:}" ;;
     follow) ui_apply_key f ;;
+    quit) ui_apply_key q ;;
     phase:*)
       # Selecao manual (RF-05): o Foco fica na fase clicada ate o Seguir,
       # mesmo com o run avancando.
@@ -3013,6 +3035,9 @@ ui_apply_key() {
   case "$key" in
     1) UI_LAYOUT=cockpit; return 0 ;;
     2) UI_LAYOUT=focus; return 0 ;;
+    # "q Sair" (RF-03): so marca. Quem fecha e o laco do pintor, depois de
+    # aplicar a tecla — fechar aqui dentro sairia de quem chamou por engano.
+    q | Q) UI_QUIT=1; return 0 ;;
     3) UI_LAYOUT=diagnostic; return 0 ;;
     a | A | f | F)
       # Seguir (RF-02): desfaz selecao manual e toda rolagem manual; as listas
@@ -3034,6 +3059,9 @@ ui_start() {
   if ! $ATTACH; then
     : > "$UI_MSG_FILE" 2> /dev/null || return 0
   fi
+  # Flag de um painel fechado antes (outro run, outro attach) nao pode fechar
+  # este no primeiro log.
+  rm -f "$UI_PANEL_FLAG" 2> /dev/null || true
   UI_ACTIVE=true
   # O attach nunca publica estado: ele so le o do run que esta acompanhando.
   $ATTACH || state_sync
@@ -3144,6 +3172,7 @@ ui_painter_loop() {
       if [ "$UI_KEYS" = "1" ]; then
         ui_read_key "$tick_interval"
         if [ -n "$UI_KEY" ]; then ui_apply_key "$UI_KEY"; fi
+        [ "$UI_QUIT" = 1 ] && ui_painter_quit
       else
         sleep "$tick_interval"
       fi
@@ -3155,6 +3184,9 @@ ui_painter_loop() {
 # relatorio final). A partir daqui o placar volta a rolar na tela normal.
 ui_stop() {
   $UI_ACTIVE || return 0
+  # O painel ja fechou por conta propria ("q Sair" ou pintor morto): o
+  # terminal ja foi (ou sera la dentro) restaurado; so falta o resto do placar.
+  if ui_panel_gone; then ui_panel_closed; return 0; fi
   UI_ACTIVE=false
 
   if [ -n "$UI_PAINTER_PID" ]; then
@@ -3186,18 +3218,82 @@ ui_stop() {
 
   # O painel viveu numa tela que acabou de ser descartada. Sem reimprimir, o
   # dev perde o placar inteiro do run — ele existe so no messages.log.
-  if [ -s "$UI_MSG_FILE" ]; then
-    local ts level text
-    while IFS=$'\t' read -r ts level text; do
-      case "$level" in
-        ok)   echo -e "${GREEN}[$ts] $text${NC}" ;;
-        warn) echo -e "${YELLOW}[$ts] $text${NC}" ;;
-        fail) echo -e "${RED}[$ts] $text${NC}" ;;
-        *)    echo -e "${BLUE}[$ts]${NC} $text" ;;
-      esac
-    done < "$UI_MSG_FILE"
-  fi
+  ui_reprint_messages 0
   return 0
+}
+
+# ui_reprint_messages <pular> — reimprime o messages.log na tela normal a partir
+# da linha <pular>+1 e devolve em UI_REPRINTED quantas linhas o arquivo tinha
+# ate onde foi lido.
+ui_reprint_messages() {
+  local skip="${1:-0}" n=0 ts level text
+  UI_REPRINTED="$skip"
+  [ -s "$UI_MSG_FILE" ] || return 0
+  while IFS=$'\t' read -r ts level text; do
+    n=$((n + 1))
+    [ "$n" -gt "$skip" ] || continue
+    case "$level" in
+      ok)   echo -e "${GREEN}[$ts] $text${NC}" ;;
+      warn) echo -e "${YELLOW}[$ts] $text${NC}" ;;
+      fail) echo -e "${RED}[$ts] $text${NC}" ;;
+      *)    echo -e "${BLUE}[$ts]${NC} $text" ;;
+    esac
+  done < "$UI_MSG_FILE"
+  [ "$n" -gt "$skip" ] && UI_REPRINTED="$n"
+  return 0
+}
+
+# Painel fechado sem ui_stop? Sim quando o pintor gravou o flag do "q Sair" ou
+# quando morreu (kill externo, erro fatal). So o processo principal pergunta.
+ui_panel_gone() {
+  [ -f "$UI_PANEL_FLAG" ] && return 0
+  [ -n "$UI_PAINTER_PID" ] || return 1
+  kill -0 "$UI_PAINTER_PID" 2> /dev/null && return 1
+  return 0
+}
+
+# Processo principal assume o painel fechado: placar corrido daqui em diante.
+# Com o flag o pintor ja restaurou o terminal e reimprimiu N linhas — aqui so o
+# resto, e sem novo 1049l (sairia do buffer principal para lugar nenhum). Sem
+# flag o pintor morreu no meio: a restauracao inteira e daqui.
+ui_panel_closed() {
+  local skip=0
+  UI_ACTIVE=false
+  if [ -n "$UI_PAINTER_PID" ]; then
+    wait "$UI_PAINTER_PID" 2> /dev/null || true
+    UI_PAINTER_PID=""
+  fi
+  if [ -f "$UI_PANEL_FLAG" ]; then
+    skip="$(head -n 1 "$UI_PANEL_FLAG" 2> /dev/null || true)"
+    [[ "$skip" =~ ^[0-9]+$ ]] || skip=0
+    UI_MOUSE=false
+    UI_TTY_STATE=""
+  else
+    if [ -n "$UI_TTY_STATE" ]; then
+      stty "$UI_TTY_STATE" < /dev/tty 2> /dev/null || true
+      UI_TTY_STATE=""
+    fi
+    if $UI_MOUSE; then printf '\033[?1006l\033[?1000l'; UI_MOUSE=false; fi
+    printf '\033[0m\033[?25h\033[?1049l'
+  fi
+  ui_reprint_messages "$skip"
+  return 0
+}
+
+# "q Sair" dentro do pintor: mesma restauracao do ui_stop, na mesma ordem
+# (mouse antes do 1049l), placar reimpresso e o flag com a contagem. O flag vai
+# por tmp+mv: o principal nunca le uma contagem pela metade. O run nao e
+# tocado — so este processo sai.
+ui_painter_quit() {
+  if $UI_MOUSE; then printf '\033[?1006l\033[?1000l'; fi
+  printf '\033[0m\033[?25h\033[?1049l'
+  if [ -n "$UI_TTY_STATE" ]; then
+    stty "$UI_TTY_STATE" < /dev/tty 2> /dev/null || true
+  fi
+  ui_reprint_messages 0
+  printf '%s\n' "$UI_REPRINTED" > "$UI_PANEL_FLAG.tmp" 2> /dev/null \
+    && mv -f "$UI_PANEL_FLAG.tmp" "$UI_PANEL_FLAG" 2> /dev/null
+  exit 0
 }
 
 # ---------------------------------------------------------------------------
@@ -3552,6 +3648,13 @@ attach_run() {
 
   local st pnum
   while :; do
+    # "q Sair" no attach fecha so o attach: o run alheio nem fica sabendo.
+    if $UI_ACTIVE && ui_panel_gone; then
+      ui_panel_closed
+      log "attach: painel fechado — o run segue sem ser tocado."
+      break
+    fi
+
     ui_load_state
     st="${UIV_run_status:-}"
     pnum="${UIV_phase_num:-0}"

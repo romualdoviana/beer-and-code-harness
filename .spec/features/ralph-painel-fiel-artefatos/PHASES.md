@@ -79,7 +79,7 @@ Antes de implementar, leia:
 1. `.spec/features/ralph-painel-fiel-artefatos/SPEC.md` — requisitos RIGID que esta fase cobre
 2. `.spec/features/ralph-painel-fiel-artefatos/PLAN.md` — decomposição completa, dependências e riscos
 
-- [ ] T01 — "q Sair" e restauração em todo caminho de saída (PLAN: T08)
+- [x] T01 — "q Sair" e restauração em todo caminho de saída (PLAN: T08)
       Arquivos: `scripts/ralph.sh`, `scripts/test-ralph.sh`
       Mudança: `q` e clique em `quit` fazem o pintor desligar o mouse, emitir `ESC[0m ESC[?25h ESC[?1049l`, restaurar `stty`, reimprimir o `messages.log`, gravar `.phases/ui/.panel-closed` (`.panel-closed.attach` no attach) com a contagem reimpressa e sair; `ui_panel_gone` (flag OU pintor morto) checado em `log/success/warn/fail` e `ui_stop` passa o run para placar corrido, reimprime o restante e não reemite `1049l`; `ui_stop`/`on_interrupt` desligam o mouse antes de `ESC[?1049l`; no `--attach`, `q` encerra o attach sem tocar no run; nenhum veredito, commit ou exit code muda.
       Cobre: RF-03, RF-08, RF-12, RNF-04, RNF-06

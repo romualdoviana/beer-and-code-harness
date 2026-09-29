@@ -35,6 +35,18 @@ assert_contains() {
   if grep -qF -- "$needle" "$haystack_file"; then ok "$msg"; else bad "$msg (nao achou '$needle')"; fi
 }
 
+# mouse_off_before_last_1049l <arquivo> -> "ok" quando o desligamento do relato
+# de mouse (ESC[?1000l) sai antes do ULTIMO ESC[?1049l da captura.
+mouse_off_before_last_1049l() {
+  python3 - "$1" <<'PY'
+import sys
+t = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+last = t.rfind('\x1b[?1049l')
+off = t.rfind('\x1b[?1000l', 0, last if last >= 0 else 0)
+print('ok' if last >= 0 and off >= 0 else 'mouse=%d buffer=%d' % (off, last))
+PY
+}
+
 assert_not_contains() {
   local haystack_file="$1" needle="$2" msg="$3"
   if grep -qF -- "$needle" "$haystack_file"; then bad "$msg (achou '$needle')"; else ok "$msg"; fi
@@ -2224,11 +2236,132 @@ if case_enabled ui-painter-exit; then
     assert_not_contains "$d/depois.log" "VALIDAÇÃO DA FASE" \
       "nenhuma caixa de gates repintada depois do fim do run"
 
+    # Mouse desligado ANTES de sair do buffer (RF-08): ligado, cada clique no
+    # shell depois do run imprimiria o relato como lixo.
+    assert_eq "ok" "$(mouse_off_before_last_1049l "$d/out.log")" \
+      "fim normal: ESC[?1000l antes do ultimo ESC[?1049l"
+
+    # SIGINT no meio da fase: o mesmo desligamento, pelo on_interrupt.
+    d2=$(new_case ui-painter-exit-int)
+    (
+      cd "$d2/repo" || exit 1
+      ( sleep 3; printf '\003'; sleep 4 ) \
+        | PATH="$d2/bin:$PATH" \
+          MOCK_STATE="$d2/state" MOCK_SCENARIO=slow-engine MOCK_TEST_CMD="$d2/test.sh" \
+          RALPH_HEARTBEAT=0 \
+          timeout 60 script -qec \
+            "stty rows 40 cols 144; stty -g > '$d2/stty.before'; bash '$RALPH' --engine codex --test-cmd '$d2/test.sh'; stty -g > '$d2/stty.after'; echo RALPH_SAIU; sleep 2" \
+            /dev/null
+    ) > "$d2/out.log" 2>&1 || true
+    assert_contains "$d2/out.log" "Interrompido pelo operador" "SIGINT chegou ao run dentro do pty"
+    assert_eq "ok" "$(mouse_off_before_last_1049l "$d2/out.log")" \
+      "SIGINT: ESC[?1000l antes do ultimo ESC[?1049l"
+    assert_eq "$(cat "$d2/stty.before" 2> /dev/null)" "$(cat "$d2/stty.after" 2> /dev/null || echo ausente)" \
+      "SIGINT: stty -g depois igual ao de antes"
+    sed -n '/RALPH_SAIU/,$p' "$d2/out.log" > "$d2/depois.log"
+    assert_not_contains "$d2/depois.log" "VALIDAÇÃO DA FASE" "SIGINT: nenhum frame depois do fim do run"
+
     # Varredura de seguranca, nao assert: sob `script` o pty morre junto com o
     # run e leva o orfao a tiracolo, entao a checagem de processo nunca ficaria
     # vermelha aqui — no terminal do dev, que segue aberto, o orfao vive para
     # sempre. Se sobrou algo desta suite, mata antes de seguir.
     pkill -f "$painter_probe" 2> /dev/null || true
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 46b. "q Sair" fecha SO o painel (RF-03, RF-08, RF-12). O run segue no mesmo
+#      processo, agora em placar corrido, e termina exatamente como um run
+#      --no-ui do mesmo roteiro: exit code, vereditos e commits. Vermelho se o
+#      `q` matar o run, perder linha do placar ou deixar o mouse ligado.
+# ---------------------------------------------------------------------------
+if case_enabled ui-quit-panel; then
+  header "46b. q Sair fecha so o painel; o run segue em placar corrido"
+  if ! command -v script > /dev/null 2>&1; then
+    echo "  (util-linux 'script' ausente: caso do q Sair pulado)"
+  else
+    # quit_run <dir> <modo>: mesmo roteiro e mesmo ambiente nos dois runs; so
+    # muda o painel. Com painel, `q` chega pelo pty aos 3s — dentro da sessao
+    # de 5s da fase 1 (slow-engine).
+    quit_run() {
+      local dir="$1" mode="$2"
+      (
+        cd "$dir/repo" || exit 1
+        local -a menv=(env "PATH=$dir/bin:$PATH" "MOCK_STATE=$dir/state" MOCK_SCENARIO=slow-engine
+          "MOCK_TEST_CMD=$dir/test.sh" RALPH_HEARTBEAT=0 RALPH_VERIFY=always)
+        if [ "$mode" = plain ]; then
+          "${menv[@]}" bash "$RALPH" --engine codex --test-cmd "$dir/test.sh" --no-ui > "$dir/out.log" 2>&1
+          echo $? > "$dir/rc"
+        else
+          ( sleep 3; printf 'q'; sleep 1 ) \
+            | "${menv[@]}" timeout 120 script -qec \
+              "stty rows 40 cols 144; stty -g > '$dir/stty.before'; bash '$RALPH' --engine codex --test-cmd '$dir/test.sh' & echo \$! > '$dir/pid.start'; wait \$!; echo \$? > '$dir/rc'; stty -g > '$dir/stty.after'; echo RALPH_SAIU; sleep 2" \
+              /dev/null > "$dir/out.log" 2>&1
+        fi
+      ) || true
+    }
+    quit_verdicts() {
+      grep '"event": "gate_end"' "$1/repo/.phases/events.jsonl" 2> /dev/null \
+        | sed -E 's/.*"phase": ([0-9]+), "cycle": ([0-9]+), "gate": ([0-9]+), "verdict": "([a-z]+)".*/\1 \2 \3 \4/' \
+        | tr '\n' ' '
+    }
+
+    d=$(new_case ui-quit-panel)
+    dp=$(new_case ui-quit-plain)
+    quit_run "$d" panel
+    quit_run "$dp" plain
+
+    assert_contains "$d/out.log" "EM ANDAMENTO" "o painel chegou a desenhar antes do q"
+    assert_contains "$d/out.log" "RALPH_SAIU" "o run terminou dentro do pty"
+    assert_eq "$(cat "$dp/rc")" "$(cat "$d/rc" 2> /dev/null || echo ausente)" "mesmo exit code do run --no-ui"
+    assert_eq "$(commits "$dp")" "$(commits "$d")" "mesmo numero de commits do run --no-ui"
+    assert_eq "$(quit_verdicts "$dp")" "$(quit_verdicts "$d")" "mesmos vereditos gate_end do run --no-ui"
+    # O run nunca foi reiniciado: o estado final e do PID que o pty lancou.
+    assert_eq "$(cat "$d/pid.start" 2> /dev/null)" "$(sed -n 's/^pid=//p' "$d/repo/.phases/ui/state.env" 2> /dev/null | tail -1)" \
+      "o estado final foi publicado pelo mesmo PID que comecou o run"
+    if [ -f "$d/repo/.phases/ui/.panel-closed" ]; then
+      ok "o pintor gravou .phases/ui/.panel-closed"
+    else
+      bad "o pintor gravou .phases/ui/.panel-closed"
+    fi
+
+    # Tudo depois do ultimo 1049l e a tela normal: placar corrido, sem frame.
+    python3 - "$d/out.log" "$d/depois.txt" <<'PY'
+import sys
+t = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+i = t.rfind('\x1b[?1049l')
+open(sys.argv[2], 'w').write(t[i:] if i >= 0 else '')
+PY
+    # O q chegou na fase 1: o painel fechou ali, entao nenhum frame da fase 2
+    # foi pintado — com o painel aberto ate o fim, a fase 2 teria ~5s de frames.
+    python3 - "$d/out.log" "$d/antes.txt" <<'PY'
+import re, sys
+t = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+i = t.rfind('\x1b[?1049l')
+open(sys.argv[2], 'w').write(re.sub(r'\x1b\[[0-9;?]*[A-Za-z]', '', t[:i] if i >= 0 else t))
+PY
+    assert_contains "$d/antes.txt" "EM ANDAMENTO / FASE 01" "o painel pintou a fase 1"
+    assert_not_contains "$d/antes.txt" "EM ANDAMENTO / FASE 02" "o painel fechou na fase 1 (nenhum frame da fase 2)"
+    assert_not_contains "$d/depois.txt" "VALIDAÇÃO DA FASE" "nenhum frame depois que o painel fechou"
+    assert_not_contains "$d/depois.txt" "EM ANDAMENTO" "nenhuma caixa da fase depois que o painel fechou"
+    # Toda linha do placar aparece UMA vez na tela normal: o pintor reimprime o
+    # que havia, o principal o resto — nada perdido, nada em dobro.
+    lost=0; dup=0
+    while IFS=$'\t' read -r _ _ text; do
+      [ -n "$text" ] || continue
+      n=$(grep -cF -- "$text" "$d/depois.txt" || true)
+      [ "$n" -ge 1 ] || lost=$((lost + 1))
+      [ "$n" -le 1 ] || dup=$((dup + 1))
+    done < "$d/repo/.phases/ui/messages.log"
+    assert_eq "0 0" "$lost $dup" "placar inteiro reimpresso uma vez (perdidas duplicadas)"
+    # Depois do q o run segue logando direto no terminal: o relatorio final
+    # sai na tela normal.
+    assert_contains "$d/depois.txt" "Commit criado: feat(phase-2)" "placar corrido segue ate o fim do run"
+    assert_eq "1" "$(grep -o $'\033\\[?1049l' "$d/out.log" | wc -l | tr -d ' ')" \
+      "o principal nao reemite ESC[?1049l depois que o pintor restaurou"
+    assert_eq "ok" "$(mouse_off_before_last_1049l "$d/out.log")" "q: ESC[?1000l antes do ultimo ESC[?1049l"
+    assert_eq "$(cat "$d/stty.before" 2> /dev/null)" "$(cat "$d/stty.after" 2> /dev/null || echo ausente)" \
+      "q: stty -g depois igual ao de antes"
   fi
 fi
 
