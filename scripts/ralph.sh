@@ -4973,8 +4973,10 @@ run_engine() {
 
   # Caveman so nas sessoes que escrevem codigo. O verificador emite contrato de
   # maquina (`TASK <n>: DONE|INCOMPLETE`), ja e minimo, e comprimir prosa la
-  # arriscaria o gate 3 sem economizar nada.
-  local cave_env=()
+  # arriscaria o gate 3 sem economizar nada. Quando o ralph NAO injeta nivel
+  # (verificador ou RALPH_CAVEMAN=off), a variavel herdada do shell do dev e
+  # removida: senao um `CAVEMAN_DEFAULT_MODE=ultra` exportado vaza para a sessao.
+  local cave_env=(-u CAVEMAN_DEFAULT_MODE)
   if [[ "$ENGINE" == "claude" && "$mode" != "verify" && "$CAVEMAN_MODE" != "off" ]]; then
     cave_env=(CAVEMAN_DEFAULT_MODE="$CAVEMAN_MODE")
   fi
@@ -5052,7 +5054,8 @@ run_engine() {
       # ferramenta + alvo. O veredito continua saindo do evento `result`.
       if [[ "$mode" == "verify" ]]; then
         run_split "$log_file" "$err_log" /dev/null \
-          env -u CLAUDECODE claude --dangerously-skip-permissions \
+          env -u CLAUDECODE ${cave_env[@]+"${cave_env[@]}"} \
+          claude --dangerously-skip-permissions \
           ${model_args[@]+"${model_args[@]}"} \
           -p "$(cat "$prompt_file")" \
           --allowedTools "Read,Glob,Grep" \

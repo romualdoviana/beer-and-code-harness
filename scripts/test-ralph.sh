@@ -2481,6 +2481,17 @@ if case_enabled caveman; then
   rc=$(CASE_CAVEMAN=off run_ralph "$d2" ok --engine claude --test-cmd "$d2/test.sh")
   assert_eq 0 "$rc" "exit 0 (off)"
   assert_not_contains "$d2/state/caveman_impl" "ultra" "RALPH_CAVEMAN=off nao injeta nivel nenhum"
+
+  # Regressao: CAVEMAN_DEFAULT_MODE exportado no shell do dev vazava para as
+  # sessoes onde o ralph NAO injeta nivel (verificador e RALPH_CAVEMAN=off).
+  d3=$(new_case caveman-herdado)
+  rc=$(CAVEMAN_DEFAULT_MODE=ultra run_ralph "$d3" ok --engine claude --test-cmd "$d3/test.sh")
+  assert_eq 0 "$rc" "exit 0 (nivel herdado do shell)"
+  assert_not_contains "$d3/state/caveman_verify" "ultra" "o nivel herdado do shell nao vaza para o verificador"
+  d4=$(new_case caveman-off-herdado)
+  rc=$(CAVEMAN_DEFAULT_MODE=ultra CASE_CAVEMAN=off run_ralph "$d4" ok --engine claude --test-cmd "$d4/test.sh")
+  assert_eq 0 "$rc" "exit 0 (off com nivel herdado)"
+  assert_not_contains "$d4/state/caveman_impl" "ultra" "RALPH_CAVEMAN=off remove o nivel herdado do shell"
 fi
 
 # ---------------------------------------------------------------------------
