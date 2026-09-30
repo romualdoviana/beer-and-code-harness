@@ -217,3 +217,9 @@ Every checkbox carries `Acceptance criteria:` — ralph's independent verifier (
 
 - `.spec/features/[slug]/PLAN.md` + `.spec/features/[slug]/PHASES.md` paths + task count, phase count, risk highlights, contract files written (paths) when emitted.
 - Open questions count, assumptions count.
+
+## What to Avoid
+
+| Bug | Root cause | Prevention |
+|-----|-----------|------------|
+| `ralph.sh` run fails with "bloqueio de especificacao" on a phase whose tasks need a human operator (pair a device by QR, send messages from a phone, deploy to a real server with secrets typed in a terminal) | The planner put a human-in-the-loop phase in the autonomous PHASES.md queue and made later automatable phases depend on its output, so the unattended engine could neither do it nor legitimately fake its artifacts | Keep human-operated steps out of the ralph queue: schedule them before the run (done interactively with the developer) or after the last automatable phase, and never make an automatable phase depend on an artifact only a human can produce; flag each such step as `Manual:` in PLAN.md |
