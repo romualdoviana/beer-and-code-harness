@@ -3089,6 +3089,14 @@ if case_enabled rescue-green; then
   assert_contains "$d/repo/.phases/events.jsonl" '"verdict": "green"' "evento de desfecho do resgate"
 fi
 
+if case_enabled rescue-verify-auto; then
+  header "R1b. resgate com RALPH_VERIFY=auto nao quebra a comparacao numerica do ciclo"
+  d=$(new_case rescue-verify-auto)
+  rc=$(CASE_RESCUE=on CASE_VERIFY=auto run_ralph "$d" rescue-fix --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --max-repairs 2)
+  assert_eq 0 "$rc" "exit 0 — a fase fecha pelo resgate em modo auto"
+  assert_not_contains "$d/out.log" "integer expression expected" "rotulo rescueN nao entra em teste numerico do gate 3"
+fi
+
 # ---------------------------------------------------------------------------
 # R2. O prompt de resgate e o OPOSTO do conserto: carrega contexto, a fase
 #     inteira, a desistencia verbatim e as regras de teste. Sem isso a sessao

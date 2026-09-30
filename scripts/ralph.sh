@@ -6756,7 +6756,7 @@ gate3_independent_verify() {
       #
       # A condicao certa e o veredito do gate 2 desta fase: ele rodou teste de
       # verdade e passou.
-      if [ -z "$VERIFY_ONLY_IDX" ] && [ "$cycle" -eq 1 ] && [ "$session_wrote" -eq 1 ] \
+      if [ -z "$VERIFY_ONLY_IDX" ] && [ "$cycle" = "1" ] && [ "$session_wrote" -eq 1 ] \
         && [ -n "$TEST_CMD" ] && [ "${GATE2_SCOPE:-full}" != "skip" ]; then
         log "Gate 3 pulado: a suite cobriu esta fase e passou (RALPH_VERIFY=always para rodar sempre)"
         gate_end 3 skip
