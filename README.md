@@ -53,10 +53,14 @@ Commands are namespaced: `/bc-harness:init`, `/bc-harness:plan`, etc. (abbreviat
 
 `ralph.sh` is a standalone bash script — copy or reference `scripts/ralph.sh` and run it directly in the target project's repository.
 
+Current plugin version: **0.5.0** (`.claude-plugin/plugin.json`). `ralph.sh` has no version of its own — it ships with the plugin.
+
 **ralph.sh prerequisites:**
 
-- Codex engine: `npm install -g @openai/codex` + `OPENAI_API_KEY`
-- Claude engine: `npm install -g @anthropic-ai/claude-code` + `ANTHROPIC_API_KEY`
+- Codex engine (default): `npm install -g @openai/codex`, authenticated
+- Claude engine: `npm install -g @anthropic-ai/claude-code`, authenticated, **plus `jq`** (required: every claude verdict is read from the `stream-json` output)
+- Preflight only checks that the engine CLI is on `PATH` — a logged-in CLI or an exported API key both work
+- bash 4+, git, coreutils; optional `python3` (`--serve`), `docker` (environment recovery)
 - Root of a git repository with a **clean** working tree
 
 ## Commands
@@ -104,6 +108,8 @@ Key characteristics:
 - **Human checkpoints** at every step: confirmation of the normalized input, SPEC approval, ambiguity resolution, decomposition sign-off.
 - **Two-phase clarifier** — the agent analyzes the SPEC and returns prioritized questions; the router presents them to the developer and re-invokes the agent with the answers, which updates the SPEC in-place.
 - **Architecture gate** — requires `AGENTS.md` / `docs/agents/` (or warns and flags `architecture_reference_status: missing`). The pipeline never plans silently without architecture context.
+- **Per-phase task numbering** — `PHASES.md` checkboxes restart at `T01` inside every phase, with a trailing `(PLAN: TNN)` tag pointing back to the PLAN.md task. ralph's gate 3 indexes tasks by position within the phase, so continuous numbering across phases would fail a finished phase.
+- **Screens without an artboard** — a task with a `Tela:` field whose PNG-target (3rd field) is empty must carry `Referência visual:` and `Layout:` lines; the 3rd field is positional, never prose.
 - **Never writes application code.** The close-out points at the execution handoff:
 
 ```bash
@@ -147,7 +153,7 @@ High tier closes with the execution handoff:
 ### `/ai-context` — canonical context tree
 
 ```
-/ai-context [path] [+id] [-id] [--adopt]
+/ai-context [path] [+file] [-file] [--adopt]
 ```
 
 Generates or refreshes 10 artifacts from the **implemented code** (never reads `.spec/`):
@@ -170,8 +176,8 @@ Core rules:
 - **Idempotent** — safe upsert; re-running updates only what drifted.
 - **Documents reality (AS IS)** — code, manifests, CI, and configs are the only sources; never invents, never prescribes.
 - **Ownership contract** — every generated file carries a banner on line 3. A file without the banner (hand-written) is never clobbered; `--adopt` folds its concrete rules into the generated tree and takes ownership.
-- **Preserves third-party blocks** — `<tag>...</tag>` regions (e.g. Laravel Boost) are re-appended verbatim on regeneration.
-- `+id` / `-id` filters generate only a subset (e.g. `/ai-context +AGENTS +architecture`).
+- **Preserves third-party blocks** — `<tag>...</tag>` regions (e.g. Laravel Boost) are re-appended verbatim on regeneration. A block closes only on the closing tag **with the same name**, so inner lines such as `</code-snippet>` stay inside it.
+- `+file` / `-file` filters generate only a subset (e.g. `/ai-context +AGENTS +architecture`).
 
 ## `scripts/ralph.sh` — execution orchestrator
 
@@ -183,7 +189,9 @@ Reads a phase document, splits it on the `## Phase N: <title>` heading, and feed
 
 With no argument, the input resolves in this order: `.spec/init/project-phases.md` → `.spec/project-phases.md` (pre-init layout, with a warning). A feature `PHASES.md` is also valid input.
 
-> **Autonomy and permissions note**: ralph is an unattended orchestrator by design. With the Claude engine, implementation sessions run with `--dangerously-skip-permissions` — the agent can edit files and run commands in the repository without prompting. Run it only in repositories you trust, ideally in a disposable branch or isolated environment (container/VM). Every phase lands as a separate commit, so `git revert`/`git reset` always gets you back. The verification session (gate 3) is restricted to read-only tools (`Read,Glob,Grep`).
+> **Autonomy and permissions note**: ralph is an unattended orchestrator by design. Implementation sessions run without permission prompts — claude with `--dangerously-skip-permissions`, codex with `--sandbox danger-full-access` — so the agent can edit files and run commands in the repository freely. Run it only in repositories you trust, ideally in a disposable branch or isolated environment (container/VM). Every phase lands as a separate commit, so `git revert`/`git reset` always gets you back. The verification session (gate 3) is read-only: claude gets only `Read,Glob,Grep`; codex runs with `--sandbox read-only` and is told to inspect only with `rg`, `sed`, `git diff`, and `git status`.
+>
+> `--attach` draws the panel over a run **already in progress** in the same directory, from a second terminal: it runs no phase, needs no clean tree, and is read-only over the run.
 
 ### Invariants
 
@@ -191,18 +199,30 @@ With no argument, the input resolves in this order: `.spec/init/project-phases.m
 2. Zero questions — fully autonomous execution.
 3. A phase is only "complete" when it passes the **4 mechanical gates**, never by the engine's exit code.
 4. API usage limit → waits for the reset and re-runs the **same** phase, without consuming a fix cycle.
-5. **One commit per completed phase** (`feat(phase-N): <title>`).
+5. **One commit per completed phase** (`feat(phase-N): <title>`). Before committing, ralph ticks the phase's checkboxes (`- [x]`) in the input document; the progress stamp ignores checkbox state.
+6. A surgical repair or a rescue never commits and never replaces a gate.
+
+Commits ralph can create:
+
+| Commit | When |
+|---|---|
+| `feat(phase-N): <title>` | Phase passed the gates (a rescue-closed phase adds a body line saying so) |
+| `test(baseline): sanea o vermelho herdado de HEAD` | HEAD healing turned an inherited red suite green |
+| `wip(phase-N): incomplete — see .phases/logs/` | Phase failed with `--keep-going` |
+| `wip(phase-N): interrompido por falha de ambiente — see .phases/logs/` | Run ended by a downed environment |
 
 ### The 4 gates
 
 | Gate | Question | How it decides |
 |---|---|---|
 | 0 | Did the engine actually finish? | claude: `is_error` in the result JSON; codex: exit code |
-| 1 | Did the session write code? | Tree signature before/after. **A signal, not a verdict** — an already-implemented phase makes the engine (correctly) write nothing; the signal feeds the fix-cycle cause |
+| 1 | Did the session write code? | Tree signature (including `HEAD`, so a session that commits by itself counts) before/after. **A signal, not a verdict** — an already-implemented phase makes the engine (correctly) write nothing; the signal feeds the fix-cycle cause |
 | 2 | Do the project's tests pass? | Run **by ralph itself**, outside the agent session — the agent cannot "fake green". The **scope varies per phase**: see below |
-| 3 | Is each task actually in the code? | Independent read-only verifier session that emits `TASK <n>: DONE/INCOMPLETE` per task. Runs when gate 2's verdict isn't enough — a phase the suite did not cover, a session that wrote nothing, a fix cycle (`RALPH_VERIFY=auto`, default); `always` runs it on every phase. On the claude engine it uses `sonnet` |
+| 3 | Is each task actually in the code? | Independent read-only verifier session that emits `TASK <n>: DONE — <evidence>` / `TASK <n>: INCOMPLETE` per task. With `RALPH_VERIFY=auto` (default) it is **skipped** only when gate 2 really ran tests for this phase and passed, on cycle 1, after a session that wrote code; otherwise it runs. `always` runs it on every phase. On the claude engine it uses `sonnet` |
 
-Any red gate → **fix cycle**: a fresh session receives the full phase + the real failure cause (never a generic "tests failed"). Default: 3 cycles per phase.
+Gate 3 details: tasks are indexed **by position** (`1..N`) inside the phase; if the verifier answers with labels (`T03`) they are mapped back to positions. With `RALPH_VERIFY_EVIDENCE=required` (default), a `DONE` without `— <evidence>` (`file:line` or a `.png` path) fails the gate on protocol.
+
+Any red gate → **fix cycle**: a fresh session receives the full phase + the real failure cause (never a generic "tests failed"). Default: 2 cycles per phase.
 
 Green gates with a clean tree → the phase was already implemented at HEAD: marked done, no commit.
 
@@ -222,13 +242,15 @@ Per phase, gate 2 resolves one of three scopes, first rule that matches:
 | 6 | A test file was changed in the tree or named in the phase's `Testes:` field, and the runner accepts paths | only those tests |
 | 7 | None of the above | not run — gate 3 alone judges the phase |
 
-Fail-safe on every edge: a runner that does not take a path (`go`, `cargo`, an unknown command, a compound command) falls back to the whole suite, never to a scoped run. A phase may **escalate** rigor (`Suite: completa`), never lower it. And gate 3 — independent task-by-task verification — still runs in full on every phase: scope shortens gate 2, never the proof that the phase was done.
+Fail-safe on every edge: a runner that does not take a path (`go`, `cargo`, an unknown command, a compound command) falls back to the whole suite, never to a scoped run. A phase may **escalate** rigor (`Suite: completa`), never lower it. And a phase whose gate 2 was skipped (rule 7) always goes through gate 3: scope shortens gate 2, never the proof that the phase was done.
+
+The `Testes:` field is also a mandate for the executor: it must create exactly the tests listed there, no more.
 
 `--full-suite` restores the previous behavior (whole suite on every phase).
 
 ### Surgical repair (before the cycle)
 
-A fix cycle is expensive: a fresh session with the context preamble, the whole phase in the prompt, and full project access. Paying that because **one** assertion went red is waste. Before spending a cycle, ralph can try **surgical repairs** (`RALPH_MAX_REPAIRS`, default `0` — off; `RALPH_REPAIR=on` re-enables):
+A fix cycle is expensive: a fresh session with the context preamble, the whole phase in the prompt, and full project access. Paying that because **one** assertion went red is waste. Before spending a cycle, ralph can try **surgical repairs**. **Off by default**: enable with `RALPH_REPAIR=on` plus `RALPH_MAX_REPAIRS=N` (or `--max-repairs N`). With `RALPH_REPAIR` off, `--max-repairs` alone has no effect.
 
 - **Minimal prompt**: only the failure signature — the failing test, `file:line`, the assertion message — or only the verifier's `INCOMPLETE` lines. No preamble, no phase.
 - **Its own strong model** (`RALPH_REPAIR_MODEL`, claude default `opus`): it is the only step that writes code from a minimal context, and the only one that can abort the phase on its own (`REPAIR_ABORT`). A blind patch and a wrong bail-out both cost more than the model difference.
@@ -258,6 +280,33 @@ The rescue is the step with the authority that was missing — **1 session per p
 
 `--no-rescue` (or `--max-rescues 0`) turns it off and restores the previous behavior: stuck phase → the run stops.
 
+### HEAD healing (red inherited from HEAD)
+
+**Opt-in** (`--heal-head` or `RALPH_HEAL_HEAD=on`; off by default, because the full suite at HEAD cost minutes before any phase moved). When on, before phase 1 ralph runs the suite **once at HEAD** (the tree is clean, guaranteed by preflight). Red there is not any phase's defect — it is red the run inherited, and it would trap the fix cycle of every phase.
+
+- One **healing session** (`RALPH_HEAL_ROUNDS`, default 1) gets an explicit mandate to fix the inherited red — including updating an obsolete guard of another feature when the frozen text changed by a recorded decision, while preserving the rule the guard protects. It may give up with `HEAL_ABORT: <reason>`.
+- Green → its own commit, `test(baseline): sanea o vermelho herdado de HEAD`, and the run proceeds on a clean HEAD.
+- Still red → aborts **before phase 1**, naming the tests: a human call that costs one suite run instead of a whole phase.
+- `--baseline` takes precedence and disables healing (the red is declared intentional, e.g. TDD with the test committed red). `--no-heal-head` (or `RALPH_HEAL_HEAD=off`) keeps it off.
+
+### Visual evidence (`Tela:` field)
+
+A task may carry, inside its checkbox block:
+
+```
+Tela: <route> | <CSS selector>[, <selector>...] | <png-target> | <theme>
+```
+
+Route and selectors are required; the PNG-target and the theme are optional. ralph itself — never the engine — takes the screenshots with `RALPH_UI_SHOT_CMD` / `--ui-shot-cmd` (empty = auto-detect `scripts/ralph-ui-shot.{mjs,js,sh,py}` in the project), called as `<cmd> <route> <out.png> [<selectors>] [<theme>]`, once per viewport (`RALPH_UI_VIEWPORT=desktop|mobile`). Captures land in `.phases/evidence/<phase>/task-<n>[-mobile].png`; the verifier reads the capture **and** the target and fails objective visual defects. The executor uses the same command to check itself in `.phases/selfcheck/` before delivering.
+
+**Fail-closed**: a phase with `Tela:` and no capture command fails. `--no-ui-verify` (or `RALPH_UI_VERIFY=off`) turns it off on purpose.
+
+### Usage limits
+
+A usage limit is not a failure: ralph waits for the reset and re-runs the **same** phase without spending a cycle. While waiting, a `Retomando em …` line is logged only at milestones (4h/3h/2h/1h/30m/15m/5m/1m), not with the panel active.
+
+**Weekly limit**: if the reset is further away than `RALPH_WEEKLY_THRESHOLD` (default 21600 s = 6 h), ralph does **not** sleep — it ends the run with exit 1, fires `limit_abort`, and prints the resume command (`./ralph.sh <file> --from N`). Detection covers the claude CLI 2.x "session limit" text and `api_error_status: 429`.
+
 ### Environment down (gate 2's own verdict)
 
 An external service that is down — database, cache, queue, a container killed by host memory pressure — is **not a code defect**: the suite never got to judge the phase. Treating it as a red gate 2 costs a cycle, costs a surgical repair, and in the end throws the phase's work away, because no patch brings a dead container back.
@@ -266,13 +315,13 @@ When it recognizes the signature (connection refused, DNS that does not resolve,
 
 1. **Tries to bring back what is down** — `docker start` on the containers **named in the error itself** (they may belong to another compose project) and, if the project uses Sail with its containers stopped, `sail up -d`.
 2. **Re-runs the suite once** (once per phase). Back to green: the run continues normally, no cycle spent.
-3. **Still down**: it ends the **whole run** — even with `--keep-going`, because the next phase would hit the same dead service —, saves the phase's work as `wip(phase-N): interrompido por falha de ambiente` and exits with **exit code 3**.
+3. **Still down**: it ends the **whole run** — even with `--keep-going`, because the next phase would hit the same dead service —, saves the phase's work as `wip(phase-N): interrompido por falha de ambiente — see .phases/logs/` and exits with **exit code 3**.
 
 Re-running with the environment up revalidates the phase and continues where it stopped. `--no-env-guard` (or `RALPH_ENV_GUARD=off`) turns it off — useful if your suite **asserts** connection error messages and the guard mistakes them for a downed environment.
 
 ### Test command detection (gate 2)
 
-First rule that resolves wins: `--test-cmd` → `RALPH_TEST_CMD` → manifest detection (Laravel Sail → `composer test` → `php artisan test` → `npm test` → `pytest` → `go test ./...` → `cargo test`) → nothing resolved = gate 2 skipped with a loud warning (gate 3 holds the line alone).
+First rule that resolves wins: `--test-cmd` → `RALPH_TEST_CMD` → a literal `RALPH_TEST_CMD='…'` (or `"…"`) declared in the phase document itself, used verbatim → manifest detection (Laravel Sail → `composer test` → `php artisan test` → `npm test` → `pytest` → `go test ./...` → `cargo test`) → nothing resolved = gate 2 skipped with a loud warning (gate 3 holds the line alone).
 
 Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail test`); stopped containers abort at preflight — every gate 2 would fail and burn fix cycles for nothing.
 
@@ -285,19 +334,27 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `--from N` | Starts at phase N (clears progress for phases ≥ N) |
 | `--keep-going` | Continues after a phase fails (creates a `wip(phase-N)` commit; default: stop) |
 | `--max-cycles N` | Fix cycles per phase (default: 2) |
-| `--max-repairs N` | Surgical repairs per cycle (default: 2; `0` disables) |
+| `--max-repairs N` | Surgical repairs per cycle (default: 0; only effective with `RALPH_REPAIR=on`) |
 | `--no-repair` | Disables surgical repair |
-| `--max-rescues N` | Rescue sessions per phase (default: 2; `0` disables) |
+| `--max-rescues N` | Rescue sessions per phase (default: 1; `0` disables) |
 | `--no-rescue` | Disables the rescue session |
 | `--rescue-model NAME` | Rescue session model (claude default: `opus`) |
 | `--test-cmd "<cmd>"` | Project test command (gate 2) |
 | `--full-suite` | Gate 2 runs the whole suite on every phase (previous behavior) |
-| `--baseline` | Measures what is already red at HEAD and makes gate 2 charge only the **delta** (default: off) |
+| `--baseline` / `--no-baseline` | Measures what is already red at HEAD and makes gate 2 charge only the **delta** (default: off; disables HEAD healing) |
+| `--heal-head` / `--no-heal-head` | Enables/disables HEAD healing before phase 1 (default: off) |
 | `--no-verify` | Disables gate 3 |
+| `--ui-shot-cmd "<cmd>"` | Screenshot command for `Tela:` tasks |
+| `--no-ui-verify` | Disables visual evidence |
 | `--no-env-guard` | Disables environment-down detection: every failure is a red phase again |
 | `--ui-layout <name>` | Initial screen: `cockpit` (default), `focus`, `diagnostic` |
+| `--verbose` / `--quiet` | Streams engine progress to the terminal / only ralph's scoreboard (default) |
 | `--ui` / `--no-ui` | Forces the ANSI panel on / off (see below) |
 | `--serve[=PORT]` | Local web dashboard over the same state |
+| `--attach` | Panel over a run already in progress in this directory; runs nothing |
+| `-h`, `--help` | Prints the script header |
+
+Every value option also accepts `--opt=value`. The verifier and repair models have no flag: use `RALPH_VERIFY_MODEL` / `RALPH_REPAIR_MODEL`.
 
 | Variable | Effect |
 |---|---|
@@ -308,11 +365,18 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `RALPH_BASELINE` | `on` enables the gate 2 baseline (same as `--baseline`; default: `off`) |
 | `RALPH_VERIFY` | Gate 3: `auto` (default: only when gate 2's verdict isn't enough) \| `always` \| `off` |
 | `RALPH_VERIFY_MODEL` | Verifier model (claude default: `sonnet`) |
+| `RALPH_VERIFY_EVIDENCE` | `required` (default: a `DONE` without evidence fails gate 3) \| `optional` |
+| `RALPH_HEAL_HEAD` | HEAD healing before phase 1: `off` (default) \| `on` |
+| `RALPH_HEAL_ROUNDS` | Healing sessions before aborting (default: 1) |
+| `RALPH_UI_VERIFY` | Visual evidence for `Tela:` tasks: `auto` (default) \| `off` |
+| `RALPH_UI_SHOT_CMD` | Screenshot command (empty = auto-detect `scripts/ralph-ui-shot.*`) |
+| `RALPH_UI_SHOT_TIMEOUT` | Capture timeout in seconds (default: 120) |
 | `RALPH_MODEL` | Model for the implementation/fix sessions (empty = the CLI's own) |
+| `RALPH_CAVEMAN` | Caveman plugin level for claude code-writing sessions (default: `ultra`; `off` disables; inert without the plugin) |
 | `RALPH_ENV_GUARD` | Environment-down detection: `on` (default) \| `off` |
 | `RALPH_ENV_RECOVER_TIMEOUT` | Seconds to wait for services when bringing them up (default: 90) |
 | `RALPH_MAX_CYCLES` | Fix cycles per phase (default: 2) |
-| `RALPH_REPAIR` | Surgical repair: `on` (default) \| `off` |
+| `RALPH_REPAIR` | Surgical repair: `off` (default) \| `on` |
 | `RALPH_MAX_REPAIRS` | Repairs per cycle (default: `0` = off) |
 | `RALPH_REPAIR_MODEL` | Surgical repair model (claude default: `opus`) |
 | `RALPH_RESCUE` | Rescue session: `on` (default) \| `off` |
@@ -323,15 +387,20 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `RALPH_MAX_LIMIT_WAITS` | Consecutive usage-limit waits, per phase (default: 20) |
 | `RALPH_LIMIT_WAIT_DEFAULT` | Fallback wait in seconds (default: 1800) |
 | `RALPH_LIMIT_BUFFER` | Extra seconds after the reset (default: 60) |
+| `RALPH_WEEKLY_THRESHOLD` | Reset further away than N seconds = weekly limit, run ends (default: 21600) |
 | `RALPH_NOTIFY_CMD` | Notification command (empty = disabled) |
 | `RALPH_NOTIFY_TIMEOUT` | Notification command timeout in seconds (default: 20) |
+| `RALPH_VERBOSE` | `1` streams engine progress (same as `--verbose`; default: 0) |
+| `RALPH_HEARTBEAT` | Seconds between heartbeats in quiet mode (default: 60; `0` disables) |
 | `RALPH_UI` | Panel: `auto` (default) \| `panel` \| `plain` |
 | `RALPH_UI_LAYOUT` | Initial screen: `cockpit` (default), `focus`, `diagnostic` |
 | `RALPH_UI_FPS` | Panel repaints per second (default: 2) |
 | `RALPH_UI_KEYS` | Keyboard and mouse in the panel (needs a readable `/dev/tty`): `1` (default) \| `0` disables both |
+| `RALPH_UI_GLYPHS` | Panel glyphs: `ascii` (default) \| `unicode` |
 | `RALPH_SERVE_PORT` | First port `--serve` tries (default: 7433) |
+| `RALPH_ATTACH_INTERVAL` | Seconds between refreshes in `--attach` (default: 3) |
 
-During each session, ralph exports `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, `RALPH_PHASE_MAX_ATTEMPTS`, `RALPH_PHASE_REPAIR` (repair round; `0` = none), and `RALPH_PHASE_RESCUE` (rescue round; `0` = none).
+During each session, ralph exports `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, `RALPH_PHASE_MAX_ATTEMPTS`, `RALPH_PHASE_REPAIR` (repair round; `0` = none), and `RALPH_PHASE_RESCUE` (rescue round; `0` = none). The capture command also receives `RALPH_UI_VIEWPORT`; the notification command receives `RALPH_EVENT`.
 
 ### Visual panel and web dashboard
 
@@ -354,6 +423,8 @@ TEMPO TOTAL        FASES CONCLUÍDAS       CICLO ATUAL          PROGRESSO / FASE
 ─────────────────────────────────────────────────────────────────────────────────
  1 Visão geral      2 Foco      3 Diagnóstico                 f Seguir    q Sair
 ```
+
+The mock-up above uses the Unicode glyphs (`RALPH_UI_GLYPHS=unicode`); the default is `ascii` (`>`, `*`, `#`, `.`, `+`, `-`, `^`), which renders on any terminal.
 
 The panel runs in the terminal's **alternate screen buffer** (like `vim` or `less`): it owns the screen during the run and, on exit, gives the terminal back with the previous scrollback intact. That is what allows a layout that adapts to the terminal size.
 
@@ -419,7 +490,7 @@ From each task ralph extracts **anchors** — backticked content, `CamelCase`, `
 The **`~` is deliberate**: it is a guess grounded in a real file, not a verdict. A file existing does not prove a correct implementation — gate 3 still judges the task, and its verdict (`✓ Concluída` / `! Incompleta`) **always** replaces the inference once it arrives. A task whose text cites no identifier produces no guess at all, rather than an invented one.
 
 
-Status marks: `✓ Concluída`, `▶ Em execução`, `! Incompleta`, `✗ Falhou`, `» Pulada`, `· Pendente`. Gate marks: `·` not run, `⣾` running (spinner), `✓` green, `✗` red, `⊘` skipped. While waiting on a usage limit, the header status becomes a countdown to the reset.
+Status marks: `✓ Concluída`, `✓ Declarada` (the engine ticked the checkbox; no gate 3 verdict yet), `▶ Em execução`, `! Incompleta`, `✗ Falhou`, `» Pulada`, `· Pendente`. Gate marks: `·` not run, `⣾` running (spinner), `✓` green, `✗` red, `⊘` skipped. While waiting on a usage limit, the header status becomes a countdown to the reset.
 
 `RALPH_UI=auto` (the default) draws the panel **only** when stdout is a TTY. Under `nohup`, in CI, or through a pipe the output is the line-by-line scoreboard, byte for byte identical to a ralph without the panel — that compatibility is asserted by the suite. `--verbose` always wins: the two engine streams need the terminal. With the panel active the scoreboard is diverted to `.phases/ui/messages.log`, shows in the footer, and is **reprinted in full on the normal screen** when the panel exits — otherwise it would live only in the file. Long output (a red gate's cause, the final report) always comes after the panel is torn down. **A failure to draw degrades to the scoreboard: the panel never changes a gate verdict or the exit code.**
 
@@ -434,7 +505,7 @@ The panel, the dashboard, and any external tool read the same two files. None of
 | `.phases/state.json` | JSON snapshot | The now: current phase, cycle, each gate's verdict, phase list with status, usage-limit wait, last engine progress line |
 | `.phases/events.jsonl` | append-only JSON Lines | The history: one line per transition |
 
-`state.json` is rewritten atomically (`tmp` + `mv`), so a concurrent reader sees the old version or the new one, never half a file. `events.jsonl` carries `gate_start` / `gate_end` — with verdict and duration — for all 4 gates on every phase, plus the same 7 events the notification hook receives, under the same names. Per-gate timing exists nowhere else in the harness.
+`state.json` is rewritten atomically (`tmp` + `mv`), so a concurrent reader sees the old version or the new one, never half a file. `events.jsonl` carries `phase_start`, `gate_start` / `gate_end` — with verdict and duration — for all 4 gates on every phase, `repair_start` / `repair_end`, `rescue_start` / `rescue_end`, plus the same 7 events the notification hook receives, under the same names. Per-gate timing exists nowhere else in the harness.
 
 ### Progress notifications
 
@@ -447,7 +518,7 @@ A long run does not need an open terminal. With `RALPH_NOTIFY_CMD` set, ralph ca
 | `phase_failed` | Phase rejected after `RALPH_MAX_CYCLES`, or the commit failed |
 | `limit_hit` | Usage limit reached — includes the predicted reset time |
 | `limit_over` | Limit lifted, resuming the same phase |
-| `limit_abort` | Aborted after `RALPH_MAX_LIMIT_WAITS` waits on the same phase |
+| `limit_abort` | Aborted after `RALPH_MAX_LIMIT_WAITS` waits on the same phase, or weekly limit hit |
 | `run_done` | Final report: completed, failed, skipped, and total duration |
 
 The command runs under `timeout` with stdin closed and every error is swallowed — **notifying never changes the run's outcome**. `RALPH_PROJECT` reaches the command's environment, which tells parallel runs of different projects apart.
@@ -465,7 +536,7 @@ The hook additionally receives `RALPH_OUTCOME`, `RALPH_RUN_ID`, `RALPH_GATE2`, `
 
 ### State and progress
 
-Internal work lives in `.phases/` (registered in `.git/info/exclude`, without touching the project's `.gitignore`): split phases, prompts, logs, manifest, `.progress`, the structured state (`state.json`, `events.jsonl`) and the panel/dashboard assets (`ui/`). Progress survives across runs, but only for the **same input** (sha256 stamp) — a changed phase document resets progress.
+Internal work lives in `.phases/` (registered in `.git/info/exclude`, without touching the project's `.gitignore`): split phases, prompts, logs, manifest, `.progress`, the structured state (`state.json`, `events.jsonl`), the panel/dashboard assets (`ui/`) and the screenshots (`evidence/`, `selfcheck/`). Progress survives across runs, but only for the **same input** (sha256 stamp) — a changed phase document resets progress.
 
 Every engine session writes **two** logs, never merged:
 
@@ -476,16 +547,18 @@ Every engine session writes **two** logs, never merged:
 
 Both go whole to the logs; `--verbose` also streams them live. Merging them (`2>&1`) made Codex echo the final response into both streams, so gate 3 counted every task twice and failed a fully implemented phase for "incomplete coverage". Gate 3 therefore measures coverage in **unique task indices**: a duplicated echo neither inflates nor hides coverage, `INCOMPLETE` beats `DONE` on the same index, and an index outside `1..N` or a task with no verdict keeps the gate red.
 
-Exit code: `0` = all phases green; `1` = some phase failed or aborted; `3` = run ended by a downed environment (no verdict on the code — bring the services up and re-run).
+Exit code: `0` = all phases green (also `--attach`); `1` = some phase failed or aborted, including the usage-limit cap and the weekly limit; `3` = run ended by a downed environment (no verdict on the code — bring the services up and re-run); `130` = interrupted by the operator (INT/TERM).
 
 ### Input format contract
 
 Validated at preflight:
 
-- ≥ 1 heading `## Phase N: <title>`
+- ≥ 1 heading `## Phase N: <title>` (only this English form — `## Fase N` is not a phase)
 - No `## Phase ...` heading outside that format (a malformed heading silently disappears from the run — preflight aborts before burning tokens)
 - Sub-phases as `### Phase N.M:` (do not become their own session)
 - Any other `## ` heading ends the previous phase's capture
+- Tasks are `- [ ]` / `- [x]` lines; indented lines below a task belong to its block (`Testes:`, `Tela:`, …). A leading `T<n> —` label is stripped; gate 3 counts by position
+- Optional per-phase line `Suite: completa` (forces the whole suite in gate 2)
 
 ## Agents
 
@@ -506,7 +579,10 @@ The two `/ai-context` writers run in parallel (disjoint files, read-only digest)
 ## Repository structure
 
 ```
-.claude-plugin/plugin.json     plugin manifest
+.claude-plugin/
+  plugin.json                  plugin manifest (v0.5.0)
+  marketplace.json             marketplace descriptor
+hooks/hooks.json               PreToolUse(Bash) hook → scripts/sail-guard.sh
 commands/
   init.md                      /init (diagnostic router)
   init/                        /init:project-description, user-stories,
@@ -520,11 +596,19 @@ scripts/
   ralph.sh                     phase-by-phase execution orchestrator
   test-ralph.sh                red/green suite for ralph with a mock engine
   notify-telegram.sh           RALPH_NOTIFY_CMD adapter for Telegram
+  sail-guard.sh                hook: blocks host php/artisan/composer/… in
+                               Sail projects and suggests ./vendor/bin/sail
   check-init-drift.sh          guards against textual drift of the rules
                                duplicated across the init commands
   check-shell.sh               bash -n + shellcheck over scripts/*.sh
-docs/plans/                    internal hardening plans for the harness
+docs/agents/                   context tree generated by /ai-context
+AGENTS.md, CLAUDE.md           generated by /ai-context (do not hand-edit)
+README.md, README.pt-BR.md     this document (EN / PT-BR)
 ```
+
+### Sail guard hook
+
+The plugin registers a `PreToolUse` hook on `Bash`. In a project with `vendor/bin/sail`, it blocks host `php`, `artisan`, `composer`, `vendor/bin/*`, `mysql`, `mariadb`, `psql`, and `redis-cli` commands (exit 2) and prints the `./vendor/bin/sail …` equivalent on stderr. Without `jq` or `python3` to parse the hook input, it lets everything through (fail-open).
 
 ## Development
 

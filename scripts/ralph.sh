@@ -32,10 +32,10 @@
 #                            e RALPH_REPAIR_MODEL
 #   --from N                 comeca na fase N (limpa do progresso as fases >= N)
 #   --keep-going             continua apos uma fase falhar (default: para)
-#   --max-cycles N           ciclos de correcao por fase (default: 3)
-#   --max-repairs N          consertos cirurgicos por ciclo (default: 2; 0 = off)
+#   --max-cycles N           ciclos de correcao por fase (default: 2)
+#   --max-repairs N          consertos cirurgicos por ciclo (default: 0; so vale com RALPH_REPAIR=on)
 #   --no-repair              desliga o conserto cirurgico (RALPH_REPAIR=off)
-#   --max-rescues N          sessoes de resgate por fase (default: 2; 0 = off)
+#   --max-rescues N          sessoes de resgate por fase (default: 1; 0 = off)
 #   --no-rescue              desliga a sessao de resgate (RALPH_RESCUE=off)
 #   --rescue-model NOME      modelo do resgate (default: opus no claude)
 #   --baseline               mede as falhas ja existentes em HEAD antes do run e
@@ -43,9 +43,11 @@
 #                            ja esta vermelha por algo alheio as fases; NAO use
 #                            em fase cujo teste-alvo ja esta commitado vermelho,
 #                            porque o perdao seria permanente (RALPH_BASELINE=on)
-#   --no-heal-head           desliga o saneamento do HEAD (RALPH_HEAL_HEAD=off):
-#                            suite vermelha em HEAD volta a nao ser tratada e as
-#                            fases comecam sobre gate vermelho
+#   --heal-head              liga o saneamento do HEAD (RALPH_HEAL_HEAD=on): roda
+#                            a suite inteira em HEAD antes da fase 1 e sanea o
+#                            vermelho herdado. Default OFF: a suite completa
+#                            custa minutos antes de qualquer fase andar
+#   --no-heal-head           desliga o saneamento do HEAD (default; explicito)
 #   --no-verify              desliga o gate 3 (equivale a RALPH_VERIFY=off)
 #   --ui-shot-cmd "<cmd>"    comando que fotografa uma tela (evidencia visual
 #                            do gate 3; ver RALPH_UI_SHOT_CMD)
@@ -133,8 +135,8 @@
 #     7. nada disso                                                  -> pulado
 #   Fail-safe em toda borda: runner que nao aceita caminho (go, cargo, comando
 #   desconhecido) cai em completo, nunca em escopado. A fase pode DECLARAR mais
-#   rigor (`Suite: completa`), jamais menos. E o gate 3 — verificacao
-#   independente task a task — continua rodando inteiro em toda fase: escopo
+#   rigor (`Suite: completa`), jamais menos. E fase com gate 2 pulado (regra 7)
+#   sempre passa pelo gate 3 — verificacao independente task a task: escopo
 #   encurta o gate 2, nunca a prova de que a fase foi feita.
 #
 # Conserto cirurgico (repair) — acionamento independente entre o gate vermelho
@@ -190,7 +192,12 @@
 #   quando o bloqueio e contradicao da propria especificacao: nesse caso nenhum
 #   round adicional e gasto — a decisao e humana, nao de modelo.
 #
-# Vermelho herdado de HEAD — saneamento antes da primeira fase:
+# Vermelho herdado de HEAD — saneamento antes da primeira fase (OPT-IN):
+#
+#   DEFAULT OFF desde que a medicao em HEAD virou o gargalo do inicio do run: a
+#   suite completa rodava (minutos) antes de qualquer fase andar, em todo run e
+#   em toda retomada. Ligue com --heal-head (ou RALPH_HEAL_HEAD=on) quando
+#   suspeitar de vermelho herdado. Ligado:
 #
 #   A suite roda UMA vez em HEAD (arvore limpa, garantida pelo preflight) antes
 #   da fase 1. Vermelho ali nao e defeito de nenhuma fase: e vermelho que o run
@@ -215,7 +222,7 @@
 #
 #   --baseline tem precedencia e desliga o saneamento: quem declara "herde o
 #   vermelho como delta" esta dizendo que o vermelho e intencional (fase escrita
-#   em TDD com o teste ja commitado vermelho). --no-heal-head desliga tudo.
+#   em TDD com o teste ja commitado vermelho). Sem --heal-head nada disso roda.
 #
 #   O MESMO mandato vai no prompt do conserto cirurgico e do resgate: num plano
 #   multi-repo a guarda pode ficar obsoleta NO MEIO do run, quando uma fase
@@ -344,7 +351,7 @@
 # Variaveis de ambiente:
 #   RALPH_TEST_CMD           comando de teste (gate 2); --test-cmd tem prioridade
 #   RALPH_TEST_SCOPE         escopo do gate 2: auto (default) | full
-#   RALPH_HEAL_HEAD          saneamento do HEAD vermelho: on (default) | off
+#   RALPH_HEAL_HEAD          saneamento do HEAD vermelho: off (default) | on
 #   RALPH_HEAL_ROUNDS        sessoes de saneamento antes de abortar (default: 1)
 #   RALPH_CRITICAL_PATHS     regex ERE de caminho critico: diff da fase que
 #                            casa forca a suite completa naquela fase
@@ -448,11 +455,11 @@
 #
 # Exit code: 0 = todas as fases verdes; 1 = alguma falhou ou abortou;
 #            3 = run encerrado por ambiente fora do ar (nenhum veredito sobre o
-#            codigo — suba os servicos e re-rode).
+#            codigo — suba os servicos e re-rode); 130 = interrompido (INT/TERM).
 #
-# Pre-requisitos:
-#   - Codex: npm install -g @openai/codex + OPENAI_API_KEY
-#   - Claude: npm install -g @anthropic-ai/claude-code + ANTHROPIC_API_KEY
+# Pre-requisitos (CLI autenticada: login ou API key exportada):
+#   - Codex: npm install -g @openai/codex
+#   - Claude: npm install -g @anthropic-ai/claude-code + jq
 #   - Raiz de um repo git, com a arvore de trabalho limpa
 
 set -euo pipefail
@@ -500,11 +507,13 @@ BASELINE_COUNT=0
 BASELINE_ACTIVE=false
 GATE2_DELTA_NOTE=""
 # Saneamento do HEAD (ver "Vermelho herdado de HEAD" no cabecalho).
-#   HEAL_MODE      on (default) = HEAD vermelho ganha uma sessao de saneamento
+#   HEAL_MODE      off (default) = HEAD nao e medido nem saneado (a suite completa
+#                  antes da fase 1 custava minutos em todo run); on = HEAD
+#                  vermelho ganha uma sessao de saneamento
 #   HEAL_ROUNDS    sessoes de saneamento antes de abortar o run
 #   HEAD_RED       1 = a medicao em HEAD achou vermelho AINDA nao sanado
 #   HEAL_ABORT_WHY desistencia declarada pela sessao (HEAL_ABORT: <motivo>)
-HEAL_MODE="${RALPH_HEAL_HEAD:-on}"
+HEAL_MODE="${RALPH_HEAL_HEAD:-off}"
 HEAL_ROUNDS="${RALPH_HEAL_ROUNDS:-1}"
 HEAD_RED=0
 HEAL_ABORT_WHY=""
@@ -615,6 +624,7 @@ while [[ $# -gt 0 ]]; do
     --rescue-model=*) RESCUE_MODEL="${1#*=}"; shift ;;
     --baseline)    BASELINE_MODE="on"; shift ;;
     --no-baseline) BASELINE_MODE="off"; shift ;;
+    --heal-head)   HEAL_MODE="on"; shift ;;
     --no-heal-head) HEAL_MODE="off"; shift ;;
     --test-cmd)    TEST_CMD_FLAG="$2"; shift 2 ;;
     --test-cmd=*)  TEST_CMD_FLAG="${1#*=}"; shift ;;

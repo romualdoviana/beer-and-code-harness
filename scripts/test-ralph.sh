@@ -3263,6 +3263,18 @@ if case_enabled heal-off; then
 fi
 
 # ---------------------------------------------------------------------------
+# H5. Saneamento e opt-in: a suite completa em HEAD custava minutos antes de
+#     qualquer fase andar. Sem flag nada roda; --heal-head liga.
+# ---------------------------------------------------------------------------
+if case_enabled heal-optin; then
+  header "H5. --heal-head liga o saneamento (default desligado)"
+  d=$(new_case heal-optin)
+  rc=$(run_ralph "$d" heal-head --engine claude --test-cmd "$d/test.sh" --max-cycles 1 --heal-head)
+  assert_eq 0 "$rc" "exit 0 (HEAD saneado via flag)"
+  assert_contains "$d/out.log" "Saneamento do HEAD" "a flag ligou a sessao de saneamento"
+fi
+
+# ---------------------------------------------------------------------------
 # H4. Mandato de guarda obsoleta nos tres prompts que ja desistiram dele. O
 #     conserto e o resgate declararam "afrouxar contrato de outra feature e
 #     decisao humana" sobre guarda que so estava velha.
