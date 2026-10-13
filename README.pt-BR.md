@@ -216,7 +216,7 @@ Commits que o ralph pode criar:
 | 0 | O engine terminou de verdade? | claude: `is_error` no JSON de resultado; codex: exit code |
 | 1 | A sessão escreveu código? | Assinatura da árvore (incluindo `HEAD`, então sessão que commita por conta própria conta) antes/depois. **Sinal, não veredito** — fase já implementada faz o engine (corretamente) não escrever nada; o sinal alimenta a causa do ciclo de correção |
 | 2 | Os testes do projeto passam? | Rodados **pelo ralph**, fora da sessão do agente — o agente não pode "mentir verde". O **escopo varia por fase**: veja abaixo |
-| 3 | Cada task está de fato no código? | Sessão verificadora independente, read-only, que emite `TASK <n>: DONE — <evidência>` / `TASK <n>: INCOMPLETE` por task. Com `RALPH_VERIFY=auto` (default) ela só é **pulada** quando o gate 2 rodou de fato testes desta fase e passou, no ciclo 1, depois de uma sessão que escreveu código; fora isso, roda. `always` roda em toda fase. No engine claude usa `sonnet` |
+| 3 | Cada task está de fato no código? | Sessão verificadora independente, read-only, que emite `TASK <n>: DONE — <evidência>` / `TASK <n>: INCOMPLETE` por task. Com `RALPH_VERIFY=auto` (default) ela só é **pulada** quando o gate 2 rodou de fato testes desta fase e passou, no ciclo 1, depois de uma sessão que escreveu código; fora isso, roda. `always` roda em toda fase. No engine claude usa `opus` |
 
 Detalhes do gate 3: as tasks são indexadas **pela posição** (`1..N`) dentro da fase; se o verificador responder com rótulos (`T03`), eles são mapeados de volta para posições. Com `RALPH_VERIFY_EVIDENCE=required` (default), um `DONE` sem `— <evidência>` (`arquivo:linha` ou caminho de um `.png`) reprova o gate por protocolo.
 
@@ -328,7 +328,7 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | Opção | Efeito |
 |---|---|
 | `--engine codex\|claude` | Engine de implementação (default: `codex`) |
-| `--model NOME` | Modelo das sessões de implementação e correção (default: o da CLI do engine) |
+| `--model NOME` | Modelo das sessões de implementação e correção (default: `opus` no claude, o da CLI no codex) |
 | `--from N` | Começa na fase N (limpa o progresso das fases ≥ N) |
 | `--keep-going` | Continua após fase falhar (cria commit `wip(phase-N)`; default: para) |
 | `--max-cycles N` | Ciclos de correção por fase (default: 2) |
@@ -362,14 +362,15 @@ Toda opção com valor também aceita `--opt=valor`. Os modelos do verificador e
 | `RALPH_TEST_FILE_RE` | ERE que reconhece arquivo de teste |
 | `RALPH_BASELINE` | `on` liga o baseline do gate 2 (mesmo que `--baseline`; default: `off`) |
 | `RALPH_VERIFY` | Gate 3: `auto` (default: só quando o gate 2 não basta) \| `always` \| `off` |
-| `RALPH_VERIFY_MODEL` | Modelo do verificador (default no claude: `sonnet`) |
+| `RALPH_VERIFY_MODEL` | Modelo do verificador (default no claude: `opus`) |
+| `RALPH_SUBAGENT_MODEL` | Modelo dos subagentes disparados pelas sessões claude, via `CLAUDE_CODE_SUBAGENT_MODEL` (default: `opus`) |
 | `RALPH_VERIFY_EVIDENCE` | `required` (default: `DONE` sem evidência reprova o gate 3) \| `optional` |
 | `RALPH_HEAL_HEAD` | Saneamento de HEAD antes da fase 1: `off` (default) \| `on` |
 | `RALPH_HEAL_ROUNDS` | Sessões de saneamento antes de abortar (default: 1) |
 | `RALPH_UI_VERIFY` | Evidência visual para tasks com `Tela:`: `auto` (default) \| `off` |
 | `RALPH_UI_SHOT_CMD` | Comando de screenshot (vazio = auto-detecta `scripts/ralph-ui-shot.*`) |
 | `RALPH_UI_SHOT_TIMEOUT` | Timeout da captura em segundos (default: 120) |
-| `RALPH_MODEL` | Modelo das sessões de implementação/correção (vazio = o da CLI) |
+| `RALPH_MODEL` | Modelo das sessões de implementação/correção (default no claude: `opus`; no codex, vazio = o da CLI) |
 | `RALPH_CAVEMAN` | Nível do plugin caveman nas sessões claude que escrevem código (default: `ultra`; `off` desliga; inerte sem o plugin) |
 | `RALPH_ENV_GUARD` | Detecção de ambiente fora do ar: `on` (default) \| `off` |
 | `RALPH_ENV_RECOVER_TIMEOUT` | Segundos de espera pelos serviços ao tentar levantá-los (default: 90) |

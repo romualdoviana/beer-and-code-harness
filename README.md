@@ -218,7 +218,7 @@ Commits ralph can create:
 | 0 | Did the engine actually finish? | claude: `is_error` in the result JSON; codex: exit code |
 | 1 | Did the session write code? | Tree signature (including `HEAD`, so a session that commits by itself counts) before/after. **A signal, not a verdict** — an already-implemented phase makes the engine (correctly) write nothing; the signal feeds the fix-cycle cause |
 | 2 | Do the project's tests pass? | Run **by ralph itself**, outside the agent session — the agent cannot "fake green". The **scope varies per phase**: see below |
-| 3 | Is each task actually in the code? | Independent read-only verifier session that emits `TASK <n>: DONE — <evidence>` / `TASK <n>: INCOMPLETE` per task. With `RALPH_VERIFY=auto` (default) it is **skipped** only when gate 2 really ran tests for this phase and passed, on cycle 1, after a session that wrote code; otherwise it runs. `always` runs it on every phase. On the claude engine it uses `sonnet` |
+| 3 | Is each task actually in the code? | Independent read-only verifier session that emits `TASK <n>: DONE — <evidence>` / `TASK <n>: INCOMPLETE` per task. With `RALPH_VERIFY=auto` (default) it is **skipped** only when gate 2 really ran tests for this phase and passed, on cycle 1, after a session that wrote code; otherwise it runs. `always` runs it on every phase. On the claude engine it uses `opus` |
 
 Gate 3 details: tasks are indexed **by position** (`1..N`) inside the phase; if the verifier answers with labels (`T03`) they are mapped back to positions. With `RALPH_VERIFY_EVIDENCE=required` (default), a `DONE` without `— <evidence>` (`file:line` or a `.png` path) fails the gate on protocol.
 
@@ -330,7 +330,7 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | Option | Effect |
 |---|---|
 | `--engine codex\|claude` | Implementation engine (default: `codex`) |
-| `--model NAME` | Model for the implementation/fix sessions (default: the engine CLI's own) |
+| `--model NAME` | Model for the implementation/fix sessions (default: `opus` on claude, the CLI's own on codex) |
 | `--from N` | Starts at phase N (clears progress for phases ≥ N) |
 | `--keep-going` | Continues after a phase fails (creates a `wip(phase-N)` commit; default: stop) |
 | `--max-cycles N` | Fix cycles per phase (default: 2) |
@@ -364,14 +364,15 @@ Every value option also accepts `--opt=value`. The verifier and repair models ha
 | `RALPH_TEST_FILE_RE` | ERE that recognizes a test file |
 | `RALPH_BASELINE` | `on` enables the gate 2 baseline (same as `--baseline`; default: `off`) |
 | `RALPH_VERIFY` | Gate 3: `auto` (default: only when gate 2's verdict isn't enough) \| `always` \| `off` |
-| `RALPH_VERIFY_MODEL` | Verifier model (claude default: `sonnet`) |
+| `RALPH_VERIFY_MODEL` | Verifier model (claude default: `opus`) |
+| `RALPH_SUBAGENT_MODEL` | Model of subagents spawned by claude sessions, via `CLAUDE_CODE_SUBAGENT_MODEL` (default: `opus`) |
 | `RALPH_VERIFY_EVIDENCE` | `required` (default: a `DONE` without evidence fails gate 3) \| `optional` |
 | `RALPH_HEAL_HEAD` | HEAD healing before phase 1: `off` (default) \| `on` |
 | `RALPH_HEAL_ROUNDS` | Healing sessions before aborting (default: 1) |
 | `RALPH_UI_VERIFY` | Visual evidence for `Tela:` tasks: `auto` (default) \| `off` |
 | `RALPH_UI_SHOT_CMD` | Screenshot command (empty = auto-detect `scripts/ralph-ui-shot.*`) |
 | `RALPH_UI_SHOT_TIMEOUT` | Capture timeout in seconds (default: 120) |
-| `RALPH_MODEL` | Model for the implementation/fix sessions (empty = the CLI's own) |
+| `RALPH_MODEL` | Model for the implementation/fix sessions (claude default: `opus`; on codex, empty = the CLI's own) |
 | `RALPH_CAVEMAN` | Caveman plugin level for claude code-writing sessions (default: `ultra`; `off` disables; inert without the plugin) |
 | `RALPH_ENV_GUARD` | Environment-down detection: `on` (default) \| `off` |
 | `RALPH_ENV_RECOVER_TIMEOUT` | Seconds to wait for services when bringing them up (default: 90) |

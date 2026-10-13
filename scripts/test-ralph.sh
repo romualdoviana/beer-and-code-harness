@@ -140,6 +140,15 @@ if [ "$verify" -eq 1 ] && [ -n "$model" ]; then
   echo "$model" > "$state/verify_model"
 fi
 
+# Modelo dos subagentes repassado pelo ambiente, por tipo de sessao.
+if [ "$name" = "claude" ]; then
+  if [ "$verify" -eq 1 ]; then
+    echo "${CLAUDE_CODE_SUBAGENT_MODEL:--}" > "$state/subagent_model_verify"
+  else
+    echo "${CLAUDE_CODE_SUBAGENT_MODEL:--}" > "$state/subagent_model_impl"
+  fi
+fi
+
 # Nivel de caveman pedido, por tipo de sessao. `-` = variavel ausente.
 if [ "$name" = "claude" ]; then
   if [ "$verify" -eq 1 ]; then
@@ -1143,11 +1152,11 @@ if case_enabled verify-auto-uncovered; then
 fi
 
 # ---------------------------------------------------------------------------
-# 21. Verificador roda com modelo proprio: sonnet por default no claude,
-#     RALPH_VERIFY_MODEL sobrepoe.
+# 21. Tudo opus por default no claude: verificador, implementacao e
+#     subagentes. RALPH_VERIFY_MODEL sobrepoe.
 # ---------------------------------------------------------------------------
 if case_enabled verify-model; then
-  header "21. verificador usa modelo proprio (sonnet default, env sobrepoe)"
+  header "21. claude usa opus em todas as sessoes por default (env sobrepoe)"
   d=$(new_case verify-model)
   # fase ja implementada em HEAD: sessao nao escreve -> gate 3 roda em auto
   mkdir -p "$d/repo/src"
@@ -1155,8 +1164,11 @@ if case_enabled verify-model; then
   git -C "$d/repo" add -A && git -C "$d/repo" commit -q -m "feat: trabalho previo"
   rc=$(run_ralph "$d" already-done --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
   assert_eq 0 "$rc" "exit 0"
-  assert_eq "sonnet" "$(cat "$d/state/verify_model" 2>/dev/null)" "verify chamado com --model sonnet"
-  assert_contains "$d/out.log" "modelo: sonnet" "log do gate 3 informa o modelo"
+  assert_eq "opus" "$(cat "$d/state/verify_model" 2>/dev/null)" "verify chamado com --model opus"
+  assert_contains "$d/out.log" "modelo: opus" "log do gate 3 informa o modelo"
+  assert_eq "opus" "$(cat "$d/state/impl_model" 2>/dev/null || echo vazio)" "impl chamada com --model opus sem --model"
+  assert_eq "opus" "$(cat "$d/state/subagent_model_impl" 2>/dev/null || echo vazio)" "subagentes da impl em opus"
+  assert_eq "opus" "$(cat "$d/state/subagent_model_verify" 2>/dev/null || echo vazio)" "subagentes do verificador em opus"
 
   d2=$(new_case verify-model-override)
   mkdir -p "$d2/repo/src"
@@ -1331,6 +1343,13 @@ if case_enabled notify-resume; then
   assert_eq 0 "$rc" "2a execucao: exit 0"
   assert_contains "$d/events.txt" "0 de 2 fase(s)" "2a execucao: nada pendente"
   assert_eq 0 "$(count_event "$d/events.txt" phase_done)" "nenhuma fase reexecutada"
+
+  # --from 1 e re-rodar de proposito: limpa o progresso de TODAS as fases
+  : > "$d/events.txt"
+  CASE_NOTIFY_CMD="$d/notify.sh" \
+    rc=$(run_ralph "$d" ok --engine claude --from 1 --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "--from 1: exit 0"
+  assert_contains "$d/events.txt" "2 de 2 fase(s)" "--from 1: as 2 fases voltam a pendentes"
 
   # --from tambem nao deve inflar a contagem
   d2=$(new_case notify-from)
@@ -2728,7 +2747,7 @@ if case_enabled impl-model; then
   rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --model modelo-grande)
   assert_eq 0 "$rc" "exit 0"
   assert_eq "modelo-grande" "$(cat "$d/state/impl_model" 2> /dev/null || echo vazio)" "a impl recebeu --model"
-  assert_eq "sonnet" "$(cat "$d/state/verify_model" 2> /dev/null || echo vazio)" "o verificador manteve o modelo proprio"
+  assert_eq "opus" "$(cat "$d/state/verify_model" 2> /dev/null || echo vazio)" "o verificador manteve o modelo proprio"
   assert_contains "$d/out.log" "conserto: opus" "o conserto usa o modelo forte"
   assert_contains "$d/out.log" "implementacao: modelo-grande" "o run reporta os modelos usados"
 fi

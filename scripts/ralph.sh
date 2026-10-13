@@ -27,9 +27,9 @@
 # Opcoes:
 #   --engine codex|claude    engine de implementacao (default: codex)
 #   --model NOME             modelo das sessoes de implementacao e correcao
-#                            (default: o da CLI do engine). O verificador e o
-#                            conserto tem modelo proprio — ver RALPH_VERIFY_MODEL
-#                            e RALPH_REPAIR_MODEL
+#                            (default: opus no claude, o da CLI no codex). O
+#                            verificador e o conserto tem modelo proprio — ver
+#                            RALPH_VERIFY_MODEL e RALPH_REPAIR_MODEL
 #   --from N                 comeca na fase N (limpa do progresso as fases >= N)
 #   --keep-going             continua apos uma fase falhar (default: para)
 #   --max-cycles N           ciclos de correcao por fase (default: 2)
@@ -114,7 +114,7 @@
 #      fase que a suite nao cobriu (escopo `skip` — fiacao, view, config),
 #      sessao que nao escreveu nada (claim "ja implementada"), ciclo de
 #      correcao, ou gate 2 desabilitado. RALPH_VERIFY=always roda em toda fase. --no-verify / RALPH_VERIFY=off desliga. No engine
-#      claude o verificador usa RALPH_VERIFY_MODEL (default: sonnet) — e
+#      claude o verificador usa RALPH_VERIFY_MODEL (default: opus) — e
 #      leitura + checklist, nao escreve codigo.
 #
 # Escopo do gate 2 — a suite inteira e o gate da SPEC, nao o de cada fase.
@@ -357,7 +357,7 @@
 #                            casa forca a suite completa naquela fase
 #   RALPH_TEST_FILE_RE       regex ERE que reconhece arquivo de teste
 #   RALPH_VERIFY             gate 3: auto (default) | always | off
-#   RALPH_VERIFY_MODEL       modelo do verificador (default: sonnet no claude)
+#   RALPH_VERIFY_MODEL       modelo do verificador (default: opus no claude)
 #   RALPH_VERIFY_EVIDENCE    required (default) | optional. Com required, um
 #                            `TASK n: DONE` sem `— <evidencia>` (arquivo:linha
 #                            ou caminho .png) reprova o gate 3 por protocolo:
@@ -395,7 +395,9 @@
 #   nasce fora da sessao do agente: ele nao escreve, nao escolhe e nao edita
 #   o arquivo que o julga.
 #   RALPH_MODEL              modelo das sessoes de implementacao/correcao
-#                            (default: vazio = o da CLI do engine)
+#                            (default: opus no claude; vazio = o da CLI no codex)
+#   RALPH_SUBAGENT_MODEL     modelo dos subagentes que as sessoes claude
+#                            disparam (CLAUDE_CODE_SUBAGENT_MODEL; default: opus)
 #   RALPH_ENV_GUARD          on (default) | off — deteccao de ambiente caido
 #   RALPH_ENV_RECOVER_TIMEOUT segundos de espera pelos servicos ao tentar
 #                            levantar o ambiente (default: 90)
@@ -579,6 +581,7 @@ RESCUE_BLOCKED=0
 RESCUE_BLOCK_WHY=""
 REPAIR_MODEL=""
 RESCUE_MODEL=""
+SUBAGENT_MODEL=""
 # Caveman: o run e headless, ninguem le a prosa do engine. O plugin caveman
 # (se instalado) le CAVEMAN_DEFAULT_MODE no SessionStart, entao o ralph pede o
 # nivel maximo — `ultra` — nas sessoes que ESCREVEM codigo (implementacao e
@@ -4474,13 +4477,23 @@ preflight_checks() {
       ;;
   esac
 
+  # No claude, todas as sessoes usam opus por default — implementacao,
+  # verificacao, conserto, resgate, saneamento e os subagentes que elas
+  # disparam. Um gate julgado por modelo mais fraco que o que escreveu a fase
+  # aprova falso DONE. No codex nao ha default — so aplica se pedido.
+  if [ -z "$IMPL_MODEL" ] && [[ "$ENGINE" == "claude" ]]; then
+    IMPL_MODEL="opus"
+  fi
+  if [[ "$ENGINE" == "claude" ]]; then
+    SUBAGENT_MODEL="${RALPH_SUBAGENT_MODEL:-opus}"
+  fi
+
   # Verificacao e leitura + checklist contra o codigo real: le, compara, emite
-  # uma linha por task. Nao escreve nada — modelo intermediario da conta.
-  # No codex nao ha default seguro de modelo barato — so aplica se pedido.
+  # uma linha por task. Nao escreve nada.
   if [ -n "${RALPH_VERIFY_MODEL:-}" ]; then
     VERIFY_MODEL="$RALPH_VERIFY_MODEL"
   elif [[ "$ENGINE" == "claude" ]]; then
-    VERIFY_MODEL="sonnet"
+    VERIFY_MODEL="opus"
   fi
 
   # Conserto cirurgico e a UNICA etapa que escreve codigo com contexto minimo:
@@ -4504,7 +4517,7 @@ preflight_checks() {
     RESCUE_MODEL="opus"
   fi
 
-  log "Modelos — implementacao: ${IMPL_MODEL:-default da CLI}; verificacao: ${VERIFY_MODEL:-default da CLI}; conserto: ${REPAIR_MODEL:-default da CLI}; resgate: ${RESCUE_MODEL:-default da CLI}"
+  log "Modelos — implementacao: ${IMPL_MODEL:-default da CLI}; verificacao: ${VERIFY_MODEL:-default da CLI}; conserto: ${REPAIR_MODEL:-default da CLI}; resgate: ${RESCUE_MODEL:-default da CLI}${SUBAGENT_MODEL:+; subagentes: $SUBAGENT_MODEL}"
 
   case "$TEST_SCOPE_MODE" in
     auto|full) ;;
@@ -4659,8 +4672,9 @@ mark_phase_done() {
 }
 
 # --from N tambem limpa do progresso as fases >= N (re-rodar de proposito).
+# --from 1 limpa tudo; so o default 0 (flag ausente) preserva o progresso.
 apply_from_override() {
-  [ "$FROM_PHASE" -gt 1 ] || return 0
+  [ "$FROM_PHASE" -ge 1 ] || return 0
   [ -f "$PROGRESS_FILE" ] || return 0
 
   local kept="" file num _rest
@@ -5718,6 +5732,11 @@ run_engine() {
   local cave_env=(-u CAVEMAN_DEFAULT_MODE)
   if [[ "$ENGINE" == "claude" && "$mode" != "verify" && "$CAVEMAN_MODE" != "off" ]]; then
     cave_env=(CAVEMAN_DEFAULT_MODE="$CAVEMAN_MODE")
+  fi
+  # Subagentes (Agent/Explore) que a sessao claude disparar herdam o modelo
+  # do run em vez do definido no frontmatter de cada agente.
+  if [ -n "${SUBAGENT_MODEL:-}" ]; then
+    cave_env+=(CLAUDE_CODE_SUBAGENT_MODEL="$SUBAGENT_MODEL")
   fi
   if [[ "$mode" == "verify" ]]; then
     if [ -n "$VERIFY_MODEL" ]; then
