@@ -141,7 +141,7 @@ Key characteristics:
 - **The red test and the fix live in the same phase.** `ralph.sh` gate 2 runs the tests the phase touched (and the whole suite on the last one); a phase ending red would burn all its fix cycles and abort the run. Phase 1 is `reproduce and fix`; phase 2+ cover regression and edge cases. No phase ever ends with a red suite.
 - **Unreproduced bug stops at a checkpoint.** The developer chooses: stop and gather data, or proceed speculatively — in which case every artifact carries the `[NAO REPRODUZIDO]` marker and the ACs are explicitly not backed by a failing test.
 - **Non-blocking architecture gate**, unlike `/plan`: a defect is reactive and often urgent, so a missing `AGENTS.md` produces a warning and an `architecture_reference_status: missing` flag, never a block.
-- **Closes by registering the learning.** The root cause is classified one level above this instance, scoped (global vs `-project`), and proposed as a single `| bug | root cause | prevention |` line in English for the right agent file — written only after explicit confirmation.
+- **Closes by registering the learning.** The root cause is classified one level above this instance, scoped (global agent/skill vs a path-scoped project rule in `.claude/rules/`), and proposed as a single `| bug | root cause | prevention |` line in English for the right file — written only after explicit confirmation.
 - **No git writes, any tier.** The developer reviews with `git diff` and commits.
 
 High tier closes with the execution handoff:

@@ -168,14 +168,14 @@ A defect whose root cause is not written down is a defect that returns. This ste
 1. **Classify** the technical root cause — the shape of the mistake, one level above this instance. Never the symptom.
 2. **Decide scope and vector**:
    - Reusable across projects → the artifact for that domain: a skill at `~/.claude/skills/<domain>/SKILL.md` when one exists, otherwise the agent at `~/.claude/agents/<agent>.md`.
-   - Specific to this project (names a subsystem, flow, column, service, or node of its own) → `<project-root>/.claude/agents/<agent>-project.md`, with a name **distinct** from the global one (`-project` suffix; the project file overrides the global without merging).
+   - Specific to this project (names a subsystem, flow, column, service, or node of its own) → `<project-root>/.claude/rules/<topic>.md`, a path-scoped rule: YAML frontmatter `paths:` listing globs of the real directories/files that topic covers, so Claude Code loads it only when one of them is read or edited. Create the file if the topic is new; reuse the global topic name when the area matches (`queues-jobs`, `eloquent-data`, `testing-tooling`…). Never create or extend a `<agent>-project.md` agent — that layout is legacy and is being migrated to rules.
    - In doubt → prefer the project file.
-3. **Check for duplicates** in the correct scope before writing.
-4. **Propose one line**, in **English**, in the right section (`## Common Bugs` or `## What to Avoid`), format `| bug | root cause | prevention |`. Show the target file, the target section, and the exact line.
+3. **Check for duplicates** in the correct scope before writing: Grep the agent core, its `~/.claude/agent-refs/<agent>/` files, and the project's `.claude/rules/`. A matching row exists → propose updating that row, never a second one.
+4. **Propose one line**, in **English**, format `| bug | root cause | prevention |`. Target: the project rule table; or, for a global agent, the inbox section (`## Common Bugs` or `## What to Avoid`) of its core file; or the skill's `references/learned-<topic>.md`. Show the target file, the target section, and the exact line.
 5. **Write only after explicit confirmation.** Declined → change nothing and say so.
 6. **Report** the registration to the developer.
 
-Multi-stack defect → propose the line for every affected agent. Never remove existing rules.
+Multi-stack defect → propose the line for every affected agent. **Consolidate, don't pile up**: a new line that supersedes an older one replaces it (show both); a global inbox above 10 rows, or an agent core above 20 KB, gets its rows moved to the matching `agent-refs` topic file. Removing a rule that has no replacement still needs explicit confirmation.
 
 ### 9 — Summary
 

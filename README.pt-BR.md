@@ -139,7 +139,7 @@ Características principais:
 - **Teste vermelho e correção na MESMA fase.** O gate 2 do ralph roda os testes que a fase tocou (e a suite inteira na última); uma fase que termina vermelha queimaria todos os ciclos de correção e abortaria o run. Fase 1 é `reproduzir e corrigir`; fase 2+ cobrem regressão e bordas. Nenhuma fase termina com suite vermelha.
 - **Bug que não reproduz para num checkpoint.** O desenvolvedor decide: parar e juntar dados, ou seguir especulativo — e aí todo artefato carrega o marcador `[NAO REPRODUZIDO]` e os ACs explicitamente não são sustentados por teste vermelho.
 - **Gate de arquitetura não-bloqueante**, diferente do `/plan`: defeito é reativo e muitas vezes urgente, então `AGENTS.md` ausente vira aviso e flag `architecture_reference_status: missing`, nunca bloqueio.
-- **Fecha registrando o aprendizado.** A causa raiz é classificada um nível acima da instância, escopada (global vs `-project`) e proposta como uma linha `| bug | root cause | prevention |` em inglês no agent certo — escrita só após confirmação explícita.
+- **Fecha registrando o aprendizado.** A causa raiz é classificada um nível acima da instância, escopada (agent/skill global vs rule de projeto com escopo por caminho em `.claude/rules/`) e proposta como uma linha `| bug | root cause | prevention |` em inglês no arquivo certo — escrita só após confirmação explícita.
 - **Nenhuma escrita no git, em nenhum tier.** O desenvolvedor revisa com `git diff` e commita.
 
 O tier alto encerra com o handoff de execução:
