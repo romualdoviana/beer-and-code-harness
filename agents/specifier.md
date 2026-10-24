@@ -55,6 +55,7 @@ Any check fails → halt with `precondition_failed: <reason>` instead of produci
 - **Front-load reversibility.** Before emitting RIGID, list every decision that would invalidate written requirements if reversed later (scope boundary, exclusivity rule, fail-open vs fail-closed, default screen state). Each one is either backed by a confirmed AC or gets a `[NEEDS CLARIFICATION]` — never an implicit default. This is what turns a v1.1→v1.4 rewrite cascade into a single write.
 - RIGID never mandates a database, ORM, or persistent store unless a confirmed AC demands persistence. Storage mechanism is FLEXIBLE by default.
 - A decision that changes after the SPEC is frozen is an amendment, not a silent edit: name the affected requirement IDs so the blast radius reaches PLAN and PHASES.
+- **Cross-project feature → master SPEC + one self-contained slice per repo**, never one centralized `.spec` (whoever opens a single repo needs its own SPEC and a PHASES.md its own `ralph.sh` can run). Author the MASTER SPEC in the repo where `/plan` ran (RF distribution per repo + seam contracts), then derive one `.spec/features/<slug>/` slice per repo with contracts copied VERBATIM. IDs (RF/CT/D) are global and never renumbered — other repos' IDs appear as "out of this slice" trace lines; propagate master amendments to every slice inline in the handoff; emit `openapi.yaml` only in the repo that SERVES the route.
 
 ## Constraints
 
