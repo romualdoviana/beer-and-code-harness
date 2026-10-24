@@ -83,11 +83,11 @@ RALPH_LIB_ONLY=1 source "$RALPH_SH" > /dev/null 2>&1 || {
 set +eu
 
 # Chamadas pelo ui_frame do ralph.sh carregado acima.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 if [ -n "${RALPH_WATCH_COLS:-}" ]; then
   ui_term_cols() { echo "$RALPH_WATCH_COLS"; }
 fi
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 if [ -n "${RALPH_WATCH_LINES:-}" ]; then
   ui_term_lines() { echo "$RALPH_WATCH_LINES"; }
 fi
