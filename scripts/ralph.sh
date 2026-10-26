@@ -356,6 +356,11 @@
 #   RALPH_CRITICAL_PATHS     regex ERE de caminho critico: diff da fase que
 #                            casa forca a suite completa naquela fase
 #   RALPH_TEST_FILE_RE       regex ERE que reconhece arquivo de teste
+#   RALPH_TEST_FILE_EXCLUDE_RE  regex ERE de pastas de apoio (fixtures, traits,
+#                            helpers, golden...) que NAO sao teste, mesmo dentro
+#                            de tests/. Arquivo com nome de teste (FooTest.php,
+#                            foo.test.js) nessas pastas continua teste; arquivo
+#                            de dado (.sql, .json, .md...) nunca e teste
 #   RALPH_VERIFY             gate 3: auto (default) | always | off
 #   RALPH_VERIFY_MODEL       modelo do verificador (default: opus no claude)
 #   RALPH_VERIFY_EVIDENCE    required (default) | optional. Com required, um
@@ -558,6 +563,13 @@ CRITICAL_PATHS_RE="${RALPH_CRITICAL_PATHS:-(^|/)(database/migrations|migrations|
 # cobre o pytest (test_*.py) e suites em script (scripts/test-ralph.sh): sem ele
 # a fase que so mexe nesses arquivos tinha o gate 2 pulado.
 TEST_FILE_RE="${RALPH_TEST_FILE_RE:-(^|/)(tests?|spec|specs|__tests__)/|(^|/)test[-_][^/]*$|(Test|Spec)\.[A-Za-z0-9]+$|_test\.[A-Za-z0-9]+$|\.(test|spec)\.[A-Za-z0-9]+$}"
+# Apoio de teste dentro de tests/ (trait, fixture, golden, dado) nao e arquivo
+# que o runner execute: passar `tests/Concerns/X.php` ou `fixtures/a.sql` ao
+# PHPUnit/pytest derruba o gate 2 sem defeito no codigo.
+TEST_FILE_EXCLUDE_RE="${RALPH_TEST_FILE_EXCLUDE_RE:-(^|/)([Ff]ixtures?|__fixtures__|[Cc]oncerns|[Ss]upport|[Hh]elpers?|[Tt]raits?|[Ss]tubs?|__snapshots__|[Ss]napshots?|[Gg]olden|[Dd]ata)/}"
+# Nome de teste vence a pasta de apoio; extensao de dado vence o nome.
+TEST_NAME_RE='(^|/)test[-_][^/]*$|(Test|Spec)\.[A-Za-z0-9]+$|_test\.[A-Za-z0-9]+$|\.(test|spec)\.[A-Za-z0-9]+$'
+TEST_DATA_EXT_RE='\.(sql|json|md|txt|csv|tsv|xml|ya?ml|html?|snap|lock|env|ini)$'
 # Gate 3 com prova: DONE sem evidencia e "linguagem confiante", nao veredito.
 VERIFY_EVIDENCE_MODE="${RALPH_VERIFY_EVIDENCE:-required}"
 # Evidencia visual: o ralph fotografa toda task com `Tela:` ANTES do
@@ -4736,6 +4748,16 @@ stack. Antes de comecar, LEIA os que existirem, nesta ordem:
 Use os comandos de build, teste e execucao definidos por esses documentos e pelo
 tooling ja presente no repositorio. Se o projeto tiver uma ferramenta de memoria
 ou contexto configurada, use-a para entender o historico.
+
+## Codigo minimo, na estrutura que ja existe
+- Antes de criar arquivo, classe ou funcao, procure no projeto (Grep pelo
+  conceito, nao so pelo nome) e no framework algo que ja resolva. Achou: use
+  como o codigo vizinho usa.
+- Nao extraia helper, constante, metodo ou camada que a task nao pede: logica
+  que cabe num metodo legivel fica num metodo.
+- Atalho com limite conhecido leva o comentario
+  `shortcut: <limite>, <quando evoluir>`.
+- Rode os testes da area que voce tocou. A suite completa e do gate, nao sua.
 PREAMBLE
 
   # O gate 2 roda ESTE comando. Se o agente rodar outro (ex: `php artisan test`
@@ -5810,6 +5832,9 @@ run_engine() {
       # Sem --include-partial-messages de proposito: o delta token a token
       # multiplica o log por ~50x e nao acrescenta nada ao painel, que mostra
       # ferramenta + alvo. O veredito continua saindo do evento `result`.
+      #
+      # Verificador: --allowedTools so pre-aprova, e o bypass ja aprova tudo.
+      # Read-only de verdade vem do --disallowedTools.
       if [[ "$mode" == "verify" ]]; then
         run_split "$log_file" "$err_log" /dev/null \
           env -u CLAUDECODE ${cave_env[@]+"${cave_env[@]}"} \
@@ -5817,6 +5842,7 @@ run_engine() {
           ${model_args[@]+"${model_args[@]}"} \
           -p "$(cat "$prompt_file")" \
           --allowedTools "Read,Glob,Grep" \
+          --disallowedTools "Edit,Write,Bash" \
           --output-format stream-json --verbose || rc=$?
       else
         # O exit code do CLI e sinal fraco; o gate 0 le is_error do evento final.
@@ -5842,8 +5868,49 @@ run_engine() {
       continue
     fi
 
+    if engine_did_nothing "$log_file"; then
+      abort_engine_did_nothing "$log_file"
+    fi
+
     return "$rc"
   done
+}
+
+# Sessao que nao chegou ao modelo: o evento `result` do claude vem com
+# `num_turns: 0`. Acontece quando um hook `UserPromptSubmit` bloqueia o prompt
+# (ex.: falso positivo do redact-secrets.sh) — o CLI sai com is_error=false e o
+# ralph lia isso como "implementacao incompleta", queimando os ciclos e o
+# resgate com o MESMO prompt bloqueado. Nao e retentavel: aborta o run.
+engine_did_nothing() {
+  local log_file="$1" turns
+  [[ "$ENGINE" == "claude" ]] || return 1
+  turns="$(jq -R -r 'fromjson? | select(.type == "result") | (.num_turns // empty)' \
+           "$log_file" 2> /dev/null | tail -n 1 || true)"
+  [ "$turns" = "0" ]
+}
+
+abort_engine_did_nothing() {
+  local log_file="$1" why prompt_doc
+  why="$(jq -R -r 'fromjson? | select(.type == "system" and .subtype == "informational")
+         | .content' "$log_file" 2> /dev/null \
+         | sed '/^Original prompt:/,$d' | head -n 8 || true)"
+  prompt_doc="$PHASES_DIR/phase-$(printf '%02d' "$ST_PHASE_NUM").md"
+
+  ST_RUN_STATUS="aborted"
+  state_sync
+  fail "Phase $ST_PHASE_NUM: a sessao do engine terminou com num_turns=0 — o modelo nao rodou."
+  if [ -n "$why" ]; then
+    fail "Mensagem do CLI:"
+    printf '%s\n' "$why" | sed 's/^/    /' >&2
+  else
+    fail "Causa provavel: hook UserPromptSubmit bloqueou o prompt. Veja $log_file"
+  fi
+  fail "Triagem: ~/.claude/hooks/why-blocked.sh $prompt_doc — reescreva o trecho no PHASES.md (nunca afrouxe o hook)."
+  fail "Retome com: ./ralph.sh $INPUT_FILE --from $ST_PHASE_NUM"
+  notify_and_record engine_noop \
+    "Run abortado na Phase $ST_PHASE_NUM: sessao com num_turns=0 (prompt bloqueado por hook?). Retome com --from $ST_PHASE_NUM"
+  ui_stop
+  exit 1
 }
 
 # ---------------------------------------------------------------------------
@@ -6313,8 +6380,17 @@ phase_changed_files() {
   } | awk 'NF && !seen[$0]++'
 }
 
+# Filtra a lista de caminhos (stdin) para os que o runner de teste executa.
+filter_test_files() {
+  grep -aE "$TEST_FILE_RE" \
+    | TFX_EX="$TEST_FILE_EXCLUDE_RE" TFX_NM="$TEST_NAME_RE" TFX_DATA="$TEST_DATA_EXT_RE" \
+      awk '$0 ~ ENVIRON["TFX_DATA"] { next }
+           !($0 ~ ENVIRON["TFX_EX"]) || $0 ~ ENVIRON["TFX_NM"]' \
+    || true
+}
+
 phase_changed_tests() {
-  phase_changed_files | grep -aE "$TEST_FILE_RE" || true
+  phase_changed_files | filter_test_files
 }
 
 phase_changed_critical() {
@@ -6330,7 +6406,7 @@ phase_declared_tests() {
   # Crases delimitam caminhos no Markdown; nao sao substituicao de comando.
   # shellcheck disable=SC2016
   grep -aoE '`[^`]+`' "$PHASES_DIR/$phase_file" 2> /dev/null \
-    | tr -d '`' | grep -aE "$TEST_FILE_RE" | awk 'NF && !seen[$0]++' || true
+    | tr -d '`' | filter_test_files | awk 'NF && !seen[$0]++' || true
 }
 
 # A fase pede a suite completa? Escalada explicita do planejamento. So existe

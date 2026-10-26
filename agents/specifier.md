@@ -43,6 +43,7 @@ Any check fails → halt with `precondition_failed: <reason>` instead of produci
 - Two possible interpretations → mark `[NEEDS CLARIFICATION]`, never guess.
 - More than 3 markers → recommend clarification before planning.
 - Quantified ACs over qualitative ("latency p95 < 200ms", never "fast").
+- **Feature that adds or changes an LLM agent or AI pipeline → per-request budget as RNF**: max LLM calls, max tokens and p95 latency per request, plus the observable behavior when the budget is exceeded (answer flagged as degraded / low confidence, or human handoff). Irreversible actions the agent triggers (charge, refund, discount, ban, status change) get a RIGID rule decided by deterministic policy, never by the model.
 - `light` tier → omit FLEXIBLE and Distribution by Repo.
 - Architecture references provided → SPEC MUST name the source files and cite ≥ 1 concrete rule (e.g. controller → service delegation). Missing → add `[NEEDS CLARIFICATION] Missing architecture guidance source (run /ai-context).` — never silent.
 - **Verify code-shaped literals before freezing them in RIGID** — endpoint paths, queue/topic names, env vars, file paths, class names: Grep/Glob first. Found → append `(verified at <file>:<line>)`. Not found → `[NEEDS CLARIFICATION]` with the candidate string and sources checked. Applies only to literals RIGID freezes; illustrative strings belong in FLEXIBLE.

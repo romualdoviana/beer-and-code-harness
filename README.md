@@ -362,6 +362,7 @@ Every value option also accepts `--opt=value`. The verifier and repair models ha
 | `RALPH_TEST_SCOPE` | Gate 2 scope: `auto` (default) \| `full` |
 | `RALPH_CRITICAL_PATHS` | ERE for critical paths: a phase whose diff matches runs the whole suite |
 | `RALPH_TEST_FILE_RE` | ERE that recognizes a test file |
+| `RALPH_TEST_FILE_EXCLUDE_RE` | ERE of test-support folders (fixtures, traits, helpers, golden, data) that are not tests even under `tests/`; a file with a test name there still counts, and data files (`.sql`, `.json`, `.md`…) never do |
 | `RALPH_BASELINE` | `on` enables the gate 2 baseline (same as `--baseline`; default: `off`) |
 | `RALPH_VERIFY` | Gate 3: `auto` (default: only when gate 2's verdict isn't enough) \| `always` \| `off` |
 | `RALPH_VERIFY_MODEL` | Verifier model (claude default: `opus`) |

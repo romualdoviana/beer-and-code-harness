@@ -112,11 +112,17 @@ if [ "$name" = "claude" ]; then
     case "$1" in
       -p) prompt="$2"; shift 2 ;;
       --allowedTools) verify=1; shift 2 ;;
+      --disallowedTools) disallowed="$2"; shift 2 ;;
       --model) model="$2"; shift 2 ;;
       --output-format) shift 2 ;;
       *) shift ;;
     esac
   done
+  # Verificador sem bloqueio de escrita nao e read-only (bypass aprova tudo).
+  if [ "${verify:-0}" = 1 ] && [ "${disallowed:-}" != "Edit,Write,Bash" ]; then
+    printf '{"type":"result","subtype":"error","is_error":true,"result":"verifier without --disallowedTools Edit,Write,Bash"}\n'
+    exit 1
+  fi
 else
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -417,6 +423,16 @@ fi
 # test-*.sh), fora de pasta tests/ e sem sufixo Test/_test.
 if [ "$scenario" = "scoped-prefix" ] && [ "$n" -eq 2 ]; then
   echo "teste da fase 2" > test_alvo.py
+fi
+# scoped-support: a fase 2 cria um teste e o apoio dele dentro de tests/
+# (trait, fixture de dado, golden, README) — so o teste vai ao runner.
+if [ "$scenario" = "scoped-support" ] && [ "$n" -eq 2 ]; then
+  mkdir -p tests/Feature tests/Concerns tests/Fixtures/golden
+  echo "teste da fase 2" > tests/Feature/AlvoTest.py
+  echo "trait de apoio" > tests/Concerns/Paridade.py
+  echo "CREATE TABLE t (id INT);" > tests/Fixtures/schema.sql
+  echo "{}" > tests/Fixtures/golden/alvo.json
+  echo "formato do golden" > tests/Fixtures/README.md
 fi
 if [ "$scenario" = "critical-change" ] && [ "$n" -eq 2 ]; then
   mkdir -p database/migrations
@@ -2824,6 +2840,20 @@ if case_enabled gate2-prefixo-test; then
   assert_eq 2 "$(cat "$d/state/test_calls")" "2 execucoes: a fase 2 (escopada) e a fase 3 (completa)"
   assert_eq "test_alvo.py" "$(test_args_line "$d" 1)" "a fase 2 rodou o teste test_alvo.py que criou"
   assert_contains "$d/out.log" "rodando os testes desta fase" "o gate 2 da fase 2 rodou escopado, nao foi pulado"
+fi
+
+# 66b2. Apoio de teste dentro de tests/ (trait em Concerns/, .sql, golden .json,
+#       README) nao vai ao runner. Antes, o PHPUnit recebia o trait e o gate 2
+#       ficava vermelho sem defeito ("Class ... cannot be found").
+if case_enabled gate2-apoio-de-teste; then
+  header "66b2. fixture, trait e golden em tests/ nao entram no gate 2 escopado"
+  CASE_PHASES="$PHASES_FIXTURE_3"
+  d=$(new_case gate2-apoio-de-teste)
+  unset CASE_PHASES
+  rc=$(run_ralph "$d" scoped-support --engine claude --test-cmd "$d/pytest")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 2 "$(cat "$d/state/test_calls")" "2 execucoes: a fase 2 (escopada) e a fase 3 (completa)"
+  assert_eq "tests/Feature/AlvoTest.py" "$(test_args_line "$d" 1)" "a fase 2 rodou so o teste, sem trait, .sql, .json nem README"
 fi
 
 # 66c. Variavel RALPH_* exportada por quem roda a suite nao vaza para os casos.

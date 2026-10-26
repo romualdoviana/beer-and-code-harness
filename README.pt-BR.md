@@ -360,6 +360,7 @@ Toda opção com valor também aceita `--opt=valor`. Os modelos do verificador e
 | `RALPH_TEST_SCOPE` | Escopo do gate 2: `auto` (default) \| `full` |
 | `RALPH_CRITICAL_PATHS` | ERE de caminho crítico: fase cujo diff casa roda a suite completa |
 | `RALPH_TEST_FILE_RE` | ERE que reconhece arquivo de teste |
+| `RALPH_TEST_FILE_EXCLUDE_RE` | ERE de pastas de apoio de teste (fixtures, traits, helpers, golden, dados) que não são teste mesmo dentro de `tests/`; arquivo com nome de teste nelas continua contando, e arquivo de dado (`.sql`, `.json`, `.md`…) nunca conta |
 | `RALPH_BASELINE` | `on` liga o baseline do gate 2 (mesmo que `--baseline`; default: `off`) |
 | `RALPH_VERIFY` | Gate 3: `auto` (default: só quando o gate 2 não basta) \| `always` \| `off` |
 | `RALPH_VERIFY_MODEL` | Modelo do verificador (default no claude: `opus`) |

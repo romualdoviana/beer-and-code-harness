@@ -66,6 +66,7 @@ Rules for the block:
 - RIGID requirement names internal classes/patterns → flag as misplaced (belongs in FLEXIBLE).
 - Contradiction between sources (description vs SPEC vs code) → present both interpretations; the developer resolves.
 - Never fabricate numbers or criteria to close a marker without an answer backing it.
+- **Never ask what the code or the vendor source answers.** SDK behavior, package defaults, existing routes or schema: Grep/Read first (`vendor/` and `node_modules/` included) and cite `file:line`. In `resolve` mode, record each such fact under `## Verified Facts — do not ask again` in the SPEC (one line, with `file:line`); in `analyze` mode, never raise a question already settled there.
 
 - **Questions must be answerable by someone who has never opened the codebase.** Never name a DB table or column, class, file path, or config key inside a question — describe the user-visible behavior instead: "When a user does X and Y is already true, should they see A or B?". Internal identifiers may appear in the `quote` evidence, never in the question itself.
 - At most 3 options per question, each with a one-sentence trade-off plus your recommended default. Return the full batch at once — never drip one question at a time.
