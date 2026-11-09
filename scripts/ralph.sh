@@ -7783,8 +7783,13 @@ main() {
     exit 1
   fi
 
-  if [ "$FROM_PHASE" -gt "$total_phases" ]; then
-    fail "--from $FROM_PHASE excede o total de fases ($total_phases)."
+  # --from recebe o NUMERO da fase (`## Phase N:`), nao a posicao: um PHASES
+  # que comeca na fase 15 tem 23 entradas e aceita --from 34.
+  local last_phase_num
+  last_phase_num=$(manifest_entries | cut -d'|' -f2 | sort -n | tail -1)
+
+  if [ "$FROM_PHASE" -gt "$last_phase_num" ]; then
+    fail "--from $FROM_PHASE excede a ultima fase ($last_phase_num)."
     exit 1
   fi
 

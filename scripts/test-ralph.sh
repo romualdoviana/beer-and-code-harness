@@ -1374,6 +1374,22 @@ if case_enabled notify-resume; then
     rc=$(run_ralph "$d2" ok --engine claude --from 2 --test-cmd "$d2/test.sh")
   assert_eq 0 "$rc" "--from 2: exit 0"
   assert_contains "$d2/events.txt" "1 de 2 fase(s)" "--from 2: so 1 pendente"
+
+  # --from e o NUMERO da fase, nao a posicao: PHASES que comeca na fase 15
+  # (2 entradas) aceita --from 16 e recusa so o que passa da ultima fase.
+  d3=$(new_case from-phase-number)
+  make_notify_recorder "$d3/notify.sh" "$d3/events.txt"
+  (
+    cd "$d3/repo" || exit 1
+    sed -i -e 's/^## Phase 1:/## Phase 15:/' -e 's/^## Phase 2:/## Phase 16:/' .spec/init/project-phases.md
+    git commit -qam "fases numeradas a partir de 15"
+  )
+  CASE_NOTIFY_CMD="$d3/notify.sh" \
+    rc=$(run_ralph "$d3" ok --engine claude --from 16 --test-cmd "$d3/test.sh")
+  assert_eq 0 "$rc" "--from 16 com fases 15-16: exit 0"
+  assert_contains "$d3/events.txt" "1 de 2 fase(s)" "--from 16 com fases 15-16: so a 16 pendente"
+  rc=$(run_ralph "$d3" ok --engine claude --from 17 --test-cmd "$d3/test.sh")
+  assert_eq 1 "$rc" "--from 17 com fases 15-16: recusado"
 fi
 
 # ---------------------------------------------------------------------------
