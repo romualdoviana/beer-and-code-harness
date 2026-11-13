@@ -5557,13 +5557,30 @@ detect_usage_limit() {
   # estruturado no evento `result`. Le as duas, mais o stderr do codex.
   local txt_log
   txt_log="$(engine_text_for "$log_file")"
-  tail_txt=$(
-    {
-      tail -n 20 "$log_file" 2>/dev/null || true
-      [ -s "$txt_log" ] && { tail -n 20 "$txt_log" 2>/dev/null || true; }
-      [ -f "$err_log" ] && { tail -n 20 "$err_log" 2>/dev/null || true; }
-    } || true
-  )
+  if [[ "$ENGINE" == "claude" ]]; then
+    # No stream-json o fim do log carrega tool_result com o conteudo de arquivos
+    # que a sessao leu — fixture de teste citando "usage limit reached" virava
+    # espera falsa. Do NDJSON so vale o evento `result` com is_error:true (e
+    # linha nao-JSON, CLI que morreu antes do stream); o .text e a resposta de
+    # sucesso e fica de fora.
+    tail_txt=$(
+      {
+        tail -n 20 "$log_file" 2>/dev/null \
+          | grep -vE '^[[:space:]]*\{' || true
+        tail -n 20 "$log_file" 2>/dev/null \
+          | grep -E '"type": ?"result"' | grep -E '"is_error": ?true' || true
+        [ -f "$err_log" ] && { tail -n 20 "$err_log" 2>/dev/null || true; }
+      } || true
+    )
+  else
+    tail_txt=$(
+      {
+        tail -n 20 "$log_file" 2>/dev/null || true
+        [ -s "$txt_log" ] && { tail -n 20 "$txt_log" 2>/dev/null || true; }
+        [ -f "$err_log" ] && { tail -n 20 "$err_log" 2>/dev/null || true; }
+      } || true
+    )
+  fi
 
   if [[ "$ENGINE" == "claude" ]]; then
     # CLI 2.x trocou o texto para "You've hit your session limit · resets 5:40am"

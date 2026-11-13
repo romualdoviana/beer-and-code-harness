@@ -447,6 +447,15 @@ if [ "$scenario" = "false-429" ]; then
   exit 0
 fi
 
+if [ "$scenario" = "false-limit-tool" ]; then
+  # A sessao LEU um arquivo do projeto que cita o aviso de limite (fixture de
+  # teste) e terminou com sucesso: o texto vem num tool_result e na resposta
+  # final, nunca num result com is_error.
+  printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","content":"186\tassistantText(ID, \"API Error: Claude AI usage limit reached\")\n187\tYou'"'"'ve hit your session limit"}]}}'
+  emit_claude_ndjson "implementado; o teste cobre 'usage limit reached'"
+  exit 0
+fi
+
 if [ "$name" = "claude" ]; then emit_claude_ok; else echo "Done."; fi
 exit 0
 MOCK
@@ -918,6 +927,25 @@ if case_enabled false-429; then
   assert_eq 0 "$rc" "exit 0"
   assert_not_contains "$d/out.log" "Limite de uso atingido" "nao interpretou 429 de teste como limite"
   assert_contains "$d/repo/.phases/logs/phase-01.cycle-1.log" "429 Too Many Requests" "o 429 realmente estava no log"
+  if [ "$elapsed" -lt 30 ]; then
+    ok "sem espera (${elapsed}s)"
+  else
+    bad "sem espera (${elapsed}s)"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 7b. claude leu arquivo citando o aviso de limite e terminou bem -> NAO espera
+# ---------------------------------------------------------------------------
+if case_enabled false-limit-tool; then
+  header "7b. aviso de limite em tool_result/resposta de sucesso nao dispara espera"
+  d=$(new_case false-limit-tool)
+  start=$(date +%s)
+  rc=$(CASE_LIMIT_WAIT=60 run_ralph "$d" false-limit-tool --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  elapsed=$(($(date +%s) - start))
+  assert_eq 0 "$rc" "exit 0"
+  assert_not_contains "$d/out.log" "Limite de uso atingido" "nao interpretou fixture lida como limite"
+  assert_contains "$d/repo/.phases/logs/phase-01.cycle-1.log" "usage limit reached" "o aviso realmente estava no log"
   if [ "$elapsed" -lt 30 ]; then
     ok "sem espera (${elapsed}s)"
   else
