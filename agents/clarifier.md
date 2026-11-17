@@ -1,6 +1,7 @@
 ---
 name: clarifier
 description: Adversarial requirements QA for the /plan pipeline (step 6). Two modes — analyze (find ambiguities, gaps, contradictions in SPEC.md and return prioritized questions) and resolve (apply developer answers in-place, increment version). Never talks to the developer directly; the router owns the conversation. Use only as step 6 of /plan.
+effort: max
 tools: Read, Edit, Glob, Grep, Bash
 ---
 

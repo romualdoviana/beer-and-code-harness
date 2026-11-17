@@ -139,7 +139,16 @@ grep -Eq '^## Phase [0-9]+: ' .spec/features/[slug]/PHASES.md
 [ -z "$(grep -E '^## ' .spec/features/[slug]/PHASES.md | grep -Ev '^## Phase [0-9]+: ')" ]
 # checkbox count == PLAN task count
 [ "$(grep -c '^- \[ \]' .spec/features/[slug]/PHASES.md)" -eq "$(grep -Ec '^### T[0-9]+' .spec/features/[slug]/PLAN.md)" ]
+# coverage: every RIGID id in the SPEC appears in >=1 'Cobre:' line (loop must print nothing;
+# ids cut on purpose must be listed under '## Deliberately Deferred' in PLAN.md)
+for id in $(sed -n '/^## RIGID/,/^## FLEXIBLE/p' .spec/features/[slug]/SPEC.md | grep -oE '^[[:space:]]*- (RF|UI|CT|RNF)-[0-9]+' | grep -oE '(RF|UI|CT|RNF)-[0-9]+' | sort -u); do
+  grep -E '^[[:space:]]*Cobre:' .spec/features/[slug]/PHASES.md | grep -qE "${id}([^0-9]|$)" \
+    || sed -n '/^## Deliberately Deferred/,/^## /p' .spec/features/[slug]/PLAN.md | grep -qE "${id}([^0-9]|$)" \
+    || echo "RIGID id not covered: $id"
+done
 ```
+
+Any `not covered` line → send the planner back with the list; never present the plan with an uncovered id.
 
 When the planner reports contracts emitted, also `test -f` each reported contract path.
 

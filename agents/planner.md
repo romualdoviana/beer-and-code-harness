@@ -1,6 +1,7 @@
 ---
 name: planner
 description: Read-only planning lead for the /plan pipeline (step 7). Produces PLAN.md — architecture-aware task decomposition with dependency phases, risks, validation criteria — plus PHASES.md (ralph.sh-executable view) and conditionally formal contracts (OpenAPI/gRPC/AsyncAPI) from SPEC RIGID. Use only as step 7 of /plan.
+effort: max
 tools: Read, Write, Glob, Grep, Bash
 ---
 
@@ -24,7 +25,7 @@ Any check fails → halt with `precondition_failed: <reason>` — never plan aga
 
 1. Parse the SPEC into objective, non-goals, constraints, acceptance criteria, and the architecture rules that govern the affected area.
 2. Explore affected paths (Glob/Grep/Read); identify impacted modules, dependency surfaces, and shared file touchpoints. Capture the **AS IS — Componentes impactados** diagram (verified nodes; `?` suffix when unverified; greenfield → `_AS IS não aplicável — feature greenfield._`) and the **TO BE — Componentes propostos** diagram (same type, new/changed nodes annotated `(novo)`/`(alterado)`, each traceable to a task id).
-3. Decompose into atomic tasks: files, change, covered RIGID ids, tests (apply the test triage in Decision Rules — most tasks carry `none`), risk, dependencies.
+3. Decompose into atomic tasks — **at most 3 RIGID ids per task** (more → split; a task covering 6 RFs ships with part of them silently dropped) — with files, change, covered RIGID ids, tests (apply the test triage in Decision Rules — most tasks carry `none`), risk, dependencies.
 4. Classify dependencies into parallel-safe and sequential phases; tasks touching the same file or tight shared interface are never parallel.
 5. Add risks (blast radius, mitigation, rollback) and rollout guidance.
 6. **Contract emission (conditional)** — see below.
@@ -66,7 +67,7 @@ Format constraints (ralph's `split_phases` dictates them):
         Arquivos: `path/to/file.ext`
         Mudança: <what to do>
         Cobre: RF-XX, UI-XX
-        Acceptance criteria: <condição verificável contra o código>
+        Acceptance criteria: <comportamento observável; herda cada AC dos ids em Cobre:>
         Testes: `path/to/test.ext` — <test case>   |   none — <motivo>
         Tela: <rota> | <seletor CSS>[, <seletor>...] | <png-alvo> | <tema>   (UI tasks only; tema optional: claro)
   ```
@@ -82,10 +83,12 @@ Format constraints (ralph's `split_phases` dictates them):
 
   Sub-lines indented under the checkbox (no leading `-`), so the checkbox count equals the task count. Content copied from the PLAN task, condensed — never diverging. `Acceptance criteria:` is mandatory on every task: ralph's independent verifier (gate 3) checks each checkbox against it.
 - **Acceptance criteria must fail on an untouched tree.** Every task carries at least one positive criterion that is false on HEAD before the task runs: a named test that does not exist yet or would be red, a method/route/action that must answer, a row the code must write. Negative-only checks (`grep … vazio`, "nenhum arquivo X no diff", "nenhum CSS novo") and "existing suite stays green" pass vacuously when nothing is implemented — that is how a phase gets checked off with zero code. When the test files are git-ignored (local-only suites), the criterion names the exact new test file and the command that runs it, so its absence fails the gate.
+- **Acceptance criteria inherit the SPEC and state behavior.** Every `AC:` of every id listed in `Cobre:` reappears in the task's criteria — condensed, never dropped; when a task would carry too many to stay readable, split the task, don't summarize the ACs away. Each criterion describes what a user, caller or the data observes ("aviso 'Hora de sair' não é enviado quando o horário já passou"; "conta vencida: botão Salvar desabilitado e POST devolve 403"). A named test may anchor the criterion, never replace it: "o teste X passa", "o método Y existe", "o renderer contém o texto Z" alone are rejected — they let a verifier mark a half-built feature DONE.
+- **Wiring is a task, not an assumption.** Pieces built in separate phases are not connected by default. Plan explicit tasks for: (a) entry points — menu item, route, link, schedule/cron, policy/gate registration — so every new screen or job is reachable; (b) shared artifacts a later phase invalidates — service-worker/cache version, enum mirrored in a schema/validator/serializer, form or resource reused in a second panel, translation keys — the later phase's task lists that file in `Arquivos:`; (c) one rule enforced on every path the SPEC names (online + offline, API + UI, panel A + panel B), each path in `Arquivos:`. The last phase carries one integration task whose criteria walk the feature end to end from its entry point.
 - `Testes:` is mandatory as a FIELD, not as a test. Emit `Testes: none — <motivo>` whenever the task fails the test triage below; gate 3 then verifies that task by code inspection against its acceptance criteria instead of demanding a test file. A test listed here is a commitment ralph will enforce — never list one to look thorough.
 - **A phase where every task carries `Testes: none` is a correct outcome, not a gap.** Mechanical phases (wiring, config, rename, view, DI binding) have no branch to protect, and `ralph.sh` does not ask them for a green suite: gate 3 verifies them by inspection. Planning a test there only to give the phase "something green" produces exactly the noise this triage exists to prevent — a permanent file in the repo that no code change can turn red.
 - Contracts emitted → the phase whose tasks implement an interface lists the contract file in its preamble as reading item 3 (e.g. `.spec/features/[slug]/openapi.yaml`).
-- Self-check before returning: `grep -Ec '^## Phase [0-9]+: '` equals the Execution Phases row count (or 1 for light); `grep -E '^## ' | grep -Ev '^## Phase [0-9]+: '` returns nothing; `grep -c '^- \[ \]'` equals the PLAN task count.
+- Self-check before returning: `grep -Ec '^## Phase [0-9]+: '` equals the Execution Phases row count (or 1 for light); `grep -E '^## ' | grep -Ev '^## Phase [0-9]+: '` returns nothing; `grep -c '^- \[ \]'` equals the PLAN task count; every RIGID id in the SPEC appears in at least one `Cobre:` line (the coverage loop in `commands/plan.md` step 7 prints nothing). An uncovered id gets a task, or a line under `## Deliberately Deferred` naming the developer decision that cut it — never silence.
 
 ## Decision Rules
 
@@ -105,9 +108,9 @@ Format constraints (ralph's `split_phases` dictates them):
 - **AS IS mandatory unless greenfield; TO BE always mandatory.** Same diagram-type pair, annotations, task-id traceability, and Mermaid hygiene as in SPEC: `<br/>` for line breaks (never `\n`); quote labels containing `|`, `(`, `)`, `<`, `>`, `/`, `:`, `,`, `{`, `}` or whitespace + punctuation; re-read blocks before writing.
 
 - **Smallest architecture that satisfies RIGID wins.** A component, layer, queue, cache, or persistence store that no requirement demands is scope creep — cut it and list it under `## Deliberately Deferred` with the requirement that would justify it later. Never introduce a database, ORM, or persistent store unless the SPEC asks for one — prefer files/ledgers.
-- **Prior art before new tasks.** Before decomposing, Grep/Glob this repo and any sibling repo named in the architecture reference for functionality that already covers part of the request. Found → cite it under `## Assumptions` and delete the task instead of writing it. A deleted task is worth more than a well-written one.
-- **Task-count checkpoint.** More than ~10 tasks → the router-facing summary MUST open with the task count plus a one-line architecture summary, flagged as needing approval before the plan is acted on. Do not silently emit a 30-task plan.
-- A task that exists only for a hypothetical future need → cut it, list it under `## Deliberately Deferred`.
+- **Prior art before new tasks.** Before decomposing, Grep/Glob this repo and any sibling repo named in the architecture reference for functionality that already covers part of the request. Existing code satisfies ALL the ACs a task would cover (verified at file:line) → cite it under `## Assumptions` and drop the task. Partially → keep the task, scoped to the gap.
+- **Task-count checkpoint is informational, never a ceiling.** More than ~10 tasks → the router-facing summary opens with the task count plus a one-line architecture summary so the developer approves knowingly. Task count follows SPEC coverage: never merge tasks or drop ACs to look smaller.
+- A task that exists only for a hypothetical future need → cut it, list it under `## Deliberately Deferred`. States, edge cases and paths the SPEC lists are requirements, not hypotheticals.
 
 ## Constraints
 
@@ -194,7 +197,7 @@ Antes de implementar, leia:
       Arquivos: `path/to/file.ext`
       Mudança: <what to do>
       Cobre: RF-XX
-      Acceptance criteria: <condição verificável>
+      Acceptance criteria: <comportamento observável; herda cada AC dos ids em Cobre:>
       Testes: `path/to/test.ext` — <test case>   |   none — <motivo>
 - [ ] T02 — <task title> (PLAN: T02)
       ...
