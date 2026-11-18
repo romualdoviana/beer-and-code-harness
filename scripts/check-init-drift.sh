@@ -81,6 +81,20 @@ check '`.spec/init/design/` is always a **manual artifact**: the developer creat
 check '[a-z0-9.-]+\.md@sha256:[0-9a-f]{12}' "${DOWN3[@]}" "$ROUTER"
 check 'cut -c1-12)" = "${pair##*:}" ]' "${DOWN3[@]}" "$ROUTER"
 
+# --- Argument placeholders in command bodies ---
+# Claude Code substitutes `$N` (and `$ARGUMENTS[N]`) in command/skill bodies
+# with the Nth argument BEFORE the model reads them: `awk '{print $2}'` inside a
+# self-check became `awk '{print +}'` when the developer passed a multi-word
+# focus, and the table-coverage loop passed without checking anything. Shell
+# snippets in commands must use `cut -f`, `${1}`-free functions, or `\$N`.
+# shellcheck disable=SC2016
+hits=$(grep -nE '(^|[^\\])\$[0-9]' commands/*.md commands/*/*.md 2>/dev/null || true)
+if [ -n "$hits" ]; then
+  echo "ARG-PLACEHOLDER: \$N in a command body is replaced by the Nth argument at runtime:"
+  printf '  %s\n' "$hits"
+  FAIL=1
+fi
+
 if [ "$FAIL" -eq 0 ]; then
   echo "OK: shared init wording is in sync across the suite."
 fi

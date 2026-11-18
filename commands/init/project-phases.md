@@ -222,7 +222,7 @@ for id in $(grep -oE '^\| US-[0-9]+\.[0-9]+ ' .spec/init/user-stories.md | grep 
   grep -F '**Traces:**' "$F" | grep -qE "${id//./\\.}([^0-9]|$)" || echo "story not traced: $id"
 done
 # coverage: every table declared in the schema appears in >=1 task (loop must print nothing)
-for t in $(grep -E '^Table [a-z0-9_]+ \{' .spec/init/database-schema.md | awk '{print $2}' | sort -u); do
+for t in $(grep -E '^Table [a-z0-9_]+ \{' .spec/init/database-schema.md | cut -d' ' -f2 | sort -u); do
   grep -qw "$t" "$F" || echo "table not covered: $t"
 done
 ```
