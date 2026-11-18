@@ -7,7 +7,7 @@
 # projetos em paralelo) sem abrir o terminal.
 #
 # Uso:
-#   export RALPH_NOTIFY_CMD="$HOME/.claude/scripts/notify-telegram.sh"
+#   export RALPH_NOTIFY_CMD="/caminho/para/scripts/notify-telegram.sh"
 #   ./ralph.sh .spec/features/<slug>/PHASES.md
 #
 #   ./notify-telegram.sh --setup    descobre o chat_id (nao imprime o token)
@@ -23,11 +23,15 @@
 #               | limit_abort | run_done
 #   $2  mensagem ja formatada pelo ralph.sh
 #
-# Contexto lido do ambiente exportado pelo ralph.sh:
-#   RALPH_PROJECT RALPH_ENGINE RALPH_PHASE_NUM RALPH_PHASE_TOTAL
-#   RALPH_PHASE_TITLE RALPH_EVENT RALPH_OUTCOME RALPH_RUN_ID
-#   RALPH_PHASE_ATTEMPT RALPH_PHASE_MAX_ATTEMPTS RALPH_GATE2 RALPH_GATE3
-#   RALPH_TEST_SCOPE RALPH_LOG_PATH
+# Contexto lido do ambiente montado pelo ralph.sh (ver o cabecalho dele).
+# Campo ausente ou vazio => a linha correspondente e omitida:
+#   RALPH_PROJECT RALPH_ENGINE RALPH_RUN_ID RALPH_OUTCOME
+#   RALPH_PHASE_NUM RALPH_PHASE_TOTAL RALPH_PHASE_TITLE
+#   RALPH_PHASE_ATTEMPT RALPH_PHASE_MAX_ATTEMPTS
+#   RALPH_GATE0 RALPH_GATE2 RALPH_GATE3 RALPH_LOG_PATH
+#
+# RALPH_NOTIFY_API_BASE sobrepoe https://api.telegram.org (teste sem rede ou
+# Bot API server local).
 #
 # Invariante: exit 0 SEMPRE. Falha de rede, token ausente ou erro da API nunca
 # derrubam o run do ralph — a notificacao e um efeito colateral, nao um gate.
@@ -35,7 +39,6 @@
 set -uo pipefail
 
 ENV_FILE="${RALPH_NOTIFY_ENV_FILE:-$HOME/.config/ralph-notify/telegram.env}"
-# Override serve para teste sem rede e para quem roda um Bot API server local.
 API_BASE="${RALPH_NOTIFY_API_BASE:-https://api.telegram.org}"
 
 warn() { echo "[notify-telegram] $1" >&2; }
@@ -96,7 +99,7 @@ event_icon() {
 }
 
 # Limita ANTES do escape HTML: cortar uma entidade pela metade perde o envio.
-# O orcamento conservador considera ate 2 unidades UTF-16 por caractere.
+# O teto do Telegram e 4096 caracteres; os cortes abaixo deixam folga.
 short_text() {
   local text="$1" max="$2"
   text="$(printf '%s' "$text" | tr -d '\000-\010\013-\037\177')"
@@ -109,39 +112,37 @@ short_text() {
 
 event_title() {
   case "$1" in
-    run_start) printf 'Execução iniciada' ;;
-    phase_done) printf 'Fase concluída' ;;
-    phase_failed)
-      if [ "${RALPH_OUTCOME:-}" = environment ]; then printf 'Interrompida pelo ambiente'
-      else printf 'Fase falhou'; fi ;;
-    limit_hit) printf 'Aguardando limite de uso' ;;
-    limit_over) printf 'Execução retomada' ;;
-    limit_abort) printf 'Execução interrompida por limite' ;;
+    run_start)    printf 'Execução iniciada' ;;
+    phase_done)   printf 'Fase concluída' ;;
+    phase_failed) printf 'Fase falhou' ;;
+    limit_hit)    printf 'Aguardando limite de uso' ;;
+    limit_over)   printf 'Execução retomada' ;;
+    limit_abort)  printf 'Execução interrompida por limite' ;;
     run_done)
       case "${RALPH_OUTCOME:-}" in
-        environment) printf 'Interrompida pelo ambiente' ;;
-        failed|aborted) printf 'Execução encerrada com falhas' ;;
-        done) printf 'Execução concluída' ;;
-        *) printf 'Execução encerrada' ;;
+        finished) printf 'Execução concluída' ;;
+        failed)   printf 'Execução encerrada com falhas' ;;
+        *)        printf 'Execução encerrada' ;;
       esac ;;
     *) printf 'Atualização do Ralph' ;;
   esac
 }
 
+# Estados de gate publicados pelo ralph.sh: pending | run | pass | fail | skip.
 gate_text() {
   case "$1" in
-    pass) printf 'aprovado' ;; fail) printf 'falhou' ;;
-    skip) printf 'não executado' ;; running) printf 'em execução' ;;
-    *) printf 'aguardando' ;;
+    pass) printf 'aprovado' ;;
+    fail) printf 'falhou' ;;
+    skip) printf 'não executado' ;;
+    run)  printf 'em execução' ;;
+    *)    printf 'aguardando' ;;
   esac
 }
 
 build_text() {
   local event="$1" message="$2" icon project engine phase_line title log_path
-  local phase_total="${RALPH_PHASE_TOTAL:-?}" max_attempts="${RALPH_PHASE_MAX_ATTEMPTS:-?}"
   icon=$(event_icon "$event")
-  if [ "${RALPH_OUTCOME:-}" = environment ]; then icon='⚠️'
-  elif [ "$event" = run_done ] && [ "${RALPH_OUTCOME:-}" = failed ]; then icon='❌'; fi
+  if [ "$event" = run_done ] && [ "${RALPH_OUTCOME:-}" = failed ]; then icon='❌'; fi
   project=$(html_escape "$(short_text "${RALPH_PROJECT:-projeto}" 64)")
   engine=$(html_escape "$(short_text "${RALPH_ENGINE:-}" 24)")
   title=$(event_title "$event")
@@ -149,36 +150,35 @@ build_text() {
 
   # Eventos do run nunca herdam fase, ciclo ou gates da ultima fase.
   if [ "$event" != run_done ] && [ "$event" != run_start ] && [ -n "${RALPH_PHASE_NUM:-}" ]; then
-    phase_line="Fase ${RALPH_PHASE_NUM:0:6}/${phase_total:0:6}"
-    phase_line+=" · $(short_text "${RALPH_PHASE_TITLE:-}" 96)"
+    phase_line="Fase ${RALPH_PHASE_NUM:0:6}"
+    [ -n "${RALPH_PHASE_TOTAL:-}" ] && phase_line+="/${RALPH_PHASE_TOTAL:0:6}"
+    [ -n "${RALPH_PHASE_TITLE:-}" ] && phase_line+=" · $(short_text "$RALPH_PHASE_TITLE" 96)"
     printf '\n%s\n' "$(html_escape "$phase_line")"
     if [ -n "${RALPH_PHASE_ATTEMPT:-}" ]; then
-      printf 'Ciclo: %s/%s\n' "$(html_escape "${RALPH_PHASE_ATTEMPT:0:6}")" \
-        "$(html_escape "${max_attempts:0:6}")"
+      if [ -n "${RALPH_PHASE_MAX_ATTEMPTS:-}" ]; then
+        printf 'Ciclo: %s/%s\n' "$(html_escape "${RALPH_PHASE_ATTEMPT:0:6}")" \
+          "$(html_escape "${RALPH_PHASE_MAX_ATTEMPTS:0:6}")"
+      else
+        printf 'Ciclo: %s\n' "$(html_escape "${RALPH_PHASE_ATTEMPT:0:6}")"
+      fi
     fi
     if [ "$event" = phase_done ] || [ "$event" = phase_failed ]; then
-      if [ "${RALPH_OUTCOME:-}" = environment ]; then
-        printf 'G2: indisponível (sem veredito sobre o código)\n'
-      else
+      [ "${RALPH_GATE0:-}" = fail ] && printf 'G0: falhou (o engine não concluiu)\n'
+      if [ -n "${RALPH_GATE2:-}" ] || [ -n "${RALPH_GATE3:-}" ]; then
         printf 'G2: %s · G3: %s\n' "$(gate_text "${RALPH_GATE2:-}")" "$(gate_text "${RALPH_GATE3:-}")"
       fi
-      case "${RALPH_TEST_SCOPE:-}" in
-        full) printf 'Suite: completa\n' ;; scoped) printf 'Suite: escopada\n' ;;
-        skip) printf 'Suite: não executada\n' ;;
-      esac
     fi
   fi
   printf '\n%s\n' "$(html_escape "$(short_text "$message" 1000)")"
 
   case "$event" in
     phase_failed|limit_abort)
-      log_path="$(short_text "${RALPH_LOG_PATH:-.phases/logs/}" 160)"
-      printf '\nLog: <code>%s</code>\n' "$(html_escape "$log_path")"
+      if [ -n "${RALPH_LOG_PATH:-}" ]; then
+        log_path="$(short_text "$RALPH_LOG_PATH" 160)"
+        printf '\nLog: <code>%s</code>\n' "$(html_escape "$log_path")"
+      fi
       ;;
   esac
-  if [ "$event" = phase_failed ] && [ "${RALPH_OUTCOME:-}" = environment ]; then
-    printf 'Próximo passo: restabelecer os serviços e retomar o Ralph.\n'
-  fi
   printf '\n<code>%s · %s</code>\n' "${engine:-ralph}" "$(date '+%d/%m %H:%M')"
   [ -n "${RALPH_RUN_ID:-}" ] && printf '<code>%s</code>\n' "$(html_escape "$(short_text "$RALPH_RUN_ID" 32)")"
   return 0
@@ -228,13 +228,13 @@ json_str() {
 api_ok()    { grep -q '"ok":[[:space:]]*true' <<< "$1"; }
 api_error() { json_str "$1" '.description' '"description":[^,}]*'; }
 
-# Nunca ecoa o token: so o que o dev precisa copiar para o .env.
+# Nunca ecoa o token: so o que o dev precisa copiar para o arquivo de config.
 do_setup() {
   local me bot_name webhook hook_url updates chats
 
   me=$(api_get getMe)
   if [ -z "$me" ]; then
-    warn "Sem resposta da API. Verifique a rede (proxy/VPN/DNS no WSL)."
+    warn "Sem resposta da API. Verifique a rede (proxy/VPN/DNS)."
     return 0
   fi
   if ! api_ok "$me"; then
@@ -254,7 +254,7 @@ do_setup() {
   if [ -n "$hook_url" ]; then
     warn "Este bot tem webhook ativo: $hook_url"
     warn "Enquanto ele existir, getUpdates nao devolve nada. Para remover:"
-    warn "    curl -s \"\$API/bot\$TOKEN/deleteWebhook\"   (ou desligue no seu n8n)"
+    warn "    curl -s \"\$API/bot\$TOKEN/deleteWebhook\"   (ou desligue a integracao que o registrou)"
   fi
 
   echo
@@ -287,8 +287,8 @@ do_setup() {
     warn "  1. A mensagem nao foi enviada para @${bot_name:-seu_bot} (confira o @)."
     warn "  2. Voce apertou enter antes de a mensagem chegar — rode de novo."
     warn "  3. Os updates ja foram consumidos por outra leitura (getUpdates com"
-    warn "     offset, um n8n ligado, ou este comando rodado 2x). Mande uma NOVA"
-    warn "     mensagem e rode de novo."
+    warn "     offset, outra integracao ligada, ou este comando rodado 2x). Mande"
+    warn "     uma NOVA mensagem e rode de novo."
     [ -n "$hook_url" ] && warn "  4. O webhook acima esta capturando tudo."
     return 0
   fi

@@ -94,7 +94,7 @@ Derive as much of the plan as you can directly from the docs, then ask the devel
 - **Ambiguous scope** — flows implied but not fully specified in the stories.
 - **Design coverage** — screens with no design reference: build to a sensible default, or wait for design?
 
-Use `AskUserQuestion` for discrete decisions with clear options. The developer answers in a terminal with nothing else on screen, so every question stands alone: say **what is being decided** in plain words (never an id or a doc key as the subject), **quote the evidence** you are working from (or name the gap when nothing is written), say **why you are asking**, and say **what changes** depending on the answer. Give 2–4 options that are real answers, never a bare yes/no: `label` ≤ 5 words naming the choice, `description` spelling out its consequence — what gets written into the document, what it costs, what it rules out. Recommended option first, marked `(Recomendado)`, with the reason in its description; never add an “Other” option, the harness supplies it. Ask real open questions in plain text when the answer is not a menu, with the same structure plus one worked example of a valid answer. Batch related questions (≤ 4 per call); don't drip one at a time. When something stays undecided, mark it as an open question rather than inventing scope.
+Use `AskUserQuestion` for discrete decisions with clear options. Ask real open questions in plain text when the answer is not a menu. Batch related questions; don't drip one at a time. When something stays undecided, mark it as an open question rather than inventing scope.
 
 ## Rules for phasing
 
@@ -138,13 +138,8 @@ The self-checks in step 5 enforce this format mechanically.
 - **Frontend-only tasks** (building a screen/component with no business logic) **do not require tests**, but **must** have acceptance criteria that can be validated (matches design reference, renders required elements/states, responsive/interaction behavior), plus a **Design ref** pointing at the relevant `.spec/init/design/` artifact.
 - **Criteria cover everything the task promises.** Every element, action and state named in the task text has a criterion the verifier can check — `ralph.sh`'s gate 3 checks the criteria, not the prose, so whatever the task lists without a criterion can ship half-built and still pass. A screen task that names a dozen elements is split (layout and read-only content / actions / states) rather than given two criteria. The traced stories' criteria reappear in the task, condensed but never dropped.
 - **"Faithful to the mockup" is never a criterion on its own.** State what the screen must show: the elements and their order, the state labels, the **empty**, **loading**, **error/offline** and **no-permission** states, singular/plural and number formatting, and what the primary action does on success and on failure.
-- **`Tela:` on every task that changes what a user sees** — `ralph.sh` photographs that route before the verifier judges, and fails the phase when the page does not render or a listed selector is missing. Write it as a plain sub-line, with no leading `-` and no bold (ralph matches `^\s*Tela:`): `    Tela: <rota> | <seletores CSS> | <png-alvo> | <tema>`. Route and 1–4 selectors that exist only when the task is done (`[data-test="weighing-result"]`, never `body`) are mandatory; field 3 is the path of an exported PNG under `.spec/init/design/` — leave it EMPTY (`Tela: /rota | [sel] |  |`) when the design exists only as HTML/canvas, and the **Design ref** line carries the reference. A route that needs a record cites a fixed id seeded by an earlier task. Apps whose screens cannot be served to a browser (pure native) omit `Tela:` and say so in the Overview.
-- **The first frontend phase builds the capture script before any `Tela:` task.** A phase with `Tela:` and no `scripts/ralph-ui-shot.{mjs,js,sh,py}` (or `RALPH_UI_SHOT_CMD`) fails closed. Plan a task: `scripts/ralph-ui-shot.mjs <rota> <saida.png> [<seletores>] [<tema>]`, headless browser against the dev server, exits non-zero when a selector is missing, honours `RALPH_UI_VIEWPORT` (`desktop` 1440×900 / `mobile` 400×900), with any login or seeded data it needs.
 - **Wiring is a task, not an assumption.** Pieces built in separate phases are not connected by default. Plan explicit tasks for: entry points (menu, tab, route, link, schedule) so every screen and job is reachable; shared artifacts a later phase invalidates (cache/service-worker version, enum mirrored in validators or serializers, a component reused on a second screen); one rule enforced on every path the stories name (online and offline, app and server). The last phase carries one integration task whose criteria walk each core workflow end to end from its entry point.
 - Keep every task traceable to a story (`US-x.y`), a schema table, a workflow, or a design artifact. No invented scope.
-- **Never add a test to give a phase something green.** `ralph.sh` charges an intermediate phase only for the tests it touched, and runs the full project suite once, on the last pending phase of the document. A phase made of mechanical tasks legitimately ships with no test at all; gate 3 verifies it by reading the code against its acceptance criteria.
-- **Order phases so the build is functionally complete at the last one** — that is where the whole suite runs. Never append a phase whose only job is "run the tests".
-- **`Suite: completa`** — put this literal line in a phase's body when its blast radius exceeds its own tests (schema/migrations, dependency manifests, global config, bootstrap/DI, container images, CI). `ralph.sh` then runs the whole suite on that phase. There is no line that asks for less.
 
 ### 4. Write the document
 
@@ -178,7 +173,6 @@ Write to `.spec/init/project-phases.md` (create the `.spec/init/` directories if
     - ...
   - **Feature tests:** <test name → what business rule it asserts> *(omit for frontend-only tasks)*
   - **Design ref:** <path under .spec/init/design/> *(only for screen/component tasks)*
-    Tela: <rota> | <seletores CSS> | <png-alvo ou vazio> | <tema>   *(every task that changes what a user sees; plain line, no `-`, no bold)*
   - **Traces:** <US-x.y / table / workflow>
 
 - [x] **Task:** <already implemented in the codebase>
@@ -225,10 +219,6 @@ grep -E '^### Phase' "$F" | grep -vE '^### Phase [0-9]+\.[0-9]+: ' || true
 TASKS=$(grep -cE '^- \[[ x]\] \*\*Task:\*\*' "$F"); [ "$TASKS" -ge 1 ]
 [ "$TASKS" -eq "$(grep -c '\*\*Acceptance criteria:\*\*' "$F")" ]   # every task has criteria
 [ "$TASKS" -eq "$(grep -c '\*\*Traces:\*\*' "$F")" ]                # every task is traceable
-# screen tasks carry the line ralph photographs (prints nothing unless the plan has screens and no Tela:)
-[ "$(grep -c '\*\*Design ref:\*\*' "$F")" -eq 0 ] || [ "$(grep -cE '^[[:space:]]+Tela: /' "$F")" -ge 1 ] || grep -q 'omit `Tela:`' "$F" || echo "screen tasks without Tela:"
-# any Tela: present -> the capture script is planned before it
-[ "$(grep -cE '^[[:space:]]+Tela: ' "$F")" -eq 0 ] || grep -q 'ralph-ui-shot' "$F" || echo "Tela: without a planned scripts/ralph-ui-shot task"
 # coverage: every story ID in the user-stories appendix appears in >=1 **Traces:** line
 # (loop must print nothing; the ([^0-9]|$) guard keeps US-1.1 from matching US-1.10)
 for id in $(grep -oE '^\| US-[0-9]+\.[0-9]+ ' .spec/init/user-stories.md | grep -oE 'US-[0-9]+\.[0-9]+' | sort -u); do

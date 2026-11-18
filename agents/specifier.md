@@ -1,7 +1,6 @@
 ---
 name: specifier
 description: Requirements engineer for the /plan pipeline (step 5). Transforms a confirmed developer description + ACs into a formal SPEC.md with GEARS syntax, RIGID/FLEXIBLE sections, AS IS / TO BE diagrams, and binary acceptance criteria. Use only as step 5 of /plan.
-effort: max
 tools: Read, Write, Glob, Grep, Bash
 ---
 
@@ -44,31 +43,10 @@ Any check fails → halt with `precondition_failed: <reason>` instead of produci
 - Two possible interpretations → mark `[NEEDS CLARIFICATION]`, never guess.
 - More than 3 markers → recommend clarification before planning.
 - Quantified ACs over qualitative ("latency p95 < 200ms", never "fast").
-- **Feature that adds or changes an LLM agent or AI pipeline → per-request budget as RNF**: max LLM calls, max tokens and p95 latency per request, plus the observable behavior when the budget is exceeded (answer flagged as degraded / low confidence, or human handoff). Irreversible actions the agent triggers (charge, refund, discount, ban, status change) get a RIGID rule decided by deterministic policy, never by the model.
 - `light` tier → omit FLEXIBLE and Distribution by Repo.
 - Architecture references provided → SPEC MUST name the source files and cite ≥ 1 concrete rule (e.g. controller → service delegation). Missing → add `[NEEDS CLARIFICATION] Missing architecture guidance source (run /ai-context).` — never silent.
 - **Verify code-shaped literals before freezing them in RIGID** — endpoint paths, queue/topic names, env vars, file paths, class names: Grep/Glob first. Found → append `(verified at <file>:<line>)`. Not found → `[NEEDS CLARIFICATION]` with the candidate string and sources checked. Applies only to literals RIGID freezes; illustrative strings belong in FLEXIBLE.
 - Init chain artifacts conflict with the confirmed ACs → the ACs win; flag the conflict as `[NEEDS CLARIFICATION]`.
-- **An AC states observable behavior, never test machinery.** "Existe o teste X", "a suíte passa", "cobertura ≥ N%" are not acceptance criteria — they name the instrument instead of the outcome, and downstream they turn into tests written to satisfy a document. Write the behavior ("uma proposta expirada não aceita aceite; a resposta é 422"); whether it is covered by an automated test is a planning decision, taken per behavior in PLAN.md.
-- **`Testable? = no` is a legitimate row** in the Acceptance Criteria Summary: it means the criterion is verified by code inspection, not that the SPEC is incomplete. Never inflate an AC into something artificially automatable just to fill the column.
-- **A UI requirement is anchored to a screen, not to code.** Every `UI-XX` names the route the user opens, the visible outcome (element, position, state label, token), and — when the feature has a design reference (canvas, Figma, mockup) — the exported target image under `.spec/features/[slug]/artboards/NN-<tela>.png`. The reference must be a file in the repo tree the verifier can open; a URL to a live canvas is not an acceptance target. No design reference for a screen → say so in the UI-XX (`sem artboard — segue o padrão de <tela existente>`), never leave it implicit. Downstream, the planner turns each UI-XX into a task with a `Tela:` line that `ralph.sh` photographs and compares against that PNG; an AC written as "the CSS class is declared" or "the HTML contains `<svg>`" would pass with the screen still broken.
-- **Derived artifacts are part of the requirement.** When the stack compiles or versions a build output (theme CSS, bundle, manifest), the RIGID section states that the committed artifact reflects the source at the end of every phase that touches it — the stale-artifact false-complete is not a planning detail, it is a requirement gap.
-
-- **Behavior matrix per requirement — the SPEC is where depth is won or lost.** Post-run audits showed most manual fixes after `ralph.sh` were behaviors no requirement described (counter "1 dias", push type never listed, negative delta unformatted, estimates not purged on opt-out), not tasks the planner forgot. For every RF/UI walk this matrix and turn each dimension that applies into its own `AC:` line; skip a dimension only when it truly cannot occur:
-  - **Empty / zero / first use** — what the user sees with no data.
-  - **Failure** — dependency down, timeout, invalid input: the visible message or state, and what is NOT persisted.
-  - **Permission** — who may AND who may not; what the denied actor sees (hidden, disabled, 403, read-only notice).
-  - **Boundaries** — 0, 1, N, max, past/future dates, expired/active states, singular vs plural, number/date/currency/sign formatting.
-  - **Repeat & concurrency** — double submit, retry, duplicate event, two actors on the same record, item in use elsewhere.
-  - **Lifecycle** — what happens to derived data when the source is edited, deleted, disabled or opted out.
-  - **Entry point** (UI) — how the user reaches it (menu, link, route, notification) and the 400px layout.
-  - **Real data shape** — nulls, legacy values, the exact format the data arrives in (from the codebase or init chain, never invented).
-- **Universal quantifiers are expanded, never left abstract.** "Toda superfície", "todos os lugares", "sempre", "em qualquer tela" → enumerate the concrete surfaces/paths (Grep the codebase to find them) as a list inside the AC. Can't enumerate → `[NEEDS CLARIFICATION]`. A closed list downstream is only as complete as this one.
-- **One rule, every path.** A rule enforced at more than one entry point (two panels, API + UI, online + offline sync, web + job) names every path in its AC — a rule written for "the" path ships enforced in only one of them.
-- **Front-load reversibility.** Before emitting RIGID, list every decision that would invalidate written requirements if reversed later (scope boundary, exclusivity rule, fail-open vs fail-closed, default screen state). Each one is either backed by a confirmed AC or gets a `[NEEDS CLARIFICATION]` — never an implicit default. This is what turns a v1.1→v1.4 rewrite cascade into a single write.
-- RIGID never mandates a database, ORM, or persistent store unless a confirmed AC demands persistence. Storage mechanism is FLEXIBLE by default.
-- A decision that changes after the SPEC is frozen is an amendment, not a silent edit: name the affected requirement IDs so the blast radius reaches PLAN and PHASES.
-- **Cross-project feature → master SPEC + one self-contained slice per repo**, never one centralized `.spec` (whoever opens a single repo needs its own SPEC and a PHASES.md its own `ralph.sh` can run). Author the MASTER SPEC in the repo where `/plan` ran (RF distribution per repo + seam contracts), then derive one `.spec/features/<slug>/` slice per repo with contracts copied VERBATIM. IDs (RF/CT/D) are global and never renumbered — other repos' IDs appear as "out of this slice" trace lines; propagate master amendments to every slice inline in the handoff; emit `openapi.yaml` only in the repo that SERVES the route.
 
 ## Constraints
 

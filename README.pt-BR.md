@@ -51,14 +51,10 @@ Os comandos ficam disponíveis com namespace: `/bc-harness:init`, `/bc-harness:p
 
 O `ralph.sh` é um script bash independente — copie ou referencie `scripts/ralph.sh` e rode direto no repositório do projeto-alvo.
 
-Versão atual do plugin: **0.5.0** (`.claude-plugin/plugin.json`). O `ralph.sh` não tem versão própria — ele é distribuído junto com o plugin.
-
 **Pré-requisitos do ralph.sh:**
 
-- Engine Codex (default): `npm install -g @openai/codex`, autenticado
-- Engine Claude: `npm install -g @anthropic-ai/claude-code`, autenticado, **mais `jq`** (obrigatório: todo veredito do claude é lido da saída `stream-json`)
-- O preflight só confere se a CLI do engine está no `PATH` — CLI logada ou API key exportada, qualquer um dos dois serve
-- bash 4+, git, coreutils; opcionais `python3` (`--serve`) e `docker` (recuperação de ambiente)
+- Engine Codex: `npm install -g @openai/codex` + `OPENAI_API_KEY`
+- Engine Claude: `npm install -g @anthropic-ai/claude-code` + `ANTHROPIC_API_KEY`
 - Raiz de um repositório git com árvore de trabalho **limpa**
 
 ## Comandos
@@ -106,8 +102,6 @@ Características:
 - **Checkpoints humanos** em cada etapa: confirmação do input normalizado, aprovação da SPEC, resolução de ambiguidades, confirmação da decomposição.
 - **Clarifier em duas fases** — o agente analisa a SPEC e devolve perguntas priorizadas; o roteador as apresenta ao desenvolvedor e re-invoca o agente com as respostas, que atualiza a SPEC in-place.
 - **Gate de arquitetura** — exige `AGENTS.md` / `docs/agents/` (ou avisa e marca `architecture_reference_status: missing`). Sem contexto de arquitetura o pipeline nunca planeja em silêncio.
-- **Numeração de tasks por fase** — os checkboxes do `PHASES.md` recomeçam em `T01` dentro de cada fase, com uma tag final `(PLAN: TNN)` apontando para a task do PLAN.md. O gate 3 do ralph indexa as tasks pela posição dentro da fase, então numeração contínua entre fases reprovaria uma fase concluída.
-- **Telas sem artboard** — uma task com campo `Tela:` cujo PNG-alvo (3º campo) está vazio precisa trazer as linhas `Referência visual:` e `Layout:`; o 3º campo é posicional, nunca prosa.
 - **Nunca escreve código de aplicação.** O fechamento aponta o handoff de execução:
 
 ```bash
@@ -136,7 +130,7 @@ Características principais:
 
 - **Causa raiz, nunca sintoma.** Sem causa raiz não sai patch nem `PHASES.md`: o comando reporta as hipóteses e os dados que faltam.
 - **Teste vermelho primeiro.** O comando de teste é resolvido pelas mesmas regras do `ralph.sh`, então o que a correção roda e o que o gate 2 roda são o mesmo comando. Projeto sem runner → aviso alto e ACs verificáveis à mão no lugar do teste.
-- **Teste vermelho e correção na MESMA fase.** O gate 2 do ralph roda os testes que a fase tocou (e a suite inteira na última); uma fase que termina vermelha queimaria todos os ciclos de correção e abortaria o run. Fase 1 é `reproduzir e corrigir`; fase 2+ cobrem regressão e bordas. Nenhuma fase termina com suite vermelha.
+- **Teste vermelho e correção na MESMA fase.** O gate 2 do ralph roda a suite do projeto; uma fase que termina vermelha queimaria todos os ciclos de correção e abortaria o run. Fase 1 é `reproduzir e corrigir`; fase 2+ cobrem regressão e bordas. Nenhuma fase termina com suite vermelha.
 - **Bug que não reproduz para num checkpoint.** O desenvolvedor decide: parar e juntar dados, ou seguir especulativo — e aí todo artefato carrega o marcador `[NAO REPRODUZIDO]` e os ACs explicitamente não são sustentados por teste vermelho.
 - **Gate de arquitetura não-bloqueante**, diferente do `/plan`: defeito é reativo e muitas vezes urgente, então `AGENTS.md` ausente vira aviso e flag `architecture_reference_status: missing`, nunca bloqueio.
 - **Fecha registrando o aprendizado.** A causa raiz é classificada um nível acima da instância, escopada (agent/skill global vs rule de projeto com escopo por caminho em `.claude/rules/`) e proposta como uma linha `| bug | root cause | prevention |` em inglês no arquivo certo — escrita só após confirmação explícita.
@@ -151,7 +145,7 @@ O tier alto encerra com o handoff de execução:
 ### `/ai-context` — árvore de contexto canônica
 
 ```
-/ai-context [path] [+file] [-file] [--adopt]
+/ai-context [path] [+id] [-id] [--adopt]
 ```
 
 Gera ou atualiza 10 artefatos a partir do **código implementado** (nunca lê `.spec/`):
@@ -174,8 +168,8 @@ Regras centrais:
 - **Idempotente** — upsert seguro; re-rodar atualiza só o que sofreu drift.
 - **Documenta a realidade (AS IS)** — código, manifests, CI e configs são as únicas fontes; nunca inventa, nunca prescreve.
 - **Contrato de ownership** — todo arquivo gerado carrega banner na linha 3. Arquivo sem banner (escrito à mão) nunca é sobrescrito; `--adopt` incorpora as regras concretas dele à árvore gerada e assume a posse.
-- **Preserva blocos de terceiros** — regiões `<tag>...</tag>` (ex.: Laravel Boost) são re-anexadas verbatim na regeneração. Um bloco só fecha na tag de fechamento **de mesmo nome**, então linhas internas como `</code-snippet>` continuam dentro dele.
-- Filtros `+file` / `-file` geram só um subconjunto (ex.: `/ai-context +AGENTS +architecture`).
+- **Preserva blocos de terceiros** — regiões `<tag>...</tag>` (ex.: Laravel Boost) são re-anexadas verbatim na regeneração.
+- Filtros `+id` / `-id` geram só um subconjunto (ex.: `/ai-context +AGENTS +architecture`).
 
 ## `scripts/ralph.sh` — orquestrador de execução
 
@@ -187,139 +181,30 @@ Lê um documento de fases, quebra pelo heading `## Phase N: <título>` e aliment
 
 Sem argumento, resolve o input nesta ordem: `.spec/init/project-phases.md` → `.spec/project-phases.md` (layout pré-init, com aviso). Um `PHASES.md` de feature também é input válido.
 
-> **Nota sobre autonomia e permissões**: o ralph é, por design, um orquestrador sem supervisão. As sessões de implementação rodam sem prompts de permissão — claude com `--dangerously-skip-permissions`, codex com `--sandbox danger-full-access` —, então o agente edita arquivos e roda comandos no repositório livremente. Rode só em repositórios de confiança, de preferência numa branch descartável ou em ambiente isolado (container/VM). Cada fase vira um commit separado, então `git revert`/`git reset` sempre te traz de volta. A sessão de verificação (gate 3) é read-only: o claude recebe só `Read,Glob,Grep`; o codex roda com `--sandbox read-only` e é instruído a inspecionar só com `rg`, `sed`, `git diff` e `git status`.
->
-> `--attach` desenha o painel sobre um run **já em andamento** no mesmo diretório, a partir de um segundo terminal: não roda fase nenhuma, não exige árvore limpa e é read-only sobre o run.
-
 ### Invariantes
 
 1. Cada fase **e** cada ciclo de correção roda em sessão nova, com prompt auto-contido. Nunca reutiliza sessão.
 2. Zero perguntas — execução totalmente autônoma.
 3. Fase só é "completa" quando passa pelos **4 gates mecânicos**, nunca pelo exit code do engine.
-4. Limite de uso da API → espera o reset e re-executa a **mesma** fase, sem consumir ciclo de correção.
-5. **Um commit por fase concluída** (`feat(phase-N): <título>`). Antes de commitar, o ralph marca os checkboxes da fase (`- [x]`) no documento de input; o stamp de progresso ignora o estado dos checkboxes.
-6. Conserto cirúrgico e resgate nunca commitam e nunca substituem gate.
-
-Commits que o ralph pode criar:
-
-| Commit | Quando |
-|---|---|
-| `feat(phase-N): <título>` | Fase passou nos gates (fase fechada por resgate ganha uma linha no corpo dizendo isso) |
-| `test(baseline): sanea o vermelho herdado de HEAD` | O saneamento de HEAD deixou verde uma suite herdada vermelha |
-| `wip(phase-N): incomplete — see .phases/logs/` | Fase falhou com `--keep-going` |
-| `wip(phase-N): interrompido por falha de ambiente — see .phases/logs/` | Run encerrado por ambiente fora do ar |
+4. Limite de uso da API → espera o reset e re-executa a **mesma** fase, sem consumir ciclo de correção. Limite semanal (reset a dias) → encerra com o comando de retomada em vez de dormir.
+5. **Um commit por fase concluída** (`feat(phase-N): <título>`).
 
 ### Os 4 gates
 
 | Gate | Pergunta | Como decide |
 |---|---|---|
 | 0 | O engine terminou de verdade? | claude: `is_error` no JSON de resultado; codex: exit code |
-| 1 | A sessão escreveu código? | Assinatura da árvore (incluindo `HEAD`, então sessão que commita por conta própria conta) antes/depois. **Sinal, não veredito** — fase já implementada faz o engine (corretamente) não escrever nada; o sinal alimenta a causa do ciclo de correção |
-| 2 | Os testes do projeto passam? | Rodados **pelo ralph**, fora da sessão do agente — o agente não pode "mentir verde". O **escopo varia por fase**: veja abaixo |
-| 3 | Cada task está de fato no código? | Sessão verificadora independente, read-only, que emite `TASK <n>: DONE — <evidência>` / `TASK <n>: INCOMPLETE` por task. Com `RALPH_VERIFY=auto` (default) ela só é **pulada** quando o gate 2 rodou de fato testes desta fase e passou, no ciclo 1, depois de uma sessão que escreveu código; fora isso, roda. `always` roda em toda fase. No engine claude usa `opus` |
+| 1 | A sessão escreveu código? | Assinatura da árvore antes/depois. **Sinal, não veredito** — fase já implementada faz o engine (corretamente) não escrever nada; o sinal alimenta a causa do ciclo de correção |
+| 2 | A suite de testes passa? | Rodada **pelo ralph**, fora da sessão do agente — o agente não pode "mentir verde" |
+| 3 | Cada task está de fato no código? | Sessão verificadora independente, read-only, que emite `TASK <n>: DONE/INCOMPLETE` por task. Roda em toda fase por default (`RALPH_VERIFY=always`); no engine claude usa modelo barato (`sonnet`) |
 
-Detalhes do gate 3: as tasks são indexadas **pela posição** (`1..N`) dentro da fase; se o verificador responder com rótulos (`T03`), eles são mapeados de volta para posições. Com `RALPH_VERIFY_EVIDENCE=required` (default), um `DONE` sem `— <evidência>` (`arquivo:linha` ou caminho de um `.png`) reprova o gate por protocolo.
-
-Qualquer gate vermelho → **ciclo de correção**: sessão nova recebe a fase inteira + a causa real da falha (nunca "os testes falharam" genérico). Default: 2 ciclos por fase.
+Qualquer gate vermelho → **ciclo de correção**: sessão nova recebe a fase inteira + a causa real da falha (nunca "os testes falharam" genérico). Default: 3 ciclos por fase.
 
 Gates verdes com árvore limpa → fase já estava implementada em HEAD: marcada como feita, sem commit.
 
-### Escopo do gate 2 — a suite inteira é o gate da SPEC, não o de cada fase
-
-Rodar a suite completa ao fim de toda fase custa minutos por fase, e o custo pior nem é o tempo: é o incentivo. Uma fase mecânica (fiação, config, rename, view) que precisa "fechar o gate 2" empurra o engine a inventar teste — getter, cast, "a classe existe" — só para ter algo verde no próprio escopo. Teste inútil é ruído permanente no repositório.
-
-Por fase, o gate 2 resolve um entre três escopos, primeira regra que casar:
-
-| # | Condição | Escopo |
-|---|---|---|
-| 1 | `--full-suite` / `RALPH_TEST_SCOPE=full` | suite completa |
-| 2 | **Última fase pendente** do documento (o fim da spec) | suite completa |
-| 3 | Gate 3 desligado (`--no-verify`): o gate 2 vira a única prova mecânica | suite completa |
-| 4 | A fase declara `Suite: completa` no próprio texto | suite completa |
-| 5 | O diff da fase toca caminho crítico (migrations, manifestos de dependência, config, bootstrap, imagens, CI — `RALPH_CRITICAL_PATHS`) | suite completa |
-| 6 | Há arquivo de teste alterado na árvore ou citado no campo `Testes:` da fase, e o runner aceita caminho | só esses testes |
-| 7 | Nada disso | não roda — o gate 3 julga a fase sozinho |
-
-Fail-safe em toda borda: runner que não aceita caminho (`go`, `cargo`, comando desconhecido, comando composto) cai na suite completa, nunca no escopado. A fase pode **escalar** rigor (`Suite: completa`), jamais reduzir. E fase cujo gate 2 foi pulado (regra 7) sempre passa pelo gate 3: escopo encurta o gate 2, nunca a prova de que a fase foi feita.
-
-O campo `Testes:` também é um mandato para o executor: ele deve criar exatamente os testes listados ali, nem mais.
-
-`--full-suite` restaura o comportamento anterior (suite inteira em toda fase).
-
-### Conserto cirúrgico (antes do ciclo)
-
-Um ciclo de correção é caro: sessão nova com preâmbulo de contexto, a fase inteira no prompt e acesso total ao projeto. Pagar isso porque **uma** assertion ficou vermelha é desperdício. Antes de gastar um ciclo, o ralph pode tentar **consertos cirúrgicos**. **Desligado por default**: ligue com `RALPH_REPAIR=on` mais `RALPH_MAX_REPAIRS=N` (ou `--max-repairs N`). Com `RALPH_REPAIR` desligado, `--max-repairs` sozinho não tem efeito.
-
-- **Prompt mínimo**: só a assinatura da falha — teste que quebrou, `arquivo:linha`, mensagem da assertion — ou só as linhas `INCOMPLETE` do verificador. Sem preâmbulo, sem a fase.
-- **Modelo próprio e forte** (`RALPH_REPAIR_MODEL`, default `opus` no claude): é a única etapa que escreve código com contexto mínimo e a única que pode abortar a fase sozinha (`REPAIR_ABORT`). Patch cego e desistência errada custam mais que a diferença de modelo.
-- **Não consome ciclo**: os `--max-cycles` continuam inteiros de reserva.
-
-**Fail-closed.** Só repara o que dá para localizar. Vão direto ao ciclo completo: gate 0 vermelho (engine morreu), saída de teste sem falha localizável, falha espalhada por mais de `RALPH_REPAIR_MAX_FILES` arquivos, mais de `RALPH_REPAIR_MAX_TASKS` tasks incompletas, e gate 3 reprovado por **protocolo** do verificador (que não é código faltando). O modelo também pode desistir sozinho respondendo `REPAIR_ABORT: <motivo>` — desistir barato vale mais que um patch às cegas, e o ralph escala na hora em vez de gastar o round seguinte.
-
-**Revalidação.** Entre rounds, o gate 3 roda **escopado**: só as tasks que estavam `INCOMPLETE`, nas posições originais (nada é renumerado). Um `INCOMPLETE` fora do escopo reprova — é o conserto tendo quebrado algo que já estava de pé. Verde no escopo **não fecha a fase**: a cadeia completa (gate 2 no escopo da fase + verificação de todas as tasks) roda antes de qualquer commit. O conserto nunca commita.
-
-`--no-repair` (ou `--max-repairs 0`) desliga e devolve o comportamento antigo: gate vermelho → ciclo.
-
-### Sessão de resgate (antes de dar a fase por perdida)
-
-Quando a fase trava — o conserto desiste com `REPAIR_ABORT`, os consertos esgotam, o ciclo fica improdutivo ou os `--max-cycles` acabam — o ralph parava e o dev recebia um log. Mas o motivo real do travamento quase nunca é falta de força do modelo: é que **todas as etapas anteriores trabalham com autoridade estreita**. O ciclo corrige "o que falta"; o conserto mexe só no arquivo da assinatura; nenhum dos dois pode reorganizar a implementação nem encostar num teste existente que passou a contradizer a fase.
-
-O resgate é a etapa com a autoridade que faltava — **1 sessão por fase** por default (`RALPH_MAX_RESCUES`):
-
-- **Prompt largo e auto-contido**: preâmbulo de contexto + a fase inteira + o motivo do travamento + o veredito bruto do último gate + a desistência do conserto **verbatim** + o `git diff` do trabalho parcial na árvore.
-- **Modelo próprio e forte** (`RALPH_RESCUE_MODEL`, default `opus` no claude).
-- **Pode** reorganizar a implementação entre arquivos e camadas, e **pode** ajustar teste existente que contradiz o comportamento exigido pela fase — a única hipótese de encostar em teste que já existia.
-- **Não pode** afrouxar teste para ficar verde (apagar, pular, comentar, enfraquecer assert, mudar runner ou config), nem criar teste que a fase não pediu. Toda alteração de teste sai justificada por escrito (`TESTE ALTERADO: ...`).
-- **Não consome ciclo nem conserto**: orçamento próprio, por fase.
-
-**Não substitui gate.** Depois do resgate roda a cadeia **completa** — gate 2 no escopo da fase + gate 3 de todas as tasks — e só então a fase commita, como qualquer outra. Verde de resgate é verde igual; o commit registra a origem (`Fechada pela sessão de resgate (round N)`), porque essa fase merece revisão humana com prioridade.
-
-**Desistência honesta.** Se o bloqueio for contradição da **própria especificação** (a fase exige A, outra regra acordada exige não-A), o resgate para sem editar nada e responde `RESCUE_BLOCKED: <conflito>`. Nenhum round adicional é gasto: a decisão é humana. Ambiente fora do ar também **não** aciona resgate — serviço morto não é defeito de código.
-
-`--no-rescue` (ou `--max-rescues 0`) desliga e devolve o comportamento anterior: fase travada → run para.
-
-### Saneamento de HEAD (vermelho herdado de HEAD)
-
-**Opt-in** (`--heal-head` ou `RALPH_HEAL_HEAD=on`; default desligado, porque a suite completa em HEAD custava minutos antes de qualquer fase andar). Ligado, antes da fase 1 o ralph roda a suite **uma vez em HEAD** (a árvore está limpa, garantido pelo preflight). Vermelho ali não é defeito de fase nenhuma — é vermelho que o run herdou, e ele prenderia o ciclo de correção de toda fase.
-
-- Uma **sessão de saneamento** (`RALPH_HEAL_ROUNDS`, default 1) recebe mandato explícito para corrigir o vermelho herdado — inclusive atualizar um guard obsoleto de outra feature quando o texto congelado mudou por decisão registrada, preservando a regra que o guard protege. Ela pode desistir com `HEAL_ABORT: <motivo>`.
-- Verde → commit próprio, `test(baseline): sanea o vermelho herdado de HEAD`, e o run segue sobre um HEAD limpo.
-- Ainda vermelho → aborta **antes da fase 1**, nomeando os testes: decisão humana que custa uma rodada da suite em vez de uma fase inteira.
-- `--baseline` tem precedência e desliga o saneamento (o vermelho é declarado intencional, ex.: TDD com o teste commitado vermelho). `--no-heal-head` (ou `RALPH_HEAL_HEAD=off`) mantém desligado.
-
-### Evidência visual (campo `Tela:`)
-
-Uma task pode trazer, dentro do bloco do seu checkbox:
-
-```
-Tela: <route> | <CSS selector>[, <selector>...] | <png-target> | <theme>
-```
-
-Rota e seletores são obrigatórios; o PNG-alvo e o tema são opcionais. O próprio ralph — nunca o engine — tira os screenshots com `RALPH_UI_SHOT_CMD` / `--ui-shot-cmd` (vazio = auto-detecta `scripts/ralph-ui-shot.{mjs,js,sh,py}` no projeto), chamado como `<cmd> <route> <out.png> [<selectors>] [<theme>]`, uma vez por viewport (`RALPH_UI_VIEWPORT=desktop|mobile`). As capturas caem em `.phases/evidence/<phase>/task-<n>[-mobile].png`; o verificador lê a captura **e** o alvo e reprova defeitos visuais objetivos. O executor usa o mesmo comando para se autoconferir em `.phases/selfcheck/` antes de entregar.
-
-**Fail-closed**: fase com `Tela:` e sem comando de captura falha. `--no-ui-verify` (ou `RALPH_UI_VERIFY=off`) desliga de propósito.
-
-### Limites de uso
-
-Limite de uso não é falha: o ralph espera o reset e re-executa a **mesma** fase sem gastar ciclo. Durante a espera, uma linha `Retomando em …` é logada só nos marcos (4h/3h/2h/1h/30m/15m/5m/1m), e não com o painel ativo.
-
-**Limite semanal**: se o reset estiver mais longe que `RALPH_WEEKLY_THRESHOLD` (default 21600 s = 6 h), o ralph **não** dorme — encerra o run com exit 1, dispara `limit_abort` e imprime o comando de retomada (`./ralph.sh <file> --from N`). A detecção cobre o texto "session limit" da CLI claude 2.x e `api_error_status: 429`.
-
-### Ambiente fora do ar (veredito próprio do gate 2)
-
-Serviço externo caído — banco, cache, fila, container derrubado por falta de memória no host — **não é defeito de código**: a suite não chegou a julgar a fase. Tratar isso como gate 2 vermelho custa ciclo, custa conserto cirúrgico e no fim descarta o trabalho da fase, porque nenhum patch levanta um container morto.
-
-Ao reconhecer a assinatura (recusa de conexão, DNS que não resolve, `SQLSTATE` de conexão), o ralph:
-
-1. **Tenta levantar o que caiu** — `docker start` nos containers **nomeados no próprio erro** (podem ser de outro compose project) e, se o projeto usa Sail com os containers parados, `sail up -d`.
-2. **Reexecuta a suite uma vez** (uma por fase). Voltou verde: o run segue normal, sem ciclo gasto.
-3. **Ainda fora do ar**: encerra o **run inteiro** — mesmo com `--keep-going`, porque a próxima fase encontraria o mesmo serviço morto —, salva o trabalho da fase em `wip(phase-N): interrompido por falha de ambiente — see .phases/logs/` e sai com **exit code 3**.
-
-Re-rodar com o ambiente de pé revalida a fase e segue de onde parou. `--no-env-guard` (ou `RALPH_ENV_GUARD=off`) desliga — útil se a sua suite **asserta** mensagens de erro de conexão e o guard as confunde com ambiente caído.
-
 ### Detecção do comando de teste (gate 2)
 
-Primeira regra que resolver: `--test-cmd` → `RALPH_TEST_CMD` → um `RALPH_TEST_CMD='…'` (ou `"…"`) literal declarado no próprio documento de fases, usado verbatim → detecção por manifest (Laravel Sail → `composer test` → `php artisan test` → `npm test` → `pytest` → `go test ./...` → `cargo test`) → nada resolvido = gate 2 pulado com aviso alto (gate 3 segura sozinho).
+Primeira regra que resolver: `--test-cmd` → `RALPH_TEST_CMD` → detecção por manifest (Laravel Sail → `composer test` → `php artisan test` → `npm test` → `pytest` → `go test ./...` → `cargo test`) → nada resolvido = gate 2 pulado com aviso alto (gate 3 segura sozinho).
 
 Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail test`); containers parados abortam no preflight — todo gate 2 falharia e queimaria ciclos à toa.
 
@@ -328,237 +213,128 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | Opção | Efeito |
 |---|---|
 | `--engine codex\|claude` | Engine de implementação (default: `codex`) |
-| `--model NOME` | Modelo das sessões de implementação e correção (default: `opus` no claude, o da CLI no codex) |
 | `--from N` | Começa na fase N (limpa o progresso das fases ≥ N) |
 | `--keep-going` | Continua após fase falhar (cria commit `wip(phase-N)`; default: para) |
-| `--max-cycles N` | Ciclos de correção por fase (default: 2) |
-| `--max-repairs N` | Consertos cirúrgicos por ciclo (default: 0; só tem efeito com `RALPH_REPAIR=on`) |
-| `--no-repair` | Desliga o conserto cirúrgico |
-| `--max-rescues N` | Sessões de resgate por fase (default: 1; `0` desliga) |
-| `--no-rescue` | Desliga a sessão de resgate |
-| `--rescue-model NOME` | Modelo da sessão de resgate (default no claude: `opus`) |
+| `--max-cycles N` | Ciclos de correção por fase (default: 3) |
 | `--test-cmd "<cmd>"` | Comando de teste do projeto (gate 2) |
-| `--full-suite` | Gate 2 roda a suite completa em toda fase (comportamento anterior) |
-| `--baseline` / `--no-baseline` | Mede em HEAD o que já está vermelho e faz o gate 2 cobrar só o **delta** (default: desligado; desliga o saneamento de HEAD) |
-| `--heal-head` / `--no-heal-head` | Liga/desliga o saneamento de HEAD antes da fase 1 (default: desligado) |
 | `--no-verify` | Desliga o gate 3 |
-| `--ui-shot-cmd "<cmd>"` | Comando de screenshot para tasks com `Tela:` |
-| `--no-ui-verify` | Desliga a evidência visual |
-| `--no-env-guard` | Desliga a detecção de ambiente fora do ar: toda falha volta a ser vermelho da fase |
-| `--ui-layout <nome>` | Tela inicial: `cockpit` (padrão), `focus`, `diagnostic` |
-| `--verbose` / `--quiet` | Streama o progresso do engine no terminal / só o placar do ralph (default) |
-| `--ui` / `--no-ui` | Força o painel ANSI ligado / desligado (ver abaixo) |
-| `--serve[=PORTA]` | Dashboard web local sobre o mesmo estado |
-| `--attach` | Painel sobre um run já em andamento neste diretório; não roda nada |
-| `-h`, `--help` | Imprime o cabeçalho do script |
-
-Toda opção com valor também aceita `--opt=valor`. Os modelos do verificador e do conserto não têm flag: use `RALPH_VERIFY_MODEL` / `RALPH_REPAIR_MODEL`.
+| `--dashboard` | Painel ao vivo no terminal (ver abaixo) |
 
 | Variável | Efeito |
 |---|---|
 | `RALPH_TEST_CMD` | Comando de teste (gate 2) |
-| `RALPH_TEST_SCOPE` | Escopo do gate 2: `auto` (default) \| `full` |
-| `RALPH_CRITICAL_PATHS` | ERE de caminho crítico: fase cujo diff casa roda a suite completa |
-| `RALPH_TEST_FILE_RE` | ERE que reconhece arquivo de teste |
-| `RALPH_TEST_FILE_EXCLUDE_RE` | ERE de pastas de apoio de teste (fixtures, traits, helpers, golden, dados) que não são teste mesmo dentro de `tests/`; arquivo com nome de teste nelas continua contando, e arquivo de dado (`.sql`, `.json`, `.md`…) nunca conta |
-| `RALPH_BASELINE` | `on` liga o baseline do gate 2 (mesmo que `--baseline`; default: `off`) |
-| `RALPH_VERIFY` | Gate 3: `auto` (default: só quando o gate 2 não basta) \| `always` \| `off` |
-| `RALPH_VERIFY_MODEL` | Modelo do verificador (default no claude: `opus`) |
-| `RALPH_SUBAGENT_MODEL` | Modelo dos subagentes disparados pelas sessões claude, via `CLAUDE_CODE_SUBAGENT_MODEL` (default: `opus`) |
-| `RALPH_VERIFY_EVIDENCE` | `required` (default: `DONE` sem evidência reprova o gate 3) \| `optional` |
-| `RALPH_HEAL_HEAD` | Saneamento de HEAD antes da fase 1: `off` (default) \| `on` |
-| `RALPH_HEAL_ROUNDS` | Sessões de saneamento antes de abortar (default: 1) |
-| `RALPH_UI_VERIFY` | Evidência visual para tasks com `Tela:`: `auto` (default) \| `off` |
-| `RALPH_UI_SHOT_CMD` | Comando de screenshot (vazio = auto-detecta `scripts/ralph-ui-shot.*`) |
-| `RALPH_UI_SHOT_TIMEOUT` | Timeout da captura em segundos (default: 120) |
-| `RALPH_MODEL` | Modelo das sessões de implementação/correção (default no claude: `opus`; no codex, vazio = o da CLI) |
-| `RALPH_CAVEMAN` | Nível do plugin caveman nas sessões claude que escrevem código (default: `ultra`; `off` desliga; inerte sem o plugin) |
-| `RALPH_ENV_GUARD` | Detecção de ambiente fora do ar: `on` (default) \| `off` |
-| `RALPH_ENV_RECOVER_TIMEOUT` | Segundos de espera pelos serviços ao tentar levantá-los (default: 90) |
-| `RALPH_MAX_CYCLES` | Ciclos de correção por fase (default: 2) |
-| `RALPH_REPAIR` | Conserto cirúrgico: `off` (default) \| `on` |
-| `RALPH_MAX_REPAIRS` | Consertos por ciclo (default: `0` = desligado) |
-| `RALPH_REPAIR_MODEL` | Modelo do conserto cirúrgico (default no claude: `opus`) |
-| `RALPH_RESCUE` | Sessão de resgate: `on` (default) \| `off` |
-| `RALPH_MAX_RESCUES` | Sessões de resgate por fase (default: 1; `0` desliga) |
-| `RALPH_RESCUE_MODEL` | Modelo do resgate (default no claude: `opus`) |
-| `RALPH_REPAIR_MAX_FILES` | Acima de N arquivos na assinatura da falha, vai direto ao ciclo (default: 5) |
-| `RALPH_REPAIR_MAX_TASKS` | Acima de N tasks incompletas, idem (default: 3) |
+| `RALPH_VERIFY` | Gate 3: `always` (default) \| `auto` (economiza: só quando o gate 2 não basta) \| `off` |
+| `RALPH_VERIFY_MODEL` | Modelo do verificador (default no claude: `sonnet`) |
+| `RALPH_MAX_CYCLES` | Ciclos de correção por fase (default: 3) |
 | `RALPH_MAX_LIMIT_WAITS` | Esperas consecutivas por limite de uso, por fase (default: 20) |
 | `RALPH_LIMIT_WAIT_DEFAULT` | Fallback de espera em segundos (default: 1800) |
 | `RALPH_LIMIT_BUFFER` | Segundos extras após o reset (default: 60) |
-| `RALPH_WEEKLY_THRESHOLD` | Reset mais distante que N segundos = limite semanal, o run encerra (default: 21600) |
-| `RALPH_NOTIFY_CMD` | Comando de notificação (vazio = desligado) |
-| `RALPH_NOTIFY_TIMEOUT` | Timeout do comando de notificação em segundos (default: 20) |
-| `RALPH_VERBOSE` | `1` streama o progresso do engine (mesmo que `--verbose`; default: 0) |
-| `RALPH_HEARTBEAT` | Segundos entre heartbeats no modo quieto (default: 60; `0` desliga) |
-| `RALPH_UI` | Painel: `auto` (default) \| `panel` \| `plain` |
-| `RALPH_UI_LAYOUT` | Tela inicial: `cockpit` (padrão), `focus`, `diagnostic` |
-| `RALPH_UI_FPS` | Repinturas do painel por segundo (default: 2) |
-| `RALPH_UI_KEYS` | Teclado e mouse no painel (exige `/dev/tty` legível): `1` (default) \| `0` desliga os dois |
-| `RALPH_UI_GLYPHS` | Glifos do painel: `ascii` (default) \| `unicode` |
-| `RALPH_SERVE_PORT` | Primeira porta tentada pelo `--serve` (default: 7433) |
-| `RALPH_ATTACH_INTERVAL` | Segundos entre atualizações no `--attach` (default: 3) |
+| `RALPH_WEEKLY_THRESHOLD` | Reset mais distante que isso (em segundos) é tratado como limite semanal: o run encerra com o comando de retomada em vez de dormir (default: 21600 = 6h; 0 desliga) |
+| `RALPH_NOTIFY_CMD` | Comando de notificação (opcional; vazio = desligado — veja abaixo) |
+| `RALPH_NOTIFY_TIMEOUT` | Segundos até matar o comando de notificação (default: 20) |
 
-Durante cada sessão, o ralph exporta `RALPH_ENGINE`, `RALPH_PROJECT`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, `RALPH_PHASE_MAX_ATTEMPTS`, `RALPH_PHASE_REPAIR` (round de conserto; `0` = nenhum) e `RALPH_PHASE_RESCUE` (round de resgate; `0` = nenhum). O comando de captura também recebe `RALPH_UI_VIEWPORT`; o comando de notificação recebe `RALPH_EVENT`.
+Durante cada sessão, o ralph exporta `RALPH_ENGINE`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT` e `RALPH_PHASE_MAX_ATTEMPTS` — úteis para hooks de notificação (ex.: n8n).
 
-### Painel visual e dashboard web
+### Notificações externas (Telegram)
 
-Run é coisa de olhar, não de ler. O ralph desenha um painel de tela cheia enquanto o run acontece:
+Para acompanhar um run longo longe do terminal, defina `RALPH_NOTIFY_CMD`. O ralph chama `$RALPH_NOTIFY_CMD <evento> <mensagem>` em `run_start`, `phase_done`, `phase_failed`, `limit_hit`, `limit_over`, `limit_abort` e `run_done`. O comando roda sob `timeout` (`RALPH_NOTIFY_TIMEOUT`), com stdin fechado e saída descartada, e todo erro é engolido: notificar nunca altera o resultado do run. O contexto chega no ambiente: `RALPH_EVENT`, `RALPH_PROJECT`, `RALPH_ENGINE`, `RALPH_RUN_ID`, `RALPH_OUTCOME` (status do run), `RALPH_PHASE_NUM`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, `RALPH_PHASE_MAX_ATTEMPTS`, `RALPH_GATE0`..`RALPH_GATE3` (`pending|run|pass|fail|skip`) e `RALPH_LOG_PATH` (log do gate que reprovou). Eventos do run (`run_*`) não levam campos de fase.
 
-```text
-RALPH   beer-and-code                                  CODEX      ● IMPLEMENTANDO
-─────────────────────────────────────────────────────────────────────────────────
-TEMPO TOTAL        FASES CONCLUÍDAS       CICLO ATUAL          PROGRESSO / FASES
-18m 42s            02 / 06                01 / 05              33%
-▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
-✓ 01 Setup     ✓ 02 Dados     ▶ 03 API     · 04 UI     · 05 Integração     · 06 Final
-  EM ANDAMENTO / FASE 03                        VALIDAÇÃO DA FASE
-  API de pedidos                                G0 Sessão       aguardando
-  ▶ Tarefa 3: Validar estoque                   G1 Código       alteração detectada
-  2 verificadas / 1 ativa / 2 pendentes         G2 Testes       aguardando
-  › Editando OrderService.php                   G3 Verificação  aguardando
-ÚLTIMOS EVENTOS
-14:32:08    Fase 02 concluída e commit registrado
-─────────────────────────────────────────────────────────────────────────────────
- 1 Visão geral      2 Foco      3 Diagnóstico                 f Seguir    q Sair
-```
-
-O mock-up acima usa os glifos Unicode (`RALPH_UI_GLYPHS=unicode`); o default é `ascii` (`>`, `*`, `#`, `.`, `+`, `-`, `^`), que renderiza em qualquer terminal.
-
-O painel roda no **buffer alternado** do terminal (como `vim` ou `less`): ocupa a tela inteira durante o run e, ao sair, devolve o terminal com o scrollback anterior intacto. É o que permite um layout que se adapta ao tamanho do terminal.
-
-As teclas **1 / 2 / 3** (ou o clique na aba) alternam entre três telas sem interromper a execução:
-
-| Tela | Conteúdo |
-|---|---|
-| **1 · Visão geral** (padrão) | Cabeçalho, quatro métricas, barra segmentada, jornada de fases, caixas da tarefa em andamento e da validação da fase, últimos eventos |
-| **2 · Foco** | Fase e tarefa correntes (ou clicadas) com subtítulo e ação ao vivo, confirmação independente, tarefas da fase, pipeline e próximo passo |
-| **3 · Diagnóstico** | Banner do gate que falhou com manchete e escopo do teste, tentativa anterior, correção atual, linha do tempo e saída do teste — ou a faixa verde `● Nenhum gate falhou` quando nenhum gate falhou |
-
-Escolha a tela inicial com `--ui-layout cockpit|focus|diagnostic` ou `RALPH_UI_LAYOUT` (`cockpit` segue como nome da Visão geral). Também funciona em `--attach`, inclusive para acompanhar um run que já estava aberto:
+`scripts/notify-telegram.sh` é um adaptador pronto para o Telegram:
 
 ```bash
-./ralph.sh --attach --ui-layout diagnostic
+# credenciais: variáveis de ambiente ou arquivo com permissão 600 (default ~/.config/ralph-notify/telegram.env,
+# sobreponha com RALPH_NOTIFY_ENV_FILE) contendo TELEGRAM_BOT_TOKEN=... e TELEGRAM_CHAT_ID=...
+scripts/notify-telegram.sh --setup   # descobre o seu chat_id (nunca imprime o token)
+scripts/notify-telegram.sh --test    # envia uma mensagem de teste
+export RALPH_NOTIFY_CMD="/caminho/para/scripts/notify-telegram.sh"
 ```
 
-A composição segue o tamanho do terminal: em 144×40 as caixas ficam lado a lado e todas as regiões aparecem; entre 100×24 e 144×40 as caixas empilham e, quando falta altura, as regiões caem numa ordem fixa — primeiro `ÚLTIMOS EVENTOS` (Visão geral), depois `LINHA DO TEMPO` e `SAÍDA DO TESTE` (Diagnóstico). Abaixo de 100×24 o painel mostra só o aviso `aumente para 100×24`; o run segue normalmente. Campo sem valor aparece como `—` na mesma posição.
-
-`Declarada` significa que a sessão marcou a task; não é confirmação independente. A inferência `~` nunca sobrescreve um veredito. Gates pulados continuam distintos de aprovados, G1 é um sinal de alteração e fases anteriores sem histórico publicado não recebem gates verdes inventados. Interrupção por ambiente tem indicação própria.
-
-Teclado e mouse funcionam sem parar o run:
-
-| Tecla / clique | Ação |
-| --- | --- |
-| `1` / `2` / `3`, clique na aba | Visão geral / Foco / Diagnóstico |
-| `↑` / `↓`, `k` / `j`, roda do mouse sobre uma lista | Uma linha para cima / para baixo |
-| `PgUp` / `PgDn`, espaço | Uma tela para cima / para baixo |
-| `g` / `Home`, `G` / `End` | Primeira / última linha |
-| clique numa fase da jornada ou numa tarefa | Abre o Foco com aquela fase/tarefa selecionada (o seguir fica suspenso) |
-| `a` / `f`, clique em `f Seguir` | Volta ao modo automático: segue a fase e a tarefa correntes, desfazendo seleção e rolagem manual |
-| `q`, clique em `q Sair` | Fecha **só o painel** (ver abaixo) |
-
-O mouse segue o mesmo interruptor do teclado: só liga com `RALPH_UI_KEYS=1` (padrão) e `/dev/tty` legível. Sem TTY, com `RALPH_UI_KEYS=0` ou com `/dev/tty` ilegível, nenhuma sequência de relato de mouse é emitida e o painel volta ao comportamento anterior. **Com o relato de mouse ligado, copiar texto do terminal exige Shift+arrastar** — arrastar sem Shift chega ao painel como clique.
-
-A leitura de tecla ou clique **não bloqueia nada**: ela substitui a espera entre repinturas, então o run segue nos gates independente do que for digitado — a invariante "zero perguntas" continua de pé. Sequência de mouse truncada ou desconhecida é ignorada.
-
-`q` / `q Sair` no run ao vivo fecha o painel e restaura o terminal (mouse desligado, cursor visível, tela principal, `stty` como antes). **O run continua** no placar em linha corrida até o fim, com o mesmo exit code, os mesmos vereditos e os mesmos commits de um run em que ninguém apertou `q`. Reabra o painel de qualquer terminal com `./ralph.sh --attach`. No `--attach` e no `ralph-watch.sh`, `q` sai do visualizador sem tocar no run.
-
-`./ralph-watch.sh [repo]` delega ao `ralph.sh`: o modo ao vivo vira `ralph.sh --attach` (mesmas telas, teclas, mouse e `q`), e `--once` desenha um único frame com o mesmo renderizador do run, sem escrever nada em `.phases/`.
-
-Uma sessão do engine dura minutos e a CLI pode não emitir nada legível nesse tempo. A linha viva `›` da caixa EM ANDAMENTO (junto com a linha de etapa) existe para responder a uma pergunta só: *está travado ou trabalhando?* Tudo nela é medido **pelo processo que pinta a tela**, não publicado pelo orquestrador — durante `run_split` o processo principal está bloqueado esperando o engine e não teria como republicar nada:
-
-| Sinal | Fonte | Por que muda sozinho |
-|---|---|---|
-| Etapa + tempo próprio | `stage_start`, reescrito a cada troca de etapa | separa "3m nesta fase" de "3m neste gate" |
-| Saída do engine + taxa | `wc -c` nos dois logs da sessão, delta entre frames | engine vivo escreve; engine travado não |
-| Arquivos tocados | `git status --porcelain`, recalculado a cada ~3s | mostra o trabalho aparecendo na árvore |
-| Última linha de progresso | `tail` do `.stderr.log`, lido a cada frame | quando a CLI streama, é o que ela está fazendo |
-
-A linha mostra a última ação do engine lida ao vivo do stream (`claude -p --output-format stream-json`): a ferramenta e o alvo, por exemplo `Edit app/Models/RemittanceBatch.php`. Enquanto o engine ainda não usou ferramenta nenhuma, a linha diz há quanto tempo está nessa etapa. O contador de ações e a contagem de arquivos tocados são a prova de vida.
-
-### Qual task está sendo trabalhada
-
-O engine roda numa sessão **opaca**: nenhum evento diz em que task ele está. O que existe de concreto é (a) o texto da task, que nomeia identificadores de código, e (b) a árvore de trabalho mudando. O painel casa um com o outro.
-
-De cada task o ralph extrai **âncoras** — conteúdo entre crases, `CamelCase`, `snake_case`, caminhos e nomes de arquivo, descartando o que não parece identificador. A cada ~3s ele confere quais âncoras já aparecem em algum caminho do repositório (rastreado ou recém-criado):
-
-- **`▶ ~67%`** — task ativa: alguma âncora dela casa com o arquivo de **mtime mais recente**
-- **`◐ ~100%`** — artefatos da task já apareceram, mas outra está sendo tocada agora
-- **`· Pendente`** — nenhuma âncora casou, ou a task não nomeia identificador nenhum
-
-O **`~` é deliberado**: é palpite fundamentado em arquivo real, não veredito. Presença de arquivo não prova implementação correta — quem julga a task continua sendo o gate 3, e o veredito dele (`✓ Concluída` / `! Incompleta`) **sempre** substitui a inferência quando chega. Task cujo texto não cita nenhum identificador não gera palpite algum, em vez de inventar um.
-
-
-Marcas de status: `✓ Concluída`, `✓ Declarada` (o engine marcou o checkbox; ainda sem veredito do gate 3), `▶ Em execução`, `! Incompleta`, `✗ Falhou`, `» Pulada`, `· Pendente`. Marcas de gate: `·` não rodou, `⣾` rodando (spinner), `✓` verde, `✗` vermelho, `⊘` pulado. Durante espera por limite de uso, o status do cabeçalho vira um countdown até o reset.
-
-`RALPH_UI=auto` (o default) desenha o painel **só** quando stdout é um TTY. Sob `nohup`, em CI ou através de pipe a saída é o placar em linha corrida, byte a byte igual à de um ralph sem painel — essa compatibilidade é asserção da suite. `--verbose` sempre ganha: os dois streams do engine precisam do terminal. Com o painel ativo o placar é desviado para `.phases/ui/messages.log`, aparece no rodapé e é **reimpresso por inteiro na tela normal** quando o painel sai — sem isso ele existiria só no arquivo. Saída longa (causa de gate vermelho, relatório final) vem sempre depois de desmontar o painel. **Falha ao desenhar degrada para o placar: o painel nunca altera veredito de gate nem exit code.**
-
-O `--serve` adicionalmente escreve um `.phases/ui/index.html` auto-contido (sem CDN, sem fonte remota, sem fetch externo — a DejaVu Sans Mono vai embutida na página) e sobe `python3 -m http.server` preso a `127.0.0.1`, na primeira porta livre a partir de 7433. A página é reescrita no início de cada run, então um dashboard antigo nunca é servido. A URL sai uma vez no topo; o navegador **não** é aberto. A página mostra as mesmas três abas do terminal (1 Visão geral, 2 Foco, 3 Diagnóstico) com os mesmos valores, lidos só de `../state.json` e `../events.jsonl` a cada 1,5 s; abas, `f Seguir`, fases e tarefas são clicáveis e trocam na hora, e não existe `Sair` no navegador. O trap de saída mata o servidor; o estado fica em disco para inspeção depois. Sem `python3` no `PATH` → aviso alto e o run segue só com o painel.
-
-### Estado estruturado
-
-O painel, o dashboard e qualquer ferramenta externa leem os mesmos dois arquivos. Nenhum deles parseia o placar humano — esse é justamente o ponto.
-
-| Arquivo | Forma | Papel |
-|---|---|---|
-| `.phases/state.json` | snapshot JSON | O agora: fase corrente, ciclo, veredito de cada gate, lista de fases com status, espera por limite, última linha de progresso do engine |
-| `.phases/events.jsonl` | JSON Lines append-only | O histórico: uma linha por transição |
-
-O `state.json` é reescrito atomicamente (`tmp` + `mv`), então um leitor concorrente vê a versão velha ou a nova, nunca meio arquivo. O `events.jsonl` carrega `phase_start`, `gate_start` / `gate_end` — com veredito e duração — dos 4 gates em toda fase, `repair_start` / `repair_end`, `rescue_start` / `rescue_end`, além dos mesmos 7 eventos que o hook de notificação recebe, com os mesmos nomes. Tempo por gate não existe em nenhum outro lugar do harness.
-
-### Notificação de progresso
-
-Um run longo não precisa de terminal aberto. Com `RALPH_NOTIFY_CMD` definido, o ralph chama `$RALPH_NOTIFY_CMD <evento> <mensagem>` a cada evento relevante:
-
-| Evento | Quando |
-|---|---|
-| `run_start` | Run começou — quantas fases faltam, engine e arquivo de input |
-| `phase_done` | Fase passou os gates (commitada ou já implementada em HEAD) |
-| `phase_failed` | Fase reprovada após `RALPH_MAX_CYCLES`, ou commit falhou |
-| `limit_hit` | Limite de uso atingido — inclui o horário previsto do reset |
-| `limit_over` | Limite liberado, retomando a mesma fase |
-| `limit_abort` | Abortado por bater `RALPH_MAX_LIMIT_WAITS` esperas na mesma fase, ou por limite semanal |
-| `run_done` | Relatório final: completas, falharam, puladas e duração |
-
-O comando roda sob `timeout` com stdin fechado e todo erro é engolido — **notificar nunca altera o resultado do run**. `RALPH_PROJECT` chega no ambiente do comando, o que distingue runs paralelos de projetos diferentes.
-
-Adaptador pronto para Telegram em `scripts/notify-telegram.sh` (credenciais só via env ou `~/.config/ralph-notify/telegram.env`, nunca no script):
-
-```bash
-export RALPH_NOTIFY_CMD="$HOME/.claude/scripts/notify-telegram.sh"
-./ralph.sh .spec/features/<slug>/PHASES.md
-```
-
-As mensagens do Telegram agora identificam o resultado no título: início, fase concluída, falha, espera por limite ou interrupção pelo ambiente. Eventos de fase incluem ciclo, resultados de G2/G3 e escopo da suite; falhas apontam o caminho do log. O fim do run usa o resultado real, sem herdar a fase anterior. Mensagens longas são truncadas antes do escape HTML para preservar o envio e o contexto.
-
-O hook recebe também `RALPH_OUTCOME`, `RALPH_RUN_ID`, `RALPH_GATE2`, `RALPH_GATE3`, `RALPH_TEST_SCOPE` e `RALPH_LOG_PATH`. Os sete nomes de evento e os argumentos posicionais continuam iguais. `phase_failed` também pode indicar infraestrutura: nesse caso, `RALPH_OUTCOME=environment` distingue o motivo. Os testes do adaptador usam `curl` simulado e não enviam mensagens reais.
+O adaptador sempre sai com 0, omite toda linha cujo campo esteja ausente e respeita `RALPH_NOTIFY_API_BASE` (Bot API server local ou testes offline).
 
 ### Estado e progresso
 
-Trabalho interno em `.phases/` (registrado em `.git/info/exclude`, sem tocar o `.gitignore` do projeto): fases quebradas, prompts, logs, manifest, `.progress`, o estado estruturado (`state.json`, `events.jsonl`), os assets do painel/dashboard (`ui/`) e os screenshots (`evidence/`, `selfcheck/`). O progresso sobrevive entre execuções, mas só vale para o **mesmo input** (stamp sha256) — documento de fases alterado zera o progresso.
+Trabalho interno em `.phases/` (registrado em `.git/info/exclude`, sem tocar o `.gitignore` do projeto): fases quebradas, prompts, logs, manifest e `.progress`. O progresso sobrevive entre execuções, mas só vale para o **mesmo input** (stamp sha256) — documento de fases alterado zera o progresso.
 
-Cada sessão do engine grava **dois** logs, nunca unidos:
+Exit code: `0` = todas as fases verdes; `1` = alguma falhou ou abortou.
 
-| Arquivo | Stream | Papel |
-|---|---|---|
-| `.phases/logs/<fase>.<etapa>.log` | stdout | Resposta final do engine — **única** fonte de veredito dos gates |
-| `.phases/logs/<fase>.<etapa>.stderr.log` | stderr | Progresso/telemetria — só diagnóstico |
+## `scripts/ralph-watch.sh` — painel ao vivo
 
-Os dois vão inteiros para os logs; `--verbose` também os streama ao vivo. Unir os streams (`2>&1`) fazia o Codex ecoar a resposta final nos dois e o gate 3 contar cada task duas vezes, reprovando fase inteiramente implementada por "cobertura incompleta". Por isso o gate 3 mede cobertura em **índices únicos** de task: eco duplicado não infla nem esconde cobertura, `INCOMPLETE` vence `DONE` no mesmo índice, e índice fora de `1..N` ou task sem veredito deixam o gate vermelho.
+O ralph publica o estado do run em `.phases/state/` **sempre**, com ou sem `--dashboard`. O `ralph-watch.sh` lê esse estado e desenha o painel:
 
-Exit code: `0` = todas as fases verdes (também `--attach`); `1` = alguma falhou ou abortou, incluindo o teto de esperas por limite de uso e o limite semanal; `3` = run encerrado por ambiente fora do ar (nenhum veredito sobre o código — suba os serviços e re-rode); `130` = interrompido pelo operador (INT/TERM).
+```bash
+./scripts/ralph.sh --engine claude --dashboard   # painel no próprio terminal
+./scripts/ralph-watch.sh /caminho/do/repo        # painel de outro terminal
+```
+
+```
+┌─────────────────── PROGRESSO ───────────────────┐ ┌──────────────── TRABALHO ATUAL ─────────────────┐
+│ Fases  1/2      [███████████░░░░░░░░░░░░]  50%  │ │ Fase:      2 · Interface observável             │
+│ Tasks  1/2      [███████████░░░░░░░░░░░░]  50%  │ │ Ciclo:     1/3    Gate: G2                      │
+└─────────────────────────────────────────────────┘ └─────────────────────────────────────────────────┘
+┌──────┬────────────────────────────────────────────┬────────────────┬───────────┬─────────────────────┐
+│ F1   │ Preparação                                 │ ✓ Concluída    │ 1         │ G0 ✓ G1 ✓ G2 ✓ G3 ✓ │
+│ F2   │ Interface observável                       │ ▶ Em execução  │ 1         │ G0 ✓ G1 ✓ G2 ⋯ G3 · │
+│ T1   │   ↳ renderizar títulos longos              │ ✓ Concluída    │ –         │ –                   │
+│ T2   │   ↳ cobrir falhas de rede com retry        │ ▶ Em execução  │ –         │ –                   │
+└──────┴────────────────────────────────────────────┴────────────────┴───────────┴─────────────────────┘
+```
+
+### De onde vem o progresso por task
+
+Uma fase é **uma** sessão de agente, então o ralph não teria como saber onde a sessão está — a menos que a sessão conte. No engine claude ela conta:
+
+A sessão roda com `--output-format stream-json`, que emite eventos linha a linha **enquanto** trabalha. O ralph lê esse stream e reescreve o progresso em `.phases/state/live.tsv`, de quatro fontes, nesta ordem de precedência:
+
+1. **Marcadores de texto** (fonte primária). O prompt manda o agente escrever, como linha isolada, `RALPH-TASK <n> START` antes de começar o item *n* e `RALPH-TASK <n> DONE` quando ele estiver pronto. É texto puro: **não depende de ferramenta nenhuma** — e isso é o que importa, porque em sessão headless (`claude -p`) as ferramentas de lista de tarefas simplesmente não existem, mesmo que o agente tente carregá-las com `ToolSearch`.
+2. **Lista de tarefas do agente**, quando a sessão tiver uma (`TaskCreate`/`TaskUpdate` ou `TodoWrite`): as transições `in_progress`/`completed` viram progresso.
+3. **Reserva observacional** — sem marcador e sem lista, o ralph deduz pelo que o agente edita. Um plano do `/plan` declara `Arquivos:` em cada item, e é esse casamento (caminho editado ↔ arquivo declarado pela task) que dá a granularidade; sem a declaração, cai no enunciado da task. Ao entrar numa task, as anteriores contam como concluídas — o agente trabalha em ordem, e nem toda task tem arquivo próprio.
+4. **Sinal de vida**: assim que a sessão abre, a task 1 aparece em execução — nunca uma fase inteira parada em "Pendente".
+
+No fim da fase, o **gate 3 tem a palavra final**: o veredito `TASK <n>: DONE/INCOMPLETE` do verificador sobrepõe marcador, lista e dedução. Uma task marcada como pronta que não está no código aparece como `! Incompleta`.
+
+Ou seja: durante a fase o painel mostra a intenção do agente; ao fim da fase mostra a verdade verificada.
+
+No engine **codex** não há stream equivalente — a granularidade fica por fase, e as tasks aparecem como pendentes até o veredito do gate 3.
+
+### Planos grandes: topo fixo e tabela rolante
+
+Com dezenas de tasks a tabela não cabe na tela. O painel então mantém **o topo fixo** (identificação, barras, trabalho atual) e faz a tabela de fases e tasks rolar dentro de uma janela do tamanho do terminal — com barra de rolagem na borda direita e um rodapé dizendo quanto ficou fora:
+
+```
+  ▲ 23 acima · ▼ 9 abaixo · seguindo a fase atual · ↑↓ PgUp/PgDn rolam · f segue a fase
+```
+
+A linha em execução — fase e task — fica **realçada de ponta a ponta**, para ser achada de relance na tabela cheia.
+
+Por padrão a janela **segue a fase corrente**: mostra o bloco da fase inteiro quando ele cabe e centra a task em execução quando não cabe. As teclas abaixo assumem o controle a qualquer momento e valem também com `--dashboard`, com o painel embutido no ralph:
+
+| Tecla | Efeito |
+|---|---|
+| `↑` `↓` ou `k` `j` | Rola uma linha |
+| `PgUp` `PgDn`, `b` ou espaço | Rola uma página |
+| `Home`/`g` e `End`/`G` | Primeira e última linha |
+| `f` | Volta a seguir a fase corrente |
+| `q` | Sai do painel (só no modo avulso; não interrompe o ralph) |
+
+| Opção do watch | Efeito |
+|---|---|
+| `--once` | Desenha um frame e sai (útil em script/CI); dump completo, sem recorte |
+| `--interval N` | Segundos entre frames (default: 1) |
+| `--no-color` | Desliga ANSI |
+| `--color` | Força ANSI mesmo sem terminal (teste, arquivo) |
+| `RALPH_WATCH_COLS` | Fixa a largura, para terminal que não reporta |
+| `RALPH_WATCH_LINES` | Fixa a altura; com `--once` também liga a janela rolante |
+
+Com `--dashboard`, as linhas de log do ralph vão para `.phases/logs/ralph.log` (o painel é dono da tela) e o relatório final é impresso no terminal ao sair. Sem o `ralph-watch.sh` ao lado do `ralph.sh`, o `--dashboard` avisa e segue no modo de log — o `ralph.sh` continua sendo copiável sozinho para outro repositório.
 
 ### Contrato de formato do input
 
 Validado no preflight:
 
-- ≥ 1 heading `## Phase N: <título>` (só essa forma em inglês — `## Fase N` não é fase)
+- ≥ 1 heading `## Phase N: <título>`
 - Nenhum heading `## Phase ...` fora desse formato (heading torto some silenciosamente do run — o preflight aborta antes de gastar tokens)
 - Sub-fases em `### Phase N.M:` (não viram sessão própria)
 - Qualquer outro `## ` encerra a captura da fase anterior
-- Tasks são linhas `- [ ]` / `- [x]`; linhas indentadas abaixo de uma task pertencem ao bloco dela (`Testes:`, `Tela:`, …). Um rótulo inicial `T<n> —` é removido; o gate 3 conta por posição
-- Linha opcional por fase `Suite: completa` (força a suite completa no gate 2)
 
 ## Agentes
 
@@ -579,10 +355,7 @@ Os dois writers de `/ai-context` rodam em paralelo (arquivos disjuntos, digest r
 ## Estrutura do repositório
 
 ```
-.claude-plugin/
-  plugin.json                  manifest do plugin (v0.5.0)
-  marketplace.json             descritor do marketplace
-hooks/hooks.json               hook PreToolUse(Bash) → scripts/sail-guard.sh
+.claude-plugin/plugin.json     manifest do plugin
 commands/
   init.md                      /init (roteador diagnóstico)
   init/                        /init:project-description, user-stories,
@@ -594,21 +367,14 @@ agents/                        specifier, clarifier, planner, bug-analyst,
                                ai-context-{inspector,core,docs}
 scripts/
   ralph.sh                     orquestrador de execução por fases
+  ralph-watch.sh               painel ao vivo do run (lê .phases/state/)
+  notify-telegram.sh           adaptador do RALPH_NOTIFY_CMD para o Telegram
   test-ralph.sh                suite red/green do ralph com engine mock
-  notify-telegram.sh           adaptador de RALPH_NOTIFY_CMD para o Telegram
-  sail-guard.sh                hook: bloqueia php/artisan/composer/… no host
-                               em projetos Sail e sugere ./vendor/bin/sail
   check-init-drift.sh          guarda contra drift textual das regras
                                duplicadas nos comandos init
   check-shell.sh               bash -n + shellcheck em scripts/*.sh
-docs/agents/                   árvore de contexto gerada pelo /ai-context
-AGENTS.md, CLAUDE.md           gerados pelo /ai-context (não editar à mão)
-README.md, README.pt-BR.md     este documento (EN / PT-BR)
+docs/plans/                    planos de hardening internos do harness
 ```
-
-### Hook de guarda do Sail
-
-O plugin registra um hook `PreToolUse` sobre `Bash`. Num projeto com `vendor/bin/sail`, ele bloqueia comandos `php`, `artisan`, `composer`, `vendor/bin/*`, `mysql`, `mariadb`, `psql` e `redis-cli` no host (exit 2) e imprime o equivalente `./vendor/bin/sail …` no stderr. Sem `jq` ou `python3` para parsear o input do hook, deixa tudo passar (fail-open).
 
 ## Desenvolvimento
 
@@ -630,7 +396,3 @@ Sobre o `check-init-drift.sh`: os quatro `commands/init/*.md` **inlinam de prop�
 - **Sem escrita em git pelos comandos** — o desenvolvedor revisa com `git diff` e commita manualmente. O único que commita é o `ralph.sh`, por design (um commit por fase validada).
 - **Sem segredos** — `.env` nunca é lido; nomes de variáveis vêm de `.env.example`.
 - **Staleness explícita, nunca bloqueante** — stamps sha256 detectam insumos desatualizados; a decisão é sempre do desenvolvedor.
-
-## Licença
-
-[MIT](LICENSE)
