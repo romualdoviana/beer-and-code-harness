@@ -21,16 +21,21 @@ O harness é **agnóstico de stack**: quem define linguagem, framework, comandos
  project-phases.md  ou  PHASES.md ────────► scripts/ralph.sh
                                             (execução autônoma
                                              com 4 gates)
-
+   ▲                                                 │
+   │            /bugfix "<relato do bug>"            │
+   │            baixo ─► correção inline, sem commit ┤
+   └──────────  alto  ─► .spec/bugfixes/<slug>/      │
+                                                     │
  /ai-context ─► AGENTS.md + docs/agents/*  (documenta o código JÁ implementado;
-                                            alimenta /plan e o ralph)
+                                            alimenta /plan, /bugfix e o ralph)
 ```
 
-Três pipelines independentes que se encaixam:
+Quatro pipelines independentes que se encaixam:
 
 1. **`/init`** — do zero ao plano de construção do projeto (descrição → user stories → schema → fases).
 2. **`/plan`** — de uma descrição de feature a SPEC formal + plano faseado, pronto para execução.
-3. **`ralph.sh`** — executa qualquer documento de fases de forma autônoma, uma sessão nova de agente por fase, com gates mecânicos e um commit por fase concluída.
+3. **`/bugfix`** — de um relato de bug a uma causa raiz provada e corrigida: inline quando o defeito é pequeno, faseado quando é sistêmico.
+4. **`ralph.sh`** — executa qualquer documento de fases de forma autônoma, uma sessão nova de agente por fase, com gates mecânicos e um commit por fase concluída.
 
 Transversal a tudo: **`/ai-context`** mantém a árvore de contexto (`AGENTS.md`, `CLAUDE.md`, `docs/agents/*.md`) sincronizada com o código real.
 
@@ -101,6 +106,40 @@ Características:
 
 ```bash
 ./ralph.sh .spec/features/<slug>/PHASES.md
+```
+
+### `/bugfix` — pipeline de defeito
+
+```
+/bugfix "<relato do bug ou caminho de um arquivo com o relato>"
+```
+
+O `/plan` especifica algo que ainda não existe. Defeito é diferente em dois pontos que mudam o pipeline inteiro: carrega **evidência** (stack trace, log, comportamento observado) que dá para reproduzir e provar, e carrega **não-regressão** como critério obrigatório. Forçar um bug pelo `/plan` produz especificação de código que já existe e está quebrado.
+
+O pipeline reproduz o bug, rastreia a causa raiz e então pega a rota mais barata que ainda prova a correção:
+
+| Tier | Sinais | Rota |
+|---|---|---|
+| `light` | causa raiz identificada E ≤ 2 arquivos E 1 camada E sem migration E sem alterar contrato público | corrige inline: teste que falha → patch → suite completa, **sem commit** |
+| `standard` | 3+ arquivos OU 2+ camadas OU exige migration OU altera contrato de API/evento | `.spec/bugfixes/<slug>/BUGFIX.md` + `PHASES.md` |
+| `complete` | multi-repo OU causa raiz sistêmica OU risco de regressão em cascata | igual ao `standard` |
+
+Sinais empatando entre tiers → sobe o tier. O tier é apresentado **junto com os sinais que o produziram** e confirmado pelo desenvolvedor antes de qualquer escrita.
+
+Características principais:
+
+- **Causa raiz, nunca sintoma.** Sem causa raiz não sai patch nem `PHASES.md`: o comando reporta as hipóteses e os dados que faltam.
+- **Teste vermelho primeiro.** O comando de teste é resolvido pelas mesmas regras do `ralph.sh`, então o que a correção roda e o que o gate 2 roda são o mesmo comando. Projeto sem runner → aviso alto e ACs verificáveis à mão no lugar do teste.
+- **Teste vermelho e correção na MESMA fase.** O gate 2 do ralph roda a suite do projeto; uma fase que termina vermelha queimaria todos os ciclos de correção e abortaria o run. Fase 1 é `reproduzir e corrigir`; fase 2+ cobrem regressão e bordas. Nenhuma fase termina com suite vermelha.
+- **Bug que não reproduz para num checkpoint.** O desenvolvedor decide: parar e juntar dados, ou seguir especulativo — e aí todo artefato carrega o marcador `[NAO REPRODUZIDO]` e os ACs explicitamente não são sustentados por teste vermelho.
+- **Gate de arquitetura não-bloqueante**, diferente do `/plan`: defeito é reativo e muitas vezes urgente, então `AGENTS.md` ausente vira aviso e flag `architecture_reference_status: missing`, nunca bloqueio.
+- **Fecha registrando o aprendizado.** A causa raiz é classificada um nível acima da instância, escopada (agent/skill global vs rule de projeto com escopo por caminho em `.claude/rules/`) e proposta como uma linha `| bug | root cause | prevention |` em inglês no arquivo certo — escrita só após confirmação explícita.
+- **Nenhuma escrita no git, em nenhum tier.** O desenvolvedor revisa com `git diff` e commita.
+
+O tier alto encerra com o handoff de execução:
+
+```bash
+./ralph.sh .spec/bugfixes/<slug>/PHASES.md
 ```
 
 ### `/ai-context` — árvore de contexto canônica
@@ -286,7 +325,8 @@ Os comandos são **roteadores finos** — todo conhecimento de template vive nos
 |---|---|---|
 | `specifier` | `/plan` §5 | Descrição confirmada + ACs → SPEC.md formal (GEARS, RIGID/FLEXIBLE) |
 | `clarifier` | `/plan` §6 | QA adversarial de requisitos: analisa ambiguidades, resolve com as respostas do dev |
-| `planner` | `/plan` §7 | SPEC → PLAN.md + PHASES.md + contratos; read-only sobre o código |
+| `planner` | `/plan` §7, `/bugfix` §7b | SPEC (ou BUGFIX) → PLAN.md + PHASES.md + contratos; read-only sobre o código |
+| `bug-analyst` | `/bugfix` §4 e §7b | `investigate`: reproduz, rastreia a causa raiz, classifica o tier. `author`: escreve o BUGFIX.md. Nunca escreve código de aplicação |
 | `ai-context-inspector` | `/ai-context` §3 | Varredura read-only do repo → digest estruturado |
 | `ai-context-core` | `/ai-context` §4 | Digest → `AGENTS.md` + `CLAUDE.md` |
 | `ai-context-docs` | `/ai-context` §4 | Digest → 8 arquivos `docs/agents/*.md` |
@@ -302,8 +342,9 @@ commands/
   init/                        /init:project-description, user-stories,
                                database-schema, project-phases
   plan.md                      /plan (roteador do pipeline de planejamento)
+  bugfix.md                    /bugfix (roteador do pipeline de defeito)
   ai-context.md                /ai-context (roteador da árvore de contexto)
-agents/                        specifier, clarifier, planner,
+agents/                        specifier, clarifier, planner, bug-analyst,
                                ai-context-{inspector,core,docs}
 scripts/
   ralph.sh                     orquestrador de execução por fases
