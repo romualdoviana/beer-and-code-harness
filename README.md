@@ -151,7 +151,7 @@ With no argument, the input resolves in this order: `.spec/init/project-phases.m
 1. Every phase **and** every fix cycle runs in a fresh session with a self-contained prompt. Sessions are never reused.
 2. Zero questions — fully autonomous execution.
 3. A phase is only "complete" when it passes the **4 mechanical gates**, never by the engine's exit code.
-4. API usage limit → waits for the reset and re-runs the **same** phase, without consuming a fix cycle.
+4. API usage limit → waits for the reset and re-runs the **same** phase, without consuming a fix cycle. Weekly limit (reset days away) → stops with the resume command instead of sleeping.
 5. **One commit per completed phase** (`feat(phase-N): <title>`).
 
 ### The 4 gates
@@ -194,6 +194,7 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `RALPH_MAX_LIMIT_WAITS` | Consecutive usage-limit waits, per phase (default: 20) |
 | `RALPH_LIMIT_WAIT_DEFAULT` | Fallback wait in seconds (default: 1800) |
 | `RALPH_LIMIT_BUFFER` | Extra seconds after the reset (default: 60) |
+| `RALPH_WEEKLY_THRESHOLD` | Reset further away than this many seconds is treated as the weekly limit: the run stops with the resume command instead of sleeping (default: 21600 = 6h; 0 disables) |
 
 During each session, ralph exports `RALPH_ENGINE`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, and `RALPH_PHASE_MAX_ATTEMPTS` — useful for notification hooks (e.g. n8n).
 

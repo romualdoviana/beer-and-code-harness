@@ -147,7 +147,7 @@ Sem argumento, resolve o input nesta ordem: `.spec/init/project-phases.md` → `
 1. Cada fase **e** cada ciclo de correção roda em sessão nova, com prompt auto-contido. Nunca reutiliza sessão.
 2. Zero perguntas — execução totalmente autônoma.
 3. Fase só é "completa" quando passa pelos **4 gates mecânicos**, nunca pelo exit code do engine.
-4. Limite de uso da API → espera o reset e re-executa a **mesma** fase, sem consumir ciclo de correção.
+4. Limite de uso da API → espera o reset e re-executa a **mesma** fase, sem consumir ciclo de correção. Limite semanal (reset a dias) → encerra com o comando de retomada em vez de dormir.
 5. **Um commit por fase concluída** (`feat(phase-N): <título>`).
 
 ### Os 4 gates
@@ -190,6 +190,7 @@ Projeto Laravel Sail: a suite roda **dentro do container** (`vendor/bin/sail tes
 | `RALPH_MAX_LIMIT_WAITS` | Esperas consecutivas por limite de uso, por fase (default: 20) |
 | `RALPH_LIMIT_WAIT_DEFAULT` | Fallback de espera em segundos (default: 1800) |
 | `RALPH_LIMIT_BUFFER` | Segundos extras após o reset (default: 60) |
+| `RALPH_WEEKLY_THRESHOLD` | Reset mais distante que isso (em segundos) é tratado como limite semanal: o run encerra com o comando de retomada em vez de dormir (default: 21600 = 6h; 0 desliga) |
 
 Durante cada sessão, o ralph exporta `RALPH_ENGINE`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT` e `RALPH_PHASE_MAX_ATTEMPTS` — úteis para hooks de notificação (ex.: n8n).
 

@@ -96,6 +96,9 @@
 #   RALPH_MAX_LIMIT_WAITS    esperas consecutivas por limite, por fase (default: 20)
 #   RALPH_LIMIT_WAIT_DEFAULT fallback de espera em segundos (default: 1800)
 #   RALPH_LIMIT_BUFFER       segundos extras apos o reset (default: 60)
+#   RALPH_WEEKLY_THRESHOLD   reset mais distante que isso e limite semanal:
+#                            encerra o run em vez de dormir (default: 21600 = 6h;
+#                            0 desliga)
 #
 # Exportadas para hooks (ex: notify-n8n.sh) durante cada sessao de engine:
 #   RALPH_ENGINE             codex | claude
@@ -155,6 +158,11 @@ RALPH_LOG="$LOG_DIR/ralph.log"
 MAX_LIMIT_WAITS="${RALPH_MAX_LIMIT_WAITS:-20}"
 LIMIT_WAIT_DEFAULT="${RALPH_LIMIT_WAIT_DEFAULT:-1800}"
 LIMIT_BUFFER="${RALPH_LIMIT_BUFFER:-60}"
+# O limite de sessao reseta em <= 5h; o semanal, em dias. O horizonte do reset e
+# a unica pista no output da CLI para separar os dois. Acima do limiar, dormir
+# seria segurar o terminal por dias — o run encerra e devolve o comando de
+# retomada em vez disso.
+WEEKLY_THRESHOLD="${RALPH_WEEKLY_THRESHOLD:-21600}"
 
 TEST_CMD=""
 SAIL_BIN=""
@@ -1230,7 +1238,23 @@ detect_usage_limit() {
 
   # A mensagem de limite sai no FIM da execucao. Olhar o log inteiro faz output
   # de teste do projeto ("429", "Too Many Requests") disparar espera de 30min.
-  tail_txt=$(tail -n 20 "$log_file" 2>/dev/null || true)
+  if [[ "$ENGINE" == "claude" ]]; then
+    # No stream-json o fim do log carrega mensagens do assistente e tool_result
+    # com o conteudo de arquivos que a sessao leu — um teste ou fixture citando
+    # "usage limit reached" virava espera falsa com a fase verde. Do NDJSON so
+    # vale o evento `result` com is_error:true; linhas nao-JSON (stderr, CLI
+    # que morreu antes do stream, saida text do verificador) seguem valendo.
+    tail_txt=$(
+      {
+        tail -n 20 "$log_file" 2>/dev/null | grep -vE '^[[:space:]]*\{' || true
+        tail -n 20 "$log_file" 2>/dev/null \
+          | grep -E '"type"[[:space:]]*:[[:space:]]*"result"' \
+          | grep -E '"is_error"[[:space:]]*:[[:space:]]*true' || true
+      } || true
+    )
+  else
+    tail_txt=$(tail -n 20 "$log_file" 2>/dev/null || true)
+  fi
 
   # O Claude Code nao tem UMA mensagem de limite. Ja foram vistas:
   #   "Claude AI usage limit reached|1753362600"          (epoch cru)
@@ -1288,6 +1312,17 @@ wait_for_reset() {
     if [ "${#epoch}" -ge 13 ]; then
       epoch=$((epoch / 1000))
     fi
+
+    # Limite semanal: reset a dias de distancia. MAX_LIMIT_WAITS conta esperas,
+    # nunca a duracao de cada uma — sem este corte o run dormiria ate o reset.
+    local horizon=$((epoch - now))
+    if [ "$WEEKLY_THRESHOLD" -gt 0 ] && [ "$horizon" -gt "$WEEKLY_THRESHOLD" ]; then
+      fail "Limite semanal de uso: reset so em $(date -d "@$epoch" '+%d/%m %H:%M') ($(format_duration "$horizon"))."
+      fail "Acima do limiar de $(format_duration "$WEEKLY_THRESHOLD") (RALPH_WEEKLY_THRESHOLD) — encerrando em vez de dormir."
+      fail "Progresso preservado. Retome depois com: ./ralph.sh $INPUT_FILE --engine $ENGINE --from ${RALPH_PHASE_NUM:-1}"
+      exit 1
+    fi
+
     wait_secs=$((epoch - now + LIMIT_BUFFER))
     if [ "$wait_secs" -lt "$LIMIT_BUFFER" ]; then
       wait_secs=$LIMIT_BUFFER

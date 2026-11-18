@@ -163,6 +163,27 @@ case "$scenario" in
       exit 1
     fi
     ;;
+  limit-weekly)
+    # reset a dias (default 3): limite semanal, nao o de sessao (<= 5h)
+    if [ "$n" -eq 1 ]; then
+      emit_claude_limit "$(( $(date +%s) + ${MOCK_RESET_IN:-259200} ))"
+      exit 1
+    fi
+    ;;
+  limit-always)
+    # o limite nunca libera: so o teto de esperas tira o run do loop
+    echo "Rate limit reached. Try again later."
+    exit 1
+    ;;
+  limit-stream)
+    # stream-json real: conversa antes, limite no evento result com is_error
+    if [ "$n" -eq 1 ]; then
+      echo '{"type":"system","subtype":"init","session_id":"mock"}'
+      echo '{"type":"assistant","message":{"content":[{"type":"text","text":"vou implementar a fase"}]}}'
+      echo '{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You have hit your session limit"}'
+      exit 1
+    fi
+    ;;
 esac
 
 # stall-after-red: escreve no 1o ciclo (teste vermelho), depois trava sem
@@ -182,6 +203,18 @@ if [ "$scenario" = "false-429" ]; then
   echo "FAIL tests/HttpClientTest: expected 429 Too Many Requests, got 200"
   for i in $(seq 1 25); do echo "linha de ruido $i"; done
   echo "Suite corrigida. Done."
+  exit 0
+fi
+
+if [ "$scenario" = "false-limit-claude" ]; then
+  # A sessao escreveu um rate limiter, LEU uma fixture que cita o aviso de
+  # limite e terminou bem: "429"/"rate limit"/"usage limit reached" aparecem em
+  # mensagem do assistente, em tool_result e na resposta final — nunca num
+  # evento result com is_error:true.
+  emit_stream_tasks 2 2
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Rate limit reached responde 429 Too Many Requests; o teste cobre usage limit reached"}]}}'
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","content":"12\tassertSee(\"Claude AI usage limit reached\")\n13\tassertSee(\"hit your session limit\")","is_error":false}]}}'
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"implementado; o teste cobre usage limit reached e 429"}'
   exit 0
 fi
 
@@ -331,6 +364,10 @@ new_case() {
 run_ralph() {
   local dir="$1" scenario="$2"; shift 2
   local rc=0
+  # CASE_TIMEOUT: casos cuja regressao e dormir/loopar para sempre (limite
+  # semanal, teto de esperas) viram vermelho em segundos em vez de travar.
+  local wrap=()
+  [ -n "${CASE_TIMEOUT:-}" ] && wrap=(timeout "$CASE_TIMEOUT")
   (
     cd "$dir/repo" || exit 1
     # -u RALPH_TEST_CMD / RALPH_MAX_CYCLES: o dev pode ter essas exportadas no
@@ -341,11 +378,13 @@ run_ralph() {
     MOCK_STATE="$dir/state" \
     MOCK_SCENARIO="$scenario" \
     MOCK_TEST_CMD="$dir/test.sh" \
-    RALPH_LIMIT_WAIT_DEFAULT=1 \
+    RALPH_LIMIT_WAIT_DEFAULT="${CASE_LIMIT_WAIT:-1}" \
     RALPH_LIMIT_BUFFER=1 \
+    RALPH_MAX_LIMIT_WAITS="${CASE_MAX_LIMIT_WAITS:-}" \
+    RALPH_WEEKLY_THRESHOLD="${CASE_WEEKLY_THRESHOLD:-}" \
     RALPH_VERIFY="${CASE_VERIFY:-}" \
     RALPH_VERIFY_MODEL="${CASE_VERIFY_MODEL:-}" \
-      bash "$RALPH" "$@" > "$dir/out.log" 2>&1
+      ${wrap[@]+"${wrap[@]}"} bash "$RALPH" "$@" > "$dir/out.log" 2>&1
   ) || rc=$?
   echo "$rc"
 }
@@ -454,6 +493,59 @@ if case_enabled limit-epoch; then
 fi
 
 # ---------------------------------------------------------------------------
+# 5b. Limite semanal (reset a dias) -> encerra em vez de dormir
+# ---------------------------------------------------------------------------
+if case_enabled limit-weekly; then
+  header "5b. limite semanal -> encerra com motivo e comando de retomada"
+  d=$(new_case limit-weekly)
+  # CASE_TIMEOUT: sem o corte semanal o ralph dormiria 3 dias
+  rc=$(CASE_TIMEOUT=60 run_ralph "$d" limit-weekly --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 1 "$rc" "exit 1 (run encerrado, nao dormindo)"
+  assert_contains "$d/out.log" "Limite semanal de uso" "classificou como semanal"
+  assert_contains "$d/out.log" "Retome depois com: ./ralph.sh .spec/init/project-phases.md --engine claude --from 1" "devolveu o comando de retomada"
+  assert_eq 1 "$(cat "$d/state/impl_calls")" "nao re-executou a fase"
+  # commits() conta o commit de fixture: 1 = nenhuma fase commitada
+  assert_eq 1 "$(commits "$d")" "nenhuma fase commitada — parou na primeira"
+
+  # O limiar vem de RALPH_WEEKLY_THRESHOLD: reset a 10min com limiar de 1min
+  # tambem encerra (com o default de 6h, dormiria).
+  d=$(new_case limit-weekly-threshold)
+  rc=$(MOCK_RESET_IN=600 CASE_WEEKLY_THRESHOLD=60 CASE_TIMEOUT=60 \
+    run_ralph "$d" limit-weekly --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 1 "$rc" "limiar configurado: exit 1"
+  assert_contains "$d/out.log" "Acima do limiar de 1m 0s" "limiar configurado respeitado"
+fi
+
+# ---------------------------------------------------------------------------
+# 5c. Limite que nunca libera -> teto de esperas aborta (nao dorme para sempre)
+# ---------------------------------------------------------------------------
+if case_enabled limit-cap; then
+  header "5c. teto de esperas por limite -> aborta com motivo"
+  d=$(new_case limit-cap)
+  rc=$(CASE_MAX_LIMIT_WAITS=2 CASE_TIMEOUT=60 \
+    run_ralph "$d" limit-always --engine codex --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 1 "$rc" "exit 1 (abortou, sem timeout)"
+  assert_contains "$d/out.log" "Limite de uso atingido 3 vezes seguidas nesta fase (cap: 2)" "motivo do abort com o teto"
+  assert_contains "$d/out.log" "Abortando em vez de dormir indefinidamente" "mensagem de abort"
+  assert_eq 3 "$(cat "$d/state/impl_calls")" "2 esperas + a 3a sessao que estourou o teto"
+  assert_eq 1 "$(commits "$d")" "nenhuma fase commitada"
+fi
+
+# ---------------------------------------------------------------------------
+# 5d. claude stream-json: limite no result com is_error -> espera -> mesma fase
+# ---------------------------------------------------------------------------
+if case_enabled limit-stream; then
+  header "5d. limite no evento result (is_error:true) apos conversa -> espera"
+  d=$(new_case limit-stream)
+  rc=$(run_ralph "$d" limit-stream --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 0 "$rc" "exit 0 (limite nao consome ciclo)"
+  assert_contains "$d/out.log" "Limite de uso atingido" "limite detectado no result"
+  assert_contains "$d/out.log" "Espera 1/" "esperou uma vez"
+  assert_eq 3 "$(cat "$d/state/impl_calls")" "fase 1 re-executada (2) + fase 2 (1)"
+  assert_eq 3 "$(commits "$d")" "fases commitadas apos a espera"
+fi
+
+# ---------------------------------------------------------------------------
 # 6. Limite generico sem epoch -> fallback wait
 # ---------------------------------------------------------------------------
 if case_enabled limit-generic; then
@@ -471,13 +563,31 @@ fi
 if case_enabled false-429; then
   header "7. 429 no meio do log nao dispara espera"
   d=$(new_case false-429)
+  # Espera de fallback longa SO neste caso: com o default de 1s do helper, uma
+  # espera falsa custava 1s e o limite de tempo media overhead de processo, nao
+  # espera (flake em maquina carregada). Com 60s, uma espera falsa estoura o
+  # limite de 30s com folga e o overhead normal nunca chega perto.
   start=$(date +%s)
-  rc=$(run_ralph "$d" false-429 --engine codex --test-cmd "$d/test.sh" --max-cycles 1)
+  rc=$(CASE_LIMIT_WAIT=60 CASE_TIMEOUT=90 run_ralph "$d" false-429 --engine codex --test-cmd "$d/test.sh" --max-cycles 1)
   elapsed=$(($(date +%s) - start))
   assert_eq 0 "$rc" "exit 0"
   assert_not_contains "$d/out.log" "Limite de uso atingido" "nao interpretou 429 de teste como limite"
   assert_contains "$d/repo/.phases/logs/phase-01.cycle-1.log" "429 Too Many Requests" "o 429 realmente estava no log"
-  [ "$elapsed" -lt 5 ] && ok "sem espera (${elapsed}s)" || bad "sem espera (${elapsed}s)"
+  [ "$elapsed" -lt 30 ] && ok "sem espera (${elapsed}s)" || bad "sem espera (${elapsed}s)"
+fi
+
+# ---------------------------------------------------------------------------
+# 7b. claude: aviso de limite em conversa/tool_result/result ok -> NAO espera
+# ---------------------------------------------------------------------------
+if case_enabled false-limit-claude; then
+  header "7b. claude: limite citado fora de result is_error nao dispara espera"
+  d=$(new_case false-limit-claude)
+  rc=$(run_ralph "$d" false-limit-claude --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 0 "$rc" "exit 0"
+  assert_not_contains "$d/out.log" "Limite de uso atingido" "nao interpretou texto da sessao como limite"
+  assert_contains "$d/repo/.phases/logs/phase-01.cycle-1.log" "usage limit reached" "o aviso realmente estava no log"
+  assert_contains "$d/repo/.phases/logs/phase-01.cycle-1.log" "429 Too Many Requests" "o 429 realmente estava no log"
+  assert_eq 2 "$(cat "$d/state/impl_calls")" "1 sessao por fase, sem re-execucao"
 fi
 
 # ---------------------------------------------------------------------------
