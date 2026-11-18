@@ -96,6 +96,30 @@
 #   RALPH_MAX_LIMIT_WAITS    esperas consecutivas por limite, por fase (default: 20)
 #   RALPH_LIMIT_WAIT_DEFAULT fallback de espera em segundos (default: 1800)
 #   RALPH_LIMIT_BUFFER       segundos extras apos o reset (default: 60)
+#   RALPH_NOTIFY_CMD         comando de notificacao (opcional, vazio = desligado)
+#   RALPH_NOTIFY_TIMEOUT     segundos ate matar o comando de notificacao (default: 20)
+#
+# Notificacao (opcional): com RALPH_NOTIFY_CMD definido, o ralph chama
+#   $RALPH_NOTIFY_CMD <evento> <mensagem>
+# nos eventos run_start, phase_done, phase_failed, limit_hit, limit_over,
+# limit_abort e run_done. Para acompanhar um run longo fora do terminal. Roda
+# sob timeout, com stdin fechado e saida descartada; todo erro e engolido:
+# notificacao e efeito colateral, nunca gate. Adaptador pronto para o Telegram:
+# scripts/notify-telegram.sh. Contexto no ambiente do comando (campo sem valor
+# no evento chega vazio):
+#   RALPH_EVENT              evento corrente
+#   RALPH_PROJECT            nome do diretorio do repo
+#   RALPH_ENGINE             codex | claude
+#   RALPH_RUN_ID             id do run (o mesmo do run.tsv)
+#   RALPH_OUTCOME            status do run: running | waiting | finished | failed
+#   RALPH_PHASE_NUM          numero da fase (vazio em run_start/run_done)
+#   RALPH_PHASE_TITLE        titulo da fase (vazio em run_start/run_done)
+#   RALPH_PHASE_TOTAL        total de fases do documento
+#   RALPH_PHASE_ATTEMPT      ciclo corrente da fase (vazio em run_start/run_done)
+#   RALPH_PHASE_MAX_ATTEMPTS igual a RALPH_MAX_CYCLES
+#   RALPH_GATE0..RALPH_GATE3 estado de cada gate da fase:
+#                            pending | run | pass | fail | skip
+#   RALPH_LOG_PATH           log do gate que reprovou a fase (ou .phases/logs/)
 #
 # Exportadas para hooks (ex: notify-n8n.sh) durante cada sessao de engine:
 #   RALPH_ENGINE             codex | claude
@@ -155,10 +179,14 @@ RALPH_LOG="$LOG_DIR/ralph.log"
 MAX_LIMIT_WAITS="${RALPH_MAX_LIMIT_WAITS:-20}"
 LIMIT_WAIT_DEFAULT="${RALPH_LIMIT_WAIT_DEFAULT:-1800}"
 LIMIT_BUFFER="${RALPH_LIMIT_BUFFER:-60}"
+NOTIFY_CMD="${RALPH_NOTIFY_CMD:-}"
+NOTIFY_TIMEOUT="${RALPH_NOTIFY_TIMEOUT:-20}"
 
 TEST_CMD=""
 SAIL_BIN=""
 LIMIT_WAITS=0
+# Log do gate que reprovou o ciclo corrente (contexto do phase_failed).
+FAIL_LOG=""
 # Arquivo da fase corrente: o watcher do stream usa os titulos das tasks para
 # casar um arquivo escrito com a task que o menciona.
 CURRENT_PHASE_FILE=""
@@ -193,6 +221,53 @@ format_duration() {
   else
     printf "%ds" "$seconds"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Notificacao externa (opcional)
+# ---------------------------------------------------------------------------
+
+# notify <evento> <mensagem>
+#
+# No-op sem RALPH_NOTIFY_CMD. O comando externo roda sob `timeout` e com
+# stdin fechado: um adaptador travado (rede lenta, prompt acidental) nao pode
+# parar o run. Todo erro e engolido — invariante: notificar nunca altera o
+# resultado do run. Eventos do run (run_*) nunca herdam fase, ciclo ou gates.
+notify() {
+  [ -n "$NOTIFY_CMD" ] || return 0
+  local event="$1" message="${2:-}"
+  local num="" title="" attempt="" gates="" log_path="$LOG_DIR/"
+  local -a g=()
+
+  if [[ "$event" != run_* ]] && [ -n "${META[phase_cur]:-}" ]; then
+    num="${META[phase_cur]}"
+    title="${PH_TITLE[$num]:-}"
+    attempt="${META[cycle]:-}"
+    gates="${PH_GATES[$num]:-}"
+    log_path="${FAIL_LOG:-$LOG_DIR/}"
+  fi
+  read -r -a g <<< "$gates" || true
+
+  RALPH_EVENT="$event" \
+  RALPH_PROJECT="${META[project]:-}" \
+  RALPH_ENGINE="$ENGINE" \
+  RALPH_RUN_ID="${META[run]:-}" \
+  RALPH_OUTCOME="${META[status]:-}" \
+  RALPH_PHASE_NUM="$num" \
+  RALPH_PHASE_TITLE="$title" \
+  RALPH_PHASE_TOTAL="${META[phase_total]:-}" \
+  RALPH_PHASE_ATTEMPT="$attempt" \
+  RALPH_PHASE_MAX_ATTEMPTS="$MAX_CYCLES" \
+  RALPH_GATE0="${g[0]:-}" \
+  RALPH_GATE1="${g[1]:-}" \
+  RALPH_GATE2="${g[2]:-}" \
+  RALPH_GATE3="${g[3]:-}" \
+  RALPH_LOG_PATH="$log_path" \
+    timeout -k 5 "$NOTIFY_TIMEOUT" \
+    bash -c "$NOTIFY_CMD \"\$@\"" _ "$event" "$message" \
+    > /dev/null 2>&1 < /dev/null || true
+
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1281,9 +1356,12 @@ wait_for_reset() {
   if [ "$LIMIT_WAITS" -gt "$MAX_LIMIT_WAITS" ]; then
     fail "Limite de uso atingido $LIMIT_WAITS vezes seguidas nesta fase (cap: $MAX_LIMIT_WAITS)."
     fail "Abortando em vez de dormir indefinidamente."
+    notify limit_abort \
+      "Run abortado: limite de uso atingido $LIMIT_WAITS vezes seguidas nesta fase (cap: $MAX_LIMIT_WAITS)."
     exit 1
   fi
 
+  local reset_note
   if [[ "$epoch" =~ ^[0-9]+$ ]] && [ "$epoch" -gt 0 ]; then
     if [ "${#epoch}" -ge 13 ]; then
       epoch=$((epoch / 1000))
@@ -1292,13 +1370,17 @@ wait_for_reset() {
     if [ "$wait_secs" -lt "$LIMIT_BUFFER" ]; then
       wait_secs=$LIMIT_BUFFER
     fi
+    reset_note="Reset previsto para $(date -d "@$epoch" '+%d/%m %H:%M')."
     warn "Limite de uso atingido. Reset previsto para $(date -d "@$epoch" '+%d/%m %H:%M:%S')."
   else
     wait_secs=$LIMIT_WAIT_DEFAULT
+    reset_note="Sem horario de reset no output; usando espera fallback."
     warn "Limite de uso atingido. Sem horario de reset no output; aguardando fallback."
   fi
 
   warn "Espera $LIMIT_WAITS/$MAX_LIMIT_WAITS — aguardando $(format_duration "$wait_secs") ate retomar a MESMA fase..."
+  notify limit_hit \
+    "Limite de uso atingido. $reset_note Dormindo $(format_duration "$wait_secs") e retomando a MESMA fase (espera $LIMIT_WAITS/$MAX_LIMIT_WAITS). Nenhuma acao necessaria."
 
   META[status]="waiting"
   local remaining=$wait_secs chunk
@@ -1314,6 +1396,7 @@ wait_for_reset() {
   state_meta activity "retomando a fase"
 
   success "Reset provavelmente concluido. Retomando execucao."
+  notify limit_over "Limite liberado. Retomando a fase automaticamente."
 }
 
 # ---------------------------------------------------------------------------
@@ -1575,6 +1658,7 @@ run_phase() {
 
   LIMIT_WAITS=0
   GATE_CAUSE=""
+  FAIL_LOG=""
 
   echo ""
   log "[$seq/$total] Phase $phase_num: $phase_title"
@@ -1621,6 +1705,7 @@ run_phase() {
     if ! gate0_engine_finished "$log_file" "$rc"; then
       state_gate "$phase_num" 0 fail
       LAST_GATE="gate 0 — engine nao concluiu"
+      FAIL_LOG="$log_file"
       fail "Gate 0 vermelho"
       gate_verdict="red"
     else
@@ -1633,6 +1718,7 @@ run_phase() {
       if ! gate2_tests_pass "$LOG_DIR/${phase_file%.md}.test-${cycle}.log"; then
         state_gate "$phase_num" 2 fail
         LAST_GATE="gate 2 — suite de testes do projeto"
+        FAIL_LOG="$LOG_DIR/${phase_file%.md}.test-${cycle}.log"
         GATE_CAUSE="${no_change_note}${GATE_CAUSE}"
         fail "Gate 2 vermelho — testes do projeto falharam"
         gate_verdict="red"
@@ -1645,6 +1731,7 @@ run_phase() {
           state_tasks_from_verify "$phase_num" "$verify_log"
           state_gate "$phase_num" 3 fail
           LAST_GATE="gate 3 — verificacao independente"
+          FAIL_LOG="$verify_log"
           GATE_CAUSE="${no_change_note}${GATE_CAUSE}"
           fail "Gate 3 vermelho — implementacao incompleta"
           gate_verdict="red"
@@ -1672,6 +1759,7 @@ run_phase() {
         fi
         mark_phase_done "$phase_file"
         state_phase_end "$phase_num" done
+        notify phase_done "Fase ja estava implementada em HEAD — gates verdes, nenhum commit criado."
         return 0
       fi
 
@@ -1679,10 +1767,13 @@ run_phase() {
       if ! commit_phase "$phase_num" "$phase_title"; then
         LAST_GATE="commit"
         state_phase_end "$phase_num" failed
+        notify phase_failed "Gates verdes, mas o commit da fase falhou."
         return 1
       fi
       mark_phase_done "$phase_file"
       state_phase_end "$phase_num" done
+      notify phase_done \
+        "Fase COMPLETA em $(format_duration "$phase_duration") — commitada. Restam $((total - seq)) fase(s) no documento."
       return 0
     fi
 
@@ -1702,6 +1793,13 @@ run_phase() {
     warn "O trabalho parcial desta fase ficou na arvore. Antes de re-rodar o ralph:"
     warn "    commite (o ralph revalida a fase e segue) ou 'git checkout -- . && git clean -fd' (descarta)"
   fi
+
+  # GATE_CAUSE carrega ate 200 linhas de log; a notificacao leva so o
+  # suficiente para decidir se vale abrir o terminal.
+  local cause_summary
+  cause_summary=$(printf '%s' "$GATE_CAUSE" | head -n 2 | cut -c1-240 || true)
+  notify phase_failed \
+    "FALHOU apos $MAX_CYCLES ciclos ($(format_duration "$phase_duration")). Ultimo gate: ${LAST_GATE:-?}. ${cause_summary}"
   return 1
 }
 
@@ -1795,7 +1893,7 @@ main() {
   [ "$FROM_PHASE" -gt 1 ] && log "Iniciando a partir da fase $FROM_PHASE"
   echo ""
 
-  local file num title
+  local file num title pending=0
   while IFS='|' read -r file num title; do
     if [ "$num" -lt "$FROM_PHASE" ]; then
       echo -e "  ${BLUE}[$num] $title (pulada por --from)${NC}"
@@ -1803,6 +1901,7 @@ main() {
       echo -e "  ${GREEN}[$num] $title (ja completada)${NC}"
     else
       echo -e "  ${YELLOW}[$num] $title${NC}"
+      pending=$((pending + 1))
     fi
   done < <(manifest_entries)
 
@@ -1810,6 +1909,11 @@ main() {
   start_time=$(date +%s)
   echo ""
   log "Inicio: $(date '+%d/%m/%Y %H:%M:%S')"
+
+  # A lista de fases fica fora da mensagem de proposito: um documento com
+  # dezenas de fases estouraria o limite de tamanho de uma mensagem de chat.
+  notify run_start \
+    "Run iniciado: $pending de $total_phases fase(s) a executar (engine: $ENGINE, max-cycles: $MAX_CYCLES). Input: $INPUT_FILE"
 
   local seq=0
   local failed_phases=() skipped_phases=() completed_phases=()
@@ -1894,6 +1998,13 @@ main() {
   log "Fim:    $(date -d "@$end_time" '+%d/%m/%Y %H:%M:%S')"
   log "Duracao total: $(format_duration "$total_duration")"
   echo ""
+
+  local run_summary
+  run_summary="Run encerrado em $(format_duration "$total_duration"): ${#completed_phases[@]} completa(s), ${#failed_phases[@]} falharam, ${#skipped_phases[@]} pulada(s)."
+  if [ ${#failed_phases[@]} -gt 0 ]; then
+    run_summary="$run_summary Falharam: $(printf '%s; ' "${failed_phases[@]}")"
+  fi
+  notify run_done "$run_summary"
 
   [ ${#failed_phases[@]} -eq 0 ] || exit 1
 }

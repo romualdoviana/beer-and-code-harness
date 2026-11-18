@@ -336,6 +336,8 @@ run_ralph() {
     # -u RALPH_TEST_CMD / RALPH_MAX_CYCLES: o dev pode ter essas exportadas no
     # shell (ex: RALPH_TEST_CMD no .zshrc). Herda-las aqui sobrepoe a deteccao
     # por manifest e quebra os casos 13/16 com uma falha que nao existe no ralph.
+    # RALPH_NOTIFY_CMD idem, e pior: um adaptador real exportado no shell
+    # mandaria notificacao de verdade a cada caso. So CASE_NOTIFY_CMD liga.
     env -u RALPH_TEST_CMD -u RALPH_MAX_CYCLES -u RALPH_MAX_LIMIT_WAITS \
     PATH="$dir/bin:$PATH" \
     MOCK_STATE="$dir/state" \
@@ -345,6 +347,9 @@ run_ralph() {
     RALPH_LIMIT_BUFFER=1 \
     RALPH_VERIFY="${CASE_VERIFY:-}" \
     RALPH_VERIFY_MODEL="${CASE_VERIFY_MODEL:-}" \
+    RALPH_NOTIFY_CMD="${CASE_NOTIFY_CMD:-}" \
+    RALPH_NOTIFY_TIMEOUT="${CASE_NOTIFY_TIMEOUT:-}" \
+    RALPH_MAX_LIMIT_WAITS="${CASE_MAX_LIMIT_WAITS:-}" \
       bash "$RALPH" "$@" > "$dir/out.log" 2>&1
   ) || rc=$?
   echo "$rc"
@@ -363,6 +368,7 @@ run_ralph_env() {
     MOCK_TEST_CMD="$dir/test.sh" \
     RALPH_LIMIT_WAIT_DEFAULT=1 \
     RALPH_LIMIT_BUFFER=1 \
+    RALPH_NOTIFY_CMD='' \
       bash "$RALPH" "$@" > "$dir/out.log" 2>&1
   ) || rc=$?
   echo "$rc"
@@ -848,7 +854,7 @@ if case_enabled live-progress; then
 
   (
     cd "$d/repo" || exit 1
-    env -u RALPH_TEST_CMD -u RALPH_MAX_CYCLES \
+    env -u RALPH_TEST_CMD -u RALPH_MAX_CYCLES -u RALPH_NOTIFY_CMD \
     PATH="$d/bin:$PATH" MOCK_STATE="$d/state" MOCK_SCENARIO=stream-slow \
     MOCK_TEST_CMD="$d/test.sh" MOCK_SLOW_SECS=6 RALPH_VERIFY=off \
       bash "$RALPH" --engine claude --test-cmd "$d/test.sh" > "$d/out.log" 2>&1
@@ -1375,6 +1381,203 @@ if case_enabled watch-frame; then
   else
     ok "tmux ausente — integracao do quadro pulada"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# Notificacao externa (RALPH_NOTIFY_CMD)
+# ---------------------------------------------------------------------------
+
+# make_notify_recorder <script> <events_file> -> adaptador fake que grava uma
+# linha por evento: evento|projeto|fase|total|ciclo|max|g0|g2|g3|outcome|run|log|msg
+make_notify_recorder() {
+  cat > "$1" <<RECORDER
+#!/usr/bin/env bash
+printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "\$1" "\${RALPH_PROJECT:-}" \
+  "\${RALPH_PHASE_NUM:-}" "\${RALPH_PHASE_TOTAL:-}" "\${RALPH_PHASE_ATTEMPT:-}" \
+  "\${RALPH_PHASE_MAX_ATTEMPTS:-}" "\${RALPH_GATE0:-}" "\${RALPH_GATE2:-}" \
+  "\${RALPH_GATE3:-}" "\${RALPH_OUTCOME:-}" "\${RALPH_RUN_ID:-}" \
+  "\${RALPH_LOG_PATH:-}" "\${2:-}" >> "$2"
+RECORDER
+  chmod +x "$1"
+  : > "$2"
+}
+
+# Mensagem pode ter mais de uma linha (causa do phase_failed): so as linhas que
+# abrem com <evento>| contam.
+event_seq() { grep -oE '^[a-z_]+\|' "$1" | tr -d '|' | tr '\n' ' ' | sed 's/ $//'; }
+
+# ---------------------------------------------------------------------------
+# 38. Sem RALPH_NOTIFY_CMD nada e chamado. Sonda: um `timeout` fake no PATH —
+#     o notify so o invoca quando ha comando configurado.
+# ---------------------------------------------------------------------------
+if case_enabled notify-off; then
+  header "38. notify desligado por default"
+  real_timeout=$(command -v timeout)
+  d=$(new_case notify-off)
+  cat > "$d/bin/timeout" <<PROBE
+#!/usr/bin/env bash
+echo call >> "$d/state/timeout_calls"
+exec "$real_timeout" "\$@"
+PROBE
+  chmod +x "$d/bin/timeout"
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  if [ -f "$d/state/timeout_calls" ]; then bad "nenhuma notificacao sem RALPH_NOTIFY_CMD (houve chamada)"
+  else ok "nenhuma notificacao sem RALPH_NOTIFY_CMD"; fi
+
+  # Controle: a mesma sonda dispara quando o comando existe — sem isto o
+  # assert acima passaria ate com a sonda quebrada.
+  d2=$(new_case notify-off-control)
+  cp "$d/bin/timeout" "$d2/bin/timeout"
+  sed -i "s#$d/state#$d2/state#" "$d2/bin/timeout"
+  make_notify_recorder "$d2/notify.sh" "$d2/events.txt"
+  rc=$(CASE_NOTIFY_CMD="$d2/notify.sh" run_ralph "$d2" ok --engine claude --test-cmd "$d2/test.sh")
+  assert_eq 0 "$rc" "controle: exit 0"
+  if [ -s "$d2/state/timeout_calls" ]; then ok "controle: a sonda ve o notify ligado"
+  else bad "controle: a sonda ve o notify ligado"; fi
+fi
+
+# ---------------------------------------------------------------------------
+# 39. Run verde: sequencia de eventos e contexto vindo do estado do run
+# ---------------------------------------------------------------------------
+if case_enabled notify-green; then
+  header "39. notify — sequencia de um run verde"
+  d=$(new_case notify-green)
+  make_notify_recorder "$d/notify.sh" "$d/events.txt"
+  rc=$(CASE_NOTIFY_CMD="$d/notify.sh" run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq "run_start phase_done phase_done run_done" "$(event_seq "$d/events.txt")" "sequencia de eventos"
+  assert_contains "$d/events.txt" "2 de 2 fase(s)" "run_start conta as fases pendentes"
+  assert_contains "$d/events.txt" "phase_done|repo|1|2|1|3|pass|pass|pass|running|run-" \
+    "phase_done leva fase, total, ciclo, gates, status e run id"
+  assert_contains "$d/events.txt" "run_done|repo||2||3||||finished|run-" \
+    "run_done nao herda fase/ciclo/gates e traz o desfecho"
+  assert_contains "$d/events.txt" "2 completa(s), 0 falharam" "run_done carrega o resumo"
+fi
+
+# ---------------------------------------------------------------------------
+# 40. Fase reprovada: phase_failed com o gate, a causa e o log do gate
+# ---------------------------------------------------------------------------
+if case_enabled notify-failed; then
+  header "40. notify — fase reprovada"
+  d=$(new_case notify-failed)
+  make_notify_recorder "$d/notify.sh" "$d/events.txt"
+  rc=$(CASE_NOTIFY_CMD="$d/notify.sh" run_ralph "$d" empty-diff --engine claude --max-cycles 1 --test-cmd "$d/test.sh")
+  assert_eq 1 "$rc" "exit 1"
+  assert_eq "run_start phase_failed run_done" "$(event_seq "$d/events.txt")" "sequencia de eventos"
+  assert_contains "$d/events.txt" "Ultimo gate: gate 3" "phase_failed nomeia o gate"
+  assert_contains "$d/events.txt" "phase_failed|repo|1|2|1|1|pass|pass|fail|running|" "phase_failed leva os gates reais"
+  assert_contains "$d/events.txt" "|.phases/logs/phase-01.verify-1.log|" "phase_failed aponta o log do gate que reprovou"
+  assert_contains "$d/events.txt" "|failed|run-" "run_done traz o desfecho failed"
+fi
+
+# ---------------------------------------------------------------------------
+# 41. Adaptador travado e morto pelo timeout; o run segue e passa
+# ---------------------------------------------------------------------------
+if case_enabled notify-timeout; then
+  header "41. notify — adaptador travado nao segura o run"
+  d=$(new_case notify-timeout)
+  printf '#!/usr/bin/env bash\nexec sleep 30\n' > "$d/hang.sh"
+  chmod +x "$d/hang.sh"
+  t0=$SECONDS
+  rc=$(CASE_NOTIFY_CMD="$d/hang.sh" CASE_NOTIFY_TIMEOUT=1 run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  elapsed=$((SECONDS - t0))
+  assert_eq 0 "$rc" "exit 0 com o adaptador travado"
+  assert_eq 3 "$(commits "$d")" "fases commitadas normalmente"
+  # 4 eventos x 30s sem timeout; com RALPH_NOTIFY_TIMEOUT=1 cabe com folga em 20s
+  if [ "$elapsed" -lt 20 ]; then ok "timeout matou o adaptador (${elapsed}s)"
+  else bad "timeout matou o adaptador (run levou ${elapsed}s)"; fi
+fi
+
+# ---------------------------------------------------------------------------
+# 42. Limite de uso: limit_hit/limit_over na espera, limit_abort no cap
+# ---------------------------------------------------------------------------
+if case_enabled notify-limit; then
+  header "42. notify — limite de uso"
+  d=$(new_case notify-limit)
+  make_notify_recorder "$d/notify.sh" "$d/events.txt"
+  rc=$(CASE_NOTIFY_CMD="$d/notify.sh" run_ralph "$d" limit-epoch --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0 (retomou depois do reset)"
+  assert_eq "run_start limit_hit limit_over phase_done phase_done run_done" "$(event_seq "$d/events.txt")" \
+    "limit_hit e limit_over em volta da espera"
+
+  d2=$(new_case notify-limit-abort)
+  make_notify_recorder "$d2/notify.sh" "$d2/events.txt"
+  rc=$(CASE_NOTIFY_CMD="$d2/notify.sh" CASE_MAX_LIMIT_WAITS=0 run_ralph "$d2" limit-epoch --engine claude --test-cmd "$d2/test.sh")
+  assert_eq 1 "$rc" "exit 1 ao estourar o cap de esperas"
+  assert_eq "run_start limit_abort" "$(event_seq "$d2/events.txt")" "limit_abort antes de abortar"
+fi
+
+# ---------------------------------------------------------------------------
+# 43. notify-telegram.sh monta a mensagem a partir do ambiente, sem rede:
+#     curl fake no PATH captura URL e texto; RALPH_NOTIFY_API_BASE aponta para
+#     uma base fake. RALPH_NOTIFY_BIN permite apontar para uma copia patchada.
+# ---------------------------------------------------------------------------
+if case_enabled telegram-render; then
+  header "43. notify-telegram.sh renderiza a partir do ambiente"
+  tg="$TMP/telegram"
+  mkdir -p "$tg/bin"
+  cat > "$tg/bin/curl" <<'CURL'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    http*) printf '%s\n' "$arg" > "$TG_CAPTURE.url" ;;
+    text=*) printf '%s' "${arg#text=}" > "$TG_CAPTURE" ;;
+  esac
+done
+printf '%s' "${MOCK_HTTP:-200}"
+CURL
+  chmod +x "$tg/bin/curl"
+  telegram="${RALPH_NOTIFY_BIN:-$ROOT/scripts/notify-telegram.sh}"
+  # env -i: nada do shell do dev (token real, RALPH_* de outro run) vaza.
+  tg_send() {
+    local name="$1"; shift
+    env -i PATH="$tg/bin:$PATH" HOME="$tg" TG_CAPTURE="$tg/$name.txt" \
+      RALPH_NOTIFY_ENV_FILE="$tg/nao-existe.env" \
+      RALPH_NOTIFY_API_BASE="http://fake-api.invalid" \
+      TELEGRAM_BOT_TOKEN=fake-token TELEGRAM_CHAT_ID=42 \
+      "$@"
+  }
+
+  tg_send failed RALPH_PROJECT='Loja <A&B>' RALPH_ENGINE=claude RALPH_RUN_ID=run-1117-120000 \
+    RALPH_OUTCOME=running RALPH_PHASE_NUM=2 RALPH_PHASE_TOTAL=6 RALPH_PHASE_TITLE='API <pedidos>' \
+    RALPH_PHASE_ATTEMPT=3 RALPH_PHASE_MAX_ATTEMPTS=3 RALPH_GATE0=pass RALPH_GATE1=pass \
+    RALPH_GATE2=pass RALPH_GATE3=fail RALPH_LOG_PATH=.phases/logs/phase-02.verify-3.log \
+    bash "$telegram" phase_failed 'FALHOU apos 3 ciclos.'
+  assert_eq "http://fake-api.invalid/botfake-token/sendMessage" "$(cat "$tg/failed.txt.url" 2>/dev/null)" \
+    "RALPH_NOTIFY_API_BASE sobrepoe a API"
+  assert_contains "$tg/failed.txt" "<b>Loja &lt;A&amp;B&gt;</b>" "projeto com HTML escapado"
+  assert_contains "$tg/failed.txt" "Fase 2/6 · API &lt;pedidos&gt;" "linha da fase"
+  assert_contains "$tg/failed.txt" "Ciclo: 3/3" "ciclo/orcamento"
+  assert_contains "$tg/failed.txt" "G2: aprovado · G3: falhou" "gates em texto"
+  assert_contains "$tg/failed.txt" "Log: <code>.phases/logs/phase-02.verify-3.log</code>" "log do gate"
+  assert_contains "$tg/failed.txt" "run-1117-120000" "run id"
+
+  # So o minimo: evento + mensagem. Linha sem dado some, nunca sai quebrada.
+  tg_send bare bash "$telegram" phase_failed 'sem contexto'
+  assert_contains "$tg/bare.txt" "Fase falhou" "titulo do evento sem contexto"
+  assert_contains "$tg/bare.txt" "sem contexto" "mensagem sem contexto"
+  if grep -qE '^Fase [0-9?]' "$tg/bare.txt"; then bad "sem RALPH_PHASE_NUM, sem linha de fase"
+  else ok "sem RALPH_PHASE_NUM, sem linha de fase"; fi
+  assert_not_contains "$tg/bare.txt" "Ciclo:" "sem ciclo, sem linha de ciclo"
+  assert_not_contains "$tg/bare.txt" "G2:" "sem gates, sem linha de gates"
+  assert_not_contains "$tg/bare.txt" "Log:" "sem log, sem linha de log"
+
+  tg_send done_ok RALPH_OUTCOME=finished RALPH_PHASE_NUM=2 RALPH_GATE2=pass \
+    bash "$telegram" run_done 'Run encerrado.'
+  assert_contains "$tg/done_ok.txt" "Execução concluída" "run_done finished"
+  assert_not_contains "$tg/done_ok.txt" "Fase 2" "run_done nao herda fase"
+  tg_send done_bad RALPH_OUTCOME=failed bash "$telegram" run_done 'Uma fase falhou.'
+  assert_contains "$tg/done_bad.txt" "Execução encerrada com falhas" "run_done failed nao anuncia sucesso"
+
+  rc=0
+  tg_send http500 MOCK_HTTP=500 bash "$telegram" phase_done 'x' > "$tg/err.txt" 2>&1 || rc=$?
+  assert_eq 0 "$rc" "erro HTTP nao muda o exit code"
+  assert_not_contains "$tg/err.txt" "fake-token" "erro nao expoe o token"
+  rc=0
+  env -i PATH="$tg/bin:$PATH" HOME="$tg" RALPH_NOTIFY_ENV_FILE="$tg/nao-existe.env" \
+    bash "$telegram" phase_done 'x' > /dev/null 2>&1 || rc=$?
+  assert_eq 0 "$rc" "sem credencial: exit 0"
 fi
 
 # ---------------------------------------------------------------------------

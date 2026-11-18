@@ -194,8 +194,26 @@ Laravel Sail projects: the suite runs **inside the container** (`vendor/bin/sail
 | `RALPH_MAX_LIMIT_WAITS` | Consecutive usage-limit waits, per phase (default: 20) |
 | `RALPH_LIMIT_WAIT_DEFAULT` | Fallback wait in seconds (default: 1800) |
 | `RALPH_LIMIT_BUFFER` | Extra seconds after the reset (default: 60) |
+| `RALPH_NOTIFY_CMD` | Notification command (optional; empty = off — see below) |
+| `RALPH_NOTIFY_TIMEOUT` | Seconds before the notification command is killed (default: 20) |
 
 During each session, ralph exports `RALPH_ENGINE`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_NUM`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, and `RALPH_PHASE_MAX_ATTEMPTS` — useful for notification hooks (e.g. n8n).
+
+### External notifications (Telegram)
+
+To follow a long run away from the terminal, set `RALPH_NOTIFY_CMD`. ralph calls `$RALPH_NOTIFY_CMD <event> <message>` on `run_start`, `phase_done`, `phase_failed`, `limit_hit`, `limit_over`, `limit_abort` and `run_done`. The command runs under `timeout` (`RALPH_NOTIFY_TIMEOUT`), with stdin closed and output discarded, and every error is swallowed: notifying never changes the run result. Context arrives in the environment: `RALPH_EVENT`, `RALPH_PROJECT`, `RALPH_ENGINE`, `RALPH_RUN_ID`, `RALPH_OUTCOME` (run status), `RALPH_PHASE_NUM`, `RALPH_PHASE_TITLE`, `RALPH_PHASE_TOTAL`, `RALPH_PHASE_ATTEMPT`, `RALPH_PHASE_MAX_ATTEMPTS`, `RALPH_GATE0`..`RALPH_GATE3` (`pending|run|pass|fail|skip`) and `RALPH_LOG_PATH` (log of the gate that failed). Run-level events (`run_*`) carry no phase fields.
+
+`scripts/notify-telegram.sh` is a ready-made Telegram adapter:
+
+```bash
+# credentials: env vars or a 600-permission file (default ~/.config/ralph-notify/telegram.env,
+# override with RALPH_NOTIFY_ENV_FILE) containing TELEGRAM_BOT_TOKEN=... and TELEGRAM_CHAT_ID=...
+scripts/notify-telegram.sh --setup   # finds your chat_id (never prints the token)
+scripts/notify-telegram.sh --test    # sends a test message
+export RALPH_NOTIFY_CMD="/path/to/scripts/notify-telegram.sh"
+```
+
+The adapter always exits 0, omits any line whose field is missing, and honors `RALPH_NOTIFY_API_BASE` (local Bot API server or offline tests).
 
 ### State and progress
 
@@ -312,6 +330,7 @@ agents/                        specifier, clarifier, planner,
 scripts/
   ralph.sh                     phase-by-phase execution orchestrator
   ralph-watch.sh               live run panel (reads .phases/state/)
+  notify-telegram.sh           RALPH_NOTIFY_CMD adapter for Telegram
   test-ralph.sh                red/green suite for ralph with a mock engine
   check-init-drift.sh          guards against textual drift of the rules
                                duplicated across the init commands
