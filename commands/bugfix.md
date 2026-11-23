@@ -1,5 +1,5 @@
 ---
-description: "Defect pipeline — reproduces a bug, finds the root cause, and either fixes it inline (low tier) or produces BUGFIX.md + PHASES.md under .spec/bugfixes/[slug]/ (high tier). Closes by registering the root cause as agent learning."
+description: "Defect pipeline — reproduces a bug, finds the root cause, and either fixes it inline (low tier) or produces BUGFIX.md + PHASES.md under .spec/bugfixes/[slug]/ (high tier). Closes by recording the root cause in the regression test + commit, and proposing a project convention only when the fix reveals one."
 argument-hint: "<bug report | path-to-report-file>"
 allowed-tools: Task, Agent, Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion
 ---
@@ -161,21 +161,19 @@ grep -Eq '^## Phase [0-9]+: ' .spec/bugfixes/[slug]/PHASES.md
 ./ralph.sh .spec/bugfixes/[slug]/PHASES.md
 ```
 
-### 8 — Register the learning (mandatory, every tier)
+### 8 — Close the loop (mandatory, every tier)
 
-A defect whose root cause is not written down is a defect that returns. This step runs on both routes and is not optional.
+The record of a fixed bug is its **regression test + the commit message carrying the root cause**. Rules are not a bug log: most defects never recur, and a bug table loads into every future session that touches the area. This step only asks whether the fix revealed a **development convention** for future code.
 
-1. **Classify** the technical root cause — the shape of the mistake, one level above this instance. Never the symptom.
-2. **Decide scope and vector**:
-   - Reusable across projects → the artifact for that domain: a skill at `~/.claude/skills/<domain>/SKILL.md` when one exists, otherwise the agent at `~/.claude/agents/<agent>.md`.
-   - Specific to this project (names a subsystem, flow, column, service, or node of its own) → `<project-root>/.claude/rules/<topic>.md`, a path-scoped rule: YAML frontmatter `paths:` listing globs of the real directories/files that topic covers, so Claude Code loads it only when one of them is read or edited. Create the file if the topic is new; reuse the global topic name when the area matches (`queues-jobs`, `eloquent-data`, `testing-tooling`…). Never create or extend a `<agent>-project.md` agent — that layout is legacy and is being migrated to rules.
-   - In doubt → prefer the project file.
-3. **Check for duplicates** in the correct scope before writing: Grep the agent core, its `~/.claude/agent-refs/<agent>/` files, and the project's `.claude/rules/`. A matching row exists → propose updating that row, never a second one.
-4. **Propose one line**, in **English**, format `| bug | root cause | prevention |`. Target: the project rule table; or, for a global agent, the inbox section (`## Common Bugs` or `## What to Avoid`) of its core file; or the skill's `references/learned-<topic>.md`. Show the target file, the target section, and the exact line.
-5. **Write only after explicit confirmation.** Declined → change nothing and say so.
-6. **Report** the registration to the developer.
-
-Multi-stack defect → propose the line for every affected agent. **Consolidate, don't pile up**: a new line that supersedes an older one replaces it (show both); a global inbox above 10 rows, or an agent core above 20 KB, gets its rows moved to the matching `agent-refs` topic file. Removing a rule that has no replacement still needs explicit confirmation.
+1. **Commit message**: draft it with the root cause class in the body (one line, generalized one level above this instance). For `light`, show it for the developer's commit; for high tiers, it goes into phase 1's commit.
+2. **Convention check** — propose a rule ONLY when ALL hold; otherwise `learning: none — <reason>` (the expected, common outcome):
+   - it is an instruction for **future code** in this project ("every outbound e-mail path calls `X`", "new upload owners add a case to `Y`"), not the story of this bug;
+   - it is not deducible by reading the code/config in ~1 minute;
+   - it is not in the official docs of the framework/lib (check before proposing).
+3. **Target**: project-specific → `<project-root>/.claude/rules/<topic>.md`, path-scoped (YAML frontmatter `paths:` with globs of the real files the topic covers); create the file only if the topic is new. Generic stack pattern → `~/.claude/agent-refs/<agent>/<topic>.md`. Never a `<agent>-project.md` agent, never an agent core inbox.
+4. **Format**: one imperative bullet in **English**, ≤2 lines, identifiers verbatim. No table, no narrative, no incident data (tenant, date, ticket). Grep the target scope first; a similar bullet exists → propose editing that bullet instead.
+5. **Ceilings**: rule ≤5 KB, project rules ≤20 KB in total. Over → propose cutting what is deducible from code or no longer applies; removing a valid convention with no replacement needs explicit confirmation.
+6. **Write only after explicit confirmation.** Declined → change nothing and say so.
 
 ### 9 — Summary
 
@@ -189,7 +187,7 @@ Emit one table:
 | route | `inline fix` / `spec + phases` |
 | suite | `green` / `red` / `not available` |
 | artifacts | paths, or `none (inline)` |
-| learning | file + section, or `declined` |
+| learning | `none — <reason>`, rule file + bullet, or `declined` |
 
 Closing line: for `light`, that nothing was committed and the developer reviews with `git diff`; for high tiers, the `./ralph.sh` handoff.
 
