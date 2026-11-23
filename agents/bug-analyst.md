@@ -78,7 +78,9 @@ Not the patch — the contract the patch must satisfy:
 
 ### 6 — Classify the learning
 
-The defect's technical root cause, in one line, generalized one level above this codebase — the shape of the mistake, not this instance of it. Plus the scope judgment: is this a defect shape that recurs across projects (`global`), or one that only makes sense inside this project's own subsystems, flows, and column names (`project`)?
+The defect's technical root cause, in one line, generalized one level above this codebase — the shape of the mistake, not this instance of it. It goes into the commit message; the regression test is the guard.
+
+Then judge whether the fix reveals a **convention for future code** — an imperative rule a developer must follow that is not deducible by reading the code in ~1 minute and is not in official docs ("every outbound e-mail path calls `X`"). Most bugs reveal none: say `none` with the reason. Never restate the bug as a rule.
 
 ### Return (investigate)
 
@@ -104,9 +106,9 @@ acceptance_criteria:
   - <binary AC>
 test_plan: <the test that must go red before the fix, described precisely>
 learning:
-  root_cause_class: <the shape of the mistake, one line, in English>
-  prevention: <the rule that would have prevented it, one line, in English>
-  scope: global | project
+  root_cause_class: <the shape of the mistake, one line, in English — for the commit message>
+  convention: <one imperative bullet for future code, in English, ≤2 lines> | none — <reason>
+  scope: project | global | none
 open_questions:
   - <only when reproduction failed>
 ```
@@ -146,14 +148,13 @@ Read `investigation_path`. Write `.spec/bugfixes/[slug]/BUGFIX.md` with exactly 
 <numbered, binary, each independently verifiable>
 
 ## Learning
-| Bug | Root cause | Prevention |
-|---|---|---|
-| <one line> | <one line> | <one line> |
+- Root cause class: <one line>
+- Convention: <one imperative bullet> | `none — <reason>`
 ```
 
 Rules for `author`:
 
-- The **Learning** table is written in English, always — it is copied verbatim into an agent file. Everything else follows the surrounding project's language.
+- The **Learning** section is written in English, always — the convention bullet is copied verbatim into a rule file. Everything else follows the surrounding project's language.
 - `reproduced: no` → the `[NAO REPRODUZIDO]` banner is mandatory, and **Red output** says `nao reproduzido` instead of carrying invented output.
 - Never invent evidence. A section with nothing behind it says `nao disponivel` and explains why.
 - Re-authoring over an existing `BUGFIX.md` is an upsert: preserve sections the new investigation does not contradict.
