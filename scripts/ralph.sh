@@ -28,7 +28,9 @@
 #   --max-cycles N           ciclos de correcao por fase (default: 3)
 #   --no-verify              desliga o gate 3 (equivale a RALPH_VERIFY=off)
 #   --test-cmd "<cmd>"       comando de teste do projeto (gate 2)
-#   --dashboard              painel ao vivo no terminal (requer ralph-watch.sh
+#   --ui-shot-cmd "<cmd>"    comando de captura da evidencia visual (gate 3)
+#   --no-ui-verify           desliga a evidencia visual (RALPH_UI_VERIFY=off)
+#   --dashboard             painel ao vivo no terminal (requer ralph-watch.sh
 #                            ao lado deste script); os logs vao para
 #                            .phases/logs/ralph.log
 #
@@ -68,6 +70,17 @@
 #      claude o verificador usa um modelo barato (RALPH_VERIFY_MODEL, default:
 #      sonnet) — e leitura + checklist.
 #
+# Evidencia visual (gate 3): task com o campo
+#     Tela: <rota> | <seletores CSS, separados por virgula> | <alvo> | <tema>
+# (alvo e tema opcionais; alvo citado precisa existir — PNG ou artboard HTML)
+# e fotografada PELO ralph antes do verificador, em desktop e mobile:
+#     <cmd> <rota> <out.png> <seletores> <tema>   (env RALPH_UI_VIEWPORT)
+# em .phases/evidence/<fase>/task-<n>[-mobile].png. O verificador abre os PNGs
+# e compara com o alvo. Comando: --ui-shot-cmd / RALPH_UI_SHOT_CMD, senao
+# scripts/ralph-ui-shot.{mjs,js,sh,py} do repo. Fail-closed: fase com `Tela:`
+# sem comando, captura com exit != 0 ou PNG vazio => gate 3 vermelho.
+# RALPH_VERIFY=auto nunca pula o gate 3 numa fase com `Tela:`.
+#
 # Gates verdes com a arvore limpa => a fase ja estava implementada em HEAD:
 # marcada como feita, sem commit (nao ha o que commitar).
 #
@@ -92,6 +105,9 @@
 #   RALPH_TEST_CMD           comando de teste (gate 2); --test-cmd tem prioridade
 #   RALPH_VERIFY             gate 3: always (default) | auto | off
 #   RALPH_VERIFY_MODEL       modelo do verificador (default: sonnet no claude)
+#   RALPH_UI_VERIFY          evidencia visual: on (default) | off
+#   RALPH_UI_SHOT_CMD        comando de captura; --ui-shot-cmd tem prioridade
+#   RALPH_UI_SHOT_TIMEOUT    segundos por captura (default: 120)
 #   RALPH_MAX_CYCLES         ciclos de correcao por fase (default: 3)
 #   RALPH_MAX_LIMIT_WAITS    esperas consecutivas por limite, por fase (default: 20)
 #   RALPH_LIMIT_WAIT_DEFAULT fallback de espera em segundos (default: 1800)
@@ -149,6 +165,8 @@ TEST_CMD_FLAG=""
 MAX_CYCLES="${RALPH_MAX_CYCLES:-3}"
 VERIFY_MODE="${RALPH_VERIFY:-always}"
 VERIFY_MODEL=""
+UI_VERIFY_MODE="${RALPH_UI_VERIFY:-on}"
+UI_SHOT_CMD="${RALPH_UI_SHOT_CMD:-}"
 DASHBOARD=false
 
 while [[ $# -gt 0 ]]; do
@@ -163,8 +181,11 @@ while [[ $# -gt 0 ]]; do
     --test-cmd=*)  TEST_CMD_FLAG="${1#*=}"; shift ;;
     --keep-going)  KEEP_GOING=true; shift ;;
     --no-verify)   VERIFY_MODE="off"; shift ;;
+    --no-ui-verify) UI_VERIFY_MODE="off"; shift ;;
+    --ui-shot-cmd) UI_SHOT_CMD="$2"; shift 2 ;;
+    --ui-shot-cmd=*) UI_SHOT_CMD="${1#*=}"; shift ;;
     --dashboard)   DASHBOARD=true; shift ;;
-    -h|--help)     sed -n '2,82p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '2,95p' "$0"; exit 0 ;;
     *)             INPUT_FILE="$1"; shift ;;
   esac
 done
@@ -178,6 +199,11 @@ PROGRESS_FILE="$PHASES_DIR/.progress"
 RUN_STATE="$STATE_DIR/run.tsv"
 LIVE_STATE="$STATE_DIR/live.tsv"
 RALPH_LOG="$LOG_DIR/ralph.log"
+EVIDENCE_DIR=".phases/evidence"
+UI_SHOT_TIMEOUT="${RALPH_UI_SHOT_TIMEOUT:-120}"
+# Tasks `Tela:` da fase em julgamento (pos|rota|seletores|alvo|tema), ja
+# fotografadas: insumo da secao de evidencia do prompt do verificador.
+UI_SCREEN_TASKS=""
 
 MAX_LIMIT_WAITS="${RALPH_MAX_LIMIT_WAITS:-20}"
 LIMIT_WAIT_DEFAULT="${RALPH_LIMIT_WAIT_DEFAULT:-1800}"
@@ -494,6 +520,14 @@ preflight_checks() {
     auto|always|off) ;;
     *)
       fail "Valor invalido para RALPH_VERIFY: '$VERIFY_MODE'. Use auto, always ou off."
+      exit 1
+      ;;
+  esac
+
+  case "$UI_VERIFY_MODE" in
+    on|off) ;;
+    *)
+      fail "Valor invalido para RALPH_UI_VERIFY: '$UI_VERIFY_MODE'. Use on ou off."
       exit 1
       ;;
   esac
@@ -1297,6 +1331,7 @@ Execucao (headless — leia com atencao):
 ## Fase a verificar
 VERIFY
     cat "$PHASES_DIR/$phase_file"
+    [ -z "$UI_SCREEN_TASKS" ] || ui_evidence_block "$phase_file"
   } > "$prompt_file"
 
   echo "$prompt_file"
@@ -1598,6 +1633,114 @@ gate2_tests_pass() {
 # GATE3_RAN diz ao caminho "ja implementada" quais gates de fato validaram HEAD.
 GATE3_RAN=0
 
+# Tasks com campo `Tela:` da fase, uma por linha: pos|rota|seletores|alvo|tema.
+# A posicao e o indice do checkbox (a partir de 1), o mesmo do verificador.
+phase_screen_tasks() {
+  awk '
+    /^[[:space:]]*- \[[ x]\]/ { pos++; next }
+    pos > 0 && /^[[:space:]]*(- )?(\*\*)?Tela(\*\*)?[[:space:]]*:/ {
+      line = $0
+      sub(/^[[:space:]]*(- )?(\*\*)?Tela(\*\*)?[[:space:]]*:(\*\*)?[[:space:]]*/, "", line)
+      gsub(/`/, "", line)
+      n = split(line, f, /[[:space:]]*\|[[:space:]]*/)
+      for (i = 1; i <= 4; i++) { if (i > n) f[i] = ""; gsub(/^[[:space:]]+|[[:space:]]+$/, "", f[i]) }
+      print pos "|" f[1] "|" f[2] "|" f[3] "|" f[4]
+    }
+  ' "$PHASES_DIR/$1"
+}
+
+# Comando de captura por convencao do repo. Vazio quando nao ha script.
+detect_ui_shot_cmd() {
+  local f
+  for f in scripts/ralph-ui-shot.mjs scripts/ralph-ui-shot.js; do
+    [ -f "$f" ] && { printf 'node %s' "$f"; return 0; }
+  done
+  [ -f scripts/ralph-ui-shot.sh ] && { printf 'bash scripts/ralph-ui-shot.sh'; return 0; }
+  [ -f scripts/ralph-ui-shot.py ] && { printf 'python3 scripts/ralph-ui-shot.py'; return 0; }
+  return 0
+}
+
+# Evidencia visual do gate 3: o ralph fotografa cada task `Tela:` ANTES do
+# verificador julgar. A prova nasce fora da sessao do engine, como a suite do
+# gate 2. Fail-closed: fase com `Tela:` sem comando de captura reprova, salvo
+# --no-ui-verify explicito. Retorna 1 com GATE_CAUSE quando nao ha prova.
+gate3_capture_ui_evidence() {
+  local phase_file="$1"
+  UI_SCREEN_TASKS="$(phase_screen_tasks "$phase_file")"
+  [ -n "$UI_SCREEN_TASKS" ] || return 0
+
+  local count
+  count=$(printf '%s\n' "$UI_SCREEN_TASKS" | grep -c .)
+
+  if [ "$UI_VERIFY_MODE" = "off" ]; then
+    warn "Evidencia visual DESLIGADA (--no-ui-verify): $count task(s) com 'Tela:' julgadas so pelo codigo"
+    UI_SCREEN_TASKS=""
+    return 0
+  fi
+  if [ -z "$UI_SHOT_CMD" ]; then
+    UI_SHOT_CMD="$(detect_ui_shot_cmd)"
+    [ -n "$UI_SHOT_CMD" ] && log "Evidencia visual — comando de captura detectado: $UI_SHOT_CMD"
+  fi
+  if [ -z "$UI_SHOT_CMD" ]; then
+    GATE_CAUSE="A fase tem $count task(s) com campo 'Tela:' e nenhum comando de captura (RALPH_UI_SHOT_CMD / --ui-shot-cmd) nem script scripts/ralph-ui-shot.{mjs,js,sh,py} no repo. Sem a foto da rota nao ha prova visual e o gate 3 nao aceita DONE. Configure o comando ou desligue de proposito com --no-ui-verify."
+    return 1
+  fi
+
+  local dir="$EVIDENCE_DIR/${phase_file%.md}"
+  mkdir -p "$dir"
+  log "Evidencia visual — fotografando $count tela(s) via: $UI_SHOT_CMD"
+
+  local pos route sel target theme viewport suffix out shot_log rc
+  while IFS='|' read -r pos route sel target theme; do
+    if [ -z "$route" ] || [ -z "$sel" ]; then
+      GATE_CAUSE="Task $pos: campo 'Tela:' malformado — esperado 'Tela: <rota> | <seletores CSS> | <alvo> | <tema>' (rota e seletores obrigatorios)."
+      return 1
+    fi
+    if [ -n "$target" ] && [ ! -f "$target" ]; then
+      GATE_CAUSE="Task $pos: o alvo '$target' citado em 'Tela:' nao existe. Exporte o artboard (PNG ou HTML) antes de rodar a fase."
+      return 1
+    fi
+    # Desktop e mobile: quebra de layout em tela estreita nao aparece na larga.
+    for viewport in desktop mobile; do
+      suffix=""
+      [ "$viewport" = "mobile" ] && suffix="-mobile"
+      out="$dir/task-${pos}${suffix}.png"
+      shot_log="$dir/task-${pos}${suffix}.shot.log"
+      rm -f "$out"
+      rc=0
+      RALPH_UI_VIEWPORT="$viewport" timeout -k 5 "$UI_SHOT_TIMEOUT" bash -c "$UI_SHOT_CMD \"\$@\"" _ \
+        "$route" "$out" "$sel" "$theme" < /dev/null > "$shot_log" 2>&1 || rc=$?
+      if [ "$rc" -ne 0 ] || [ ! -s "$out" ]; then
+        GATE_CAUSE="Evidencia visual da task $pos falhou (rota '$route', seletores '$sel', viewport $viewport, exit $rc): a pagina nao renderizou, um seletor obrigatorio nao existe ou o PNG saiu vazio. Saida da captura ($shot_log):"$'\n'"$(tail -n 40 "$shot_log" 2> /dev/null)"
+        return 1
+      fi
+      log "  task $pos — $route${theme:+ ($theme)} [$viewport] -> $out"
+    done
+  done <<< "$UI_SCREEN_TASKS"
+}
+
+# Secao do prompt do verificador com os PNGs de cada task `Tela:`.
+ui_evidence_block() {
+  local dir="$EVIDENCE_DIR/${1%.md}" pos route sel target theme
+  cat <<'UIBLOCK'
+
+## Evidencia visual (fotografada pelo ralph, fora da sessao do engine)
+
+Para cada task abaixo, abra CADA PNG com a ferramenta Read (ela exibe imagens).
+Se houver alvo, abra-o tambem (imagem: Read; artboard HTML: leia o fonte) e
+compare layout, estrutura e tokens visuais (cores, tipografia, espacamento).
+A task e INCOMPLETE, com o motivo, quando: a pagina aparece sem estilo; falta
+uma secao exigida pela task ou pelo alvo; ha estado vazio onde a task exige
+dados; ou a tela diverge claramente do alvo. Codigo certo com tela quebrada e
+INCOMPLETE.
+
+UIBLOCK
+  while IFS='|' read -r pos route sel target theme; do
+    printf -- '- Task %s (rota %s%s): %s/task-%s.png, %s/task-%s-mobile.png — alvo: %s\n' \
+      "$pos" "$route" "${theme:+, tema $theme}" "$dir" "$pos" "$dir" "$pos" "${target:-nenhum (julgue pela task)}"
+  done <<< "$UI_SCREEN_TASKS"
+}
+
 gate3_independent_verify() {
   local phase_file="$1" cycle="$2" session_wrote="$3"
   local verify_log="$LOG_DIR/${phase_file%.md}.verify-${cycle}.log"
@@ -1607,10 +1750,13 @@ gate3_independent_verify() {
   case "$VERIFY_MODE" in
     off)
       log "Gate 3 pulado (--no-verify)"
+      [ -z "$(phase_screen_tasks "$phase_file")" ] || warn "Evidencia visual nao capturada: o gate 3 esta desligado"
       return 0
       ;;
     auto)
-      if [ "$cycle" -eq 1 ] && [ "$session_wrote" -eq 1 ] && [ -n "$TEST_CMD" ]; then
+      # Tela nao se prova pela suite: fase com `Tela:` sempre passa pelo gate 3.
+      if [ "$cycle" -eq 1 ] && [ "$session_wrote" -eq 1 ] && [ -n "$TEST_CMD" ] \
+        && [ -z "$(phase_screen_tasks "$phase_file")" ]; then
         log "Gate 3 pulado: a sessao escreveu codigo e a suite passou (RALPH_VERIFY=always para rodar sempre)"
         return 0
       fi
@@ -1626,6 +1772,7 @@ gate3_independent_verify() {
   fi
 
   GATE3_RAN=1
+  gate3_capture_ui_evidence "$phase_file" || return 1
   log "Gate 3 — sessao verificadora independente ($expected tasks${VERIFY_MODEL:+, modelo: $VERIFY_MODEL})"
 
   local prompt_file

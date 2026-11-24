@@ -376,6 +376,7 @@ run_ralph() {
     # RALPH_NOTIFY_CMD idem, e pior: um adaptador real exportado no shell
     # mandaria notificacao de verdade a cada caso. So CASE_NOTIFY_CMD liga.
     env -u RALPH_TEST_CMD -u RALPH_MAX_CYCLES -u RALPH_MAX_LIMIT_WAITS \
+      -u RALPH_UI_SHOT_CMD -u RALPH_UI_VERIFY \
     PATH="$dir/bin:$PATH" \
     MOCK_STATE="$dir/state" \
     MOCK_SCENARIO="$scenario" \
@@ -1694,6 +1695,114 @@ CURL
   env -i PATH="$tg/bin:$PATH" HOME="$tg" RALPH_NOTIFY_ENV_FILE="$tg/nao-existe.env" \
     bash "$telegram" phase_done 'x' > /dev/null 2>&1 || rc=$?
   assert_eq 0 "$rc" "sem credencial: exit 0"
+fi
+
+# ---------------------------------------------------------------------------
+# 44. Evidencia visual (Tela:) — o ralph fotografa a rota antes do gate 3.
+#     Captura fake: grava os argumentos e escreve um PNG; MOCK_SHOT_FAIL=1 sai 1.
+# ---------------------------------------------------------------------------
+
+# ui_case <nome> <alvo> [auto] -> fixture com `Tela:` na task 1 da fase 1.
+# auto: o script de captura vai para scripts/ralph-ui-shot.sh (deteccao).
+ui_case() {
+  local name="$1" target="$2" auto="${3:-}" d
+  d=$(new_case "$name")
+  cat > "$d/shot.sh" <<'SHOT'
+#!/usr/bin/env bash
+echo "${RALPH_UI_VIEWPORT:-}|$1|$2|$3|$4" >> "$MOCK_STATE/shot_calls"
+if [ "${MOCK_SHOT_FAIL:-0}" = 1 ]; then echo "seletor .kpi nao encontrado"; exit 1; fi
+printf 'PNG' > "$2"
+SHOT
+  chmod +x "$d/shot.sh"
+  (
+    cd "$d/repo" || exit 1
+    mkdir -p design
+    printf '<html></html>' > design/dashboard.html
+    if [ -n "$auto" ]; then mkdir -p scripts && cp "$d/shot.sh" scripts/ralph-ui-shot.sh; fi
+    cat > .spec/init/project-phases.md <<PHASES
+# UI — Project Phases
+
+## Phase 1: Dashboard
+
+- [ ] **Task:** cria o dashboard
+  - Tela: \`/dashboard\` | \`.kpi, .chart\` | $target | dark
+  - **Acceptance criteria:**
+    - a tela existe
+- [ ] **Task:** cria o arquivo B
+  - **Acceptance criteria:**
+    - o arquivo existe
+
+## Phase 2: Feature
+
+- [ ] **Task:** cria o arquivo C
+PHASES
+    git add -A && git commit -q -m "chore: fixture ui"
+  )
+  echo "$d"
+}
+
+if case_enabled ui-evidence; then
+  header "44a. Tela: + captura detectada no repo -> PNGs e prompt do verificador"
+  d=$(ui_case ui-evidence design/dashboard.html auto)
+  rc=$(CASE_VERIFY=auto run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  ev="$d/repo/.phases/evidence/phase-01"
+  test -s "$ev/task-1.png" && test -s "$ev/task-1-mobile.png" \
+    && ok "PNGs desktop e mobile gravados" || bad "PNGs desktop e mobile gravados"
+  assert_contains "$d/state/shot_calls" "desktop|/dashboard|.phases/evidence/phase-01/task-1.png|.kpi, .chart|dark" "captura recebe rota, saida, seletores e tema"
+  assert_contains "$d/state/shot_calls" "mobile|/dashboard|.phases/evidence/phase-01/task-1-mobile.png" "segunda captura em mobile"
+  vp="$d/repo/.phases/prompts/phase-01.verify-1.txt"
+  assert_contains "$vp" ".phases/evidence/phase-01/task-1.png" "prompt do verificador cita o PNG desktop"
+  assert_contains "$vp" ".phases/evidence/phase-01/task-1-mobile.png" "prompt do verificador cita o PNG mobile"
+  assert_contains "$vp" "alvo: design/dashboard.html" "prompt do verificador cita o alvo"
+  assert_not_contains "$d/repo/.phases/prompts/phase-02.verify-1.txt" "Evidencia visual" "fase sem Tela: -> prompt inalterado"
+  assert_eq 1 "$(cat "$d/state/verify_calls")" "auto: fase com Tela: nao pula o gate 3 (a sem Tela: pula)"
+fi
+
+if case_enabled ui-shot-fail; then
+  header "44b. captura sai 1 -> gate 3 vermelho citando a task"
+  d=$(ui_case ui-shot-fail "")
+  rc=$(MOCK_SHOT_FAIL=1 run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --max-cycles 2 --ui-shot-cmd "$d/shot.sh")
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "Gate 3 vermelho" "gate 3 reprovou"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-2.txt" "Evidencia visual da task 1 falhou" "causa cita a task"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-2.txt" "seletor .kpi nao encontrado" "causa traz o fim do log da captura"
+  # 2 = os dois commits de fixture (new_case + ui_case): nenhuma fase commitada
+  assert_eq 2 "$(commits "$d")" "nenhuma fase commitada"
+fi
+
+if case_enabled ui-no-cmd; then
+  header "44c. Tela: sem comando de captura -> fail-closed"
+  d=$(ui_case ui-no-cmd "")
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --max-cycles 2)
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "Gate 3 vermelho" "gate 3 reprovou sem prova visual"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-2.txt" "nenhum comando de captura" "causa explica a falta do comando"
+  test -f "$d/state/verify_calls" && bad "verificador nao roda sem prova" || ok "verificador nao roda sem prova"
+fi
+
+if case_enabled ui-off; then
+  header "44d. --no-ui-verify / --no-verify -> passa sem captura"
+  d=$(ui_case ui-off "")
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --no-ui-verify)
+  assert_eq 0 "$rc" "--no-ui-verify: exit 0"
+  assert_contains "$d/out.log" "Evidencia visual DESLIGADA" "aviso de evidencia desligada"
+  test -f "$d/state/shot_calls" && bad "--no-ui-verify: sem captura" || ok "--no-ui-verify: sem captura"
+  d=$(ui_case ui-off-gate3 "")
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --no-verify --ui-shot-cmd "$d/shot.sh")
+  assert_eq 0 "$rc" "--no-verify: exit 0"
+  assert_contains "$d/out.log" "Evidencia visual nao capturada: o gate 3 esta desligado" "gate 3 off registra a captura pulada"
+  test -f "$d/state/shot_calls" && bad "--no-verify: sem captura" || ok "--no-verify: sem captura"
+fi
+
+if case_enabled ui-missing-target; then
+  header "44e. alvo citado em Tela: nao existe -> gate 3 vermelho"
+  d=$(ui_case ui-missing-target design/nao-existe.png)
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --max-cycles 2 --ui-shot-cmd "$d/shot.sh")
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "Gate 3 vermelho" "gate 3 reprovou"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-2.txt" "o alvo 'design/nao-existe.png' citado em 'Tela:' nao existe" "causa cita o alvo ausente"
+  test -f "$d/state/shot_calls" && bad "alvo ausente: nao fotografa" || ok "alvo ausente: nao fotografa"
 fi
 
 # ---------------------------------------------------------------------------
