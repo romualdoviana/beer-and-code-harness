@@ -1690,8 +1690,10 @@ gate3_capture_ui_evidence() {
   mkdir -p "$dir"
   log "Evidencia visual — fotografando $count tela(s) via: $UI_SHOT_CMD"
 
-  local pos route sel target theme viewport suffix out shot_log rc
+  local pos route sel target theme viewport suffix out shot_log rc stem
+  local -A ui_seen=()
   while IFS='|' read -r pos route sel target theme; do
+    ui_shot_stem "$pos" ui_seen; stem="$UI_STEM"
     if [ -z "$route" ] || [ -z "$sel" ]; then
       GATE_CAUSE="Task $pos: campo 'Tela:' malformado — esperado 'Tela: <rota> | <seletores CSS> | <alvo> | <tema>' (rota e seletores obrigatorios)."
       return 1
@@ -1704,8 +1706,8 @@ gate3_capture_ui_evidence() {
     for viewport in desktop mobile; do
       suffix=""
       [ "$viewport" = "mobile" ] && suffix="-mobile"
-      out="$dir/task-${pos}${suffix}.png"
-      shot_log="$dir/task-${pos}${suffix}.shot.log"
+      out="$dir/${stem}${suffix}.png"
+      shot_log="$dir/${stem}${suffix}.shot.log"
       rm -f "$out"
       rc=0
       RALPH_UI_VIEWPORT="$viewport" timeout -k 5 "$UI_SHOT_TIMEOUT" bash -c "$UI_SHOT_CMD \"\$@\"" _ \
@@ -1719,9 +1721,22 @@ gate3_capture_ui_evidence() {
   done <<< "$UI_SCREEN_TASKS"
 }
 
+# Nome base das fotos de uma linha `Tela:`. A 1a linha da task e `task-<n>`; as
+# seguintes da MESMA task viram `task-<n>-2`, `task-<n>-3`... Sem isso, task com
+# varias telas sobrescrevia a foto e o verificador so via a ultima.
+# Uso: ui_shot_stem <pos> <nome do array associativo de contagem>; resultado em
+# UI_STEM (nao em $(...): o subshell perderia a contagem).
+ui_shot_stem() {
+  local -n seen_ref="$2"
+  local k=$(( ${seen_ref[$1]:-0} + 1 ))
+  seen_ref[$1]=$k
+  if [ "$k" -eq 1 ]; then UI_STEM="task-$1"; else UI_STEM="task-$1-$k"; fi
+}
+
 # Secao do prompt do verificador com os PNGs de cada task `Tela:`.
 ui_evidence_block() {
-  local dir="$EVIDENCE_DIR/${1%.md}" pos route sel target theme
+  local dir="$EVIDENCE_DIR/${1%.md}" pos route sel target theme stem
+  local -A ui_seen=()
   cat <<'UIBLOCK'
 
 ## Evidencia visual (fotografada pelo ralph, fora da sessao do engine)
@@ -1736,8 +1751,9 @@ INCOMPLETE.
 
 UIBLOCK
   while IFS='|' read -r pos route sel target theme; do
-    printf -- '- Task %s (rota %s%s): %s/task-%s.png, %s/task-%s-mobile.png — alvo: %s\n' \
-      "$pos" "$route" "${theme:+, tema $theme}" "$dir" "$pos" "$dir" "$pos" "${target:-nenhum (julgue pela task)}"
+    ui_shot_stem "$pos" ui_seen; stem="$UI_STEM"
+    printf -- '- Task %s (rota %s%s): %s/%s.png, %s/%s-mobile.png — alvo: %s\n' \
+      "$pos" "$route" "${theme:+, tema $theme}" "$dir" "$stem" "$dir" "$stem" "${target:-nenhum (julgue pela task)}"
   done <<< "$UI_SCREEN_TASKS"
 }
 

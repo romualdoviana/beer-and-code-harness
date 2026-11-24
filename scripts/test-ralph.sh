@@ -1705,7 +1705,7 @@ fi
 # ui_case <nome> <alvo> [auto] -> fixture com `Tela:` na task 1 da fase 1.
 # auto: o script de captura vai para scripts/ralph-ui-shot.sh (deteccao).
 ui_case() {
-  local name="$1" target="$2" auto="${3:-}" d
+  local name="$1" target="$2" auto="${3:-}" extra_tela="${4:-}" d
   d=$(new_case "$name")
   cat > "$d/shot.sh" <<'SHOT'
 #!/usr/bin/env bash
@@ -1726,6 +1726,7 @@ SHOT
 
 - [ ] **Task:** cria o dashboard
   - Tela: \`/dashboard\` | \`.kpi, .chart\` | $target | dark
+$extra_tela
   - **Acceptance criteria:**
     - a tela existe
 - [ ] **Task:** cria o arquivo B
@@ -1757,6 +1758,20 @@ if case_enabled ui-evidence; then
   assert_contains "$vp" "alvo: design/dashboard.html" "prompt do verificador cita o alvo"
   assert_not_contains "$d/repo/.phases/prompts/phase-02.verify-1.txt" "Evidencia visual" "fase sem Tela: -> prompt inalterado"
   assert_eq 1 "$(cat "$d/state/verify_calls")" "auto: fase com Tela: nao pula o gate 3 (a sem Tela: pula)"
+fi
+
+if case_enabled ui-multi-tela; then
+  header "44f. task com 2 linhas Tela: -> 2 fotos distintas, ambas no prompt"
+  d=$(ui_case ui-multi-tela "" auto "  - Tela: \`/relatorio\` | \`.table\` |  | dark")
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  ev="$d/repo/.phases/evidence/phase-01"
+  test -s "$ev/task-1.png" && test -s "$ev/task-1-2.png" && test -s "$ev/task-1-2-mobile.png" \
+    && ok "segunda tela da mesma task nao sobrescreve a primeira" || bad "segunda tela da mesma task nao sobrescreve a primeira"
+  assert_contains "$d/state/shot_calls" "desktop|/relatorio|.phases/evidence/phase-01/task-1-2.png" "captura da 2a tela grava task-1-2"
+  vp="$d/repo/.phases/prompts/phase-01.verify-1.txt"
+  assert_contains "$vp" ".phases/evidence/phase-01/task-1.png" "prompt cita a 1a foto"
+  assert_contains "$vp" ".phases/evidence/phase-01/task-1-2.png" "prompt cita a 2a foto"
 fi
 
 if case_enabled ui-shot-fail; then
